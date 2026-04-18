@@ -4,9 +4,9 @@
 //! encode path. Even if a source contains an embedded thumbnail, we still run
 //! it through post-processing so no output pixel bypasses the pipeline.
 
-use image::codecs::jpeg::JpegEncoder;
 use image::imageops::{FilterType, crop_imm, resize};
 use image::{DynamicImage, ImageDecoder, ImageReader, Rgba, RgbaImage, metadata::Orientation};
+use mozjpeg::{ColorSpace, Compress, Marker};
 use reqwest::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_TYPE, ETAG, LAST_MODIFIED};
 use serde::Serialize;
 use std::io::Cursor;
@@ -20,6 +20,7 @@ pub struct RenderInfo {
     pub input_width: u32,
     pub input_height: u32,
     pub source_orientation: String,
+    pub upscaled: bool,
     pub output_width: u32,
     pub output_height: u32,
     pub output_quality: u8,
@@ -64,17 +65,22 @@ pub fn render_thumbnail_from_bytes(bytes: &[u8], profile: &ThumbnailProfile) -> 
     let input_height = img.height();
 
     let mut buf = ProcessBuffer::new(img);
-    buf.apply_color_pipeline();
-    buf.fill_crop(profile.width, profile.height);
+    let upscaled = buf.fill_crop(profile.width, profile.height);
+    buf.apply_color_pipeline(upscaled);
 
-    let thumb = buf.encode_jpeg(profile.quality, profile.background)?;
+    // Upscaled sources often have blocky low-detail content (sprites/icons).
+    // A lower JPEG quality keeps output size bounded for those cases.
+    let effective_quality = if upscaled { 15 } else { profile.quality };
+
+    let thumb = buf.encode_jpeg(effective_quality, profile.background)?;
     let info = RenderInfo {
         input_width,
         input_height,
         source_orientation: orientation_name(orientation).to_string(),
+        upscaled,
         output_width: profile.width,
         output_height: profile.height,
-        output_quality: profile.quality,
+        output_quality: effective_quality,
     };
 
     Ok((thumb, info))
@@ -222,50 +228,149 @@ impl ProcessBuffer {
     }
 
     /// Placeholder for future color and filtering passes.
-    fn apply_color_pipeline(&mut self) {
-        // Intentionally no-op for milestone 1. All images still traverse this
-        // stage so future filters can be inserted without changing control flow.
+    fn apply_color_pipeline(&mut self, upscaled: bool) {
+        // Downscaled images benefit from a mild unsharp pass to recover edge
+        // definition lost during resize.
+        if !upscaled {
+            self.img = self.img.unsharpen(0.85, 2);
+        }
+
+        let strength = if upscaled { 0.15 } else { 0.25 };
+        self.apply_soft_vignette(strength, 0.62, 1.25);
+    }
+
+    /// Apply a soft dark vignette around the edges.
+    ///
+    /// Parameters:
+    /// - `strength`: max darkening near the far edges, in 0..1.
+    /// - `inner`: radius where darkening begins (normalized ellipse radius).
+    /// - `outer`: radius where full vignette strength is reached.
+    fn apply_soft_vignette(&mut self, strength: f32, inner: f32, outer: f32) {
+        let mut rgba = self.img.to_rgba8();
+        let (w, h) = rgba.dimensions();
+        if w < 2 || h < 2 {
+            self.img = DynamicImage::ImageRgba8(rgba);
+            return;
+        }
+
+        let cx = (w as f32 - 1.0) * 0.5;
+        let cy = (h as f32 - 1.0) * 0.5;
+        let rx = cx.max(1.0);
+        let ry = cy.max(1.0);
+        let inv_span = 1.0 / (outer - inner).max(1e-6);
+
+        for y in 0..h {
+            for x in 0..w {
+                let dx = (x as f32 - cx) / rx;
+                let dy = (y as f32 - cy) / ry;
+                let r = (dx * dx + dy * dy).sqrt();
+
+                let t = ((r - inner) * inv_span).clamp(0.0, 1.0);
+                let smooth = t * t * (3.0 - 2.0 * t);
+
+                // Luminance-adaptive vignette:
+                // - bright pixels get a little relief (less darkening)
+                // - dark pixels get more edge emphasis (more darkening)
+                let lum = rgb_luma(*rgba.get_pixel(x, y));
+                let shadow_boost = (1.0 - lum).powf(1.25);
+                let highlight_relief = lum.powf(1.10);
+                let adaptive_strength = (strength * (1.0 + 0.45 * shadow_boost - 0.35 * highlight_relief))
+                    .clamp(0.0, 0.95);
+
+                let weight = 1.0 - adaptive_strength * smooth;
+
+                let p = rgba.get_pixel_mut(x, y);
+                p[0] = ((p[0] as f32 * weight).round()).clamp(0.0, 255.0) as u8;
+                p[1] = ((p[1] as f32 * weight).round()).clamp(0.0, 255.0) as u8;
+                p[2] = ((p[2] as f32 * weight).round()).clamp(0.0, 255.0) as u8;
+            }
+        }
+
+        self.img = DynamicImage::ImageRgba8(rgba);
     }
 
     /// Scale and center-crop to fill the target aspect ratio.
-    fn fill_crop(&mut self, target_w: u32, target_h: u32) {
+    ///
+    /// Returns whether the operation upscaled the source.
+    fn fill_crop(&mut self, target_w: u32, target_h: u32) -> bool {
         let src = self.img.to_rgba8();
         let (src_w, src_h) = src.dimensions();
 
         if src_w == 0 || src_h == 0 || target_w == 0 || target_h == 0 {
             self.img = DynamicImage::ImageRgba8(RgbaImage::new(target_w.max(1), target_h.max(1)));
-            return;
+            return false;
         }
 
-        let scale_w = target_w as f32 / src_w as f32;
-        let scale_h = target_h as f32 / src_h as f32;
+        // Deliberately overscale by 10% before cropping so we keep a bit more
+        // zoom than exact fill and avoid edge-adjacent composition artifacts.
+        let overscale_w = ((target_w as f32) * 1.10).ceil() as u32;
+        let overscale_h = ((target_h as f32) * 1.10).ceil() as u32;
+
+        let scale_w = overscale_w as f32 / src_w as f32;
+        let scale_h = overscale_h as f32 / src_h as f32;
         let scale = scale_w.max(scale_h);
+        let upscaled = scale > 1.0;
 
         let new_w = ((src_w as f32) * scale).ceil() as u32;
         let new_h = ((src_h as f32) * scale).ceil() as u32;
 
-        let resized = resize(&src, new_w, new_h, FilterType::Lanczos3);
-        let x = (new_w.saturating_sub(target_w)) / 2;
-        let y = (new_h.saturating_sub(target_h)) / 2;
+        // Pixel art and low-res assets look better with nearest-neighbor when
+        // scaling up. Keep Lanczos for downscaling photographic sources.
+        let filter = if scale > 1.0 {
+            FilterType::Nearest
+        } else {
+            FilterType::Lanczos3
+        };
+        let resized = resize(&src, new_w, new_h, filter);
+        let extra_w = new_w.saturating_sub(target_w);
+        let extra_h = new_h.saturating_sub(target_h);
+
+        // Horizontal crop stays centered.
+        let x = extra_w / 2;
+        // Vertical crop is biased toward the top: start 25% into the extra height.
+        let y = (extra_h as f32 * 0.25).floor() as u32;
 
         let cropped = crop_imm(&resized, x, y, target_w, target_h).to_image();
         self.img = DynamicImage::ImageRgba8(cropped);
+        upscaled
     }
 
     fn encode_jpeg(&self, quality: u8, bg: [u8; 3]) -> Result<Vec<u8>, String> {
         let rgba = self.img.to_rgba8();
         let rgb = flatten_alpha(&rgba, bg);
-        let mut out = Vec::new();
-        let mut enc = JpegEncoder::new_with_quality(&mut out, quality);
-        enc.encode(
-            &rgb,
-            rgb.width(),
-            rgb.height(),
-            image::ExtendedColorType::Rgb8,
-        )
-        .map_err(|e| format!("jpeg encode failed: {e}"))?;
-        Ok(out)
+
+        let width = rgb.width() as usize;
+        let height = rgb.height() as usize;
+        let pixels = rgb.into_raw();
+
+        let mut enc = Compress::new(ColorSpace::JCS_RGB);
+        enc.set_size(width, height);
+        enc.set_quality(quality as f32);
+        enc.set_smoothing_factor(20);
+        // Force 4:2:0 chroma subsampling for smaller files.
+        enc.set_chroma_sampling_pixel_sizes((2, 2), (2, 2));
+        enc.set_optimize_coding(true);
+
+        let mut started = enc
+            .start_compress(Vec::new())
+            .map_err(|e| format!("jpeg start_compress failed: {e}"))?;
+
+        // Tiny vanity marker for generated thumbnails.
+        started.write_marker(Marker::COM, b"thumbrella");
+
+        started
+            .write_scanlines(&pixels)
+            .map_err(|e| format!("jpeg write_scanlines failed: {e}"))?;
+        started
+            .finish()
+            .map_err(|e| format!("jpeg finish failed: {e}"))
     }
+}
+
+#[inline]
+fn rgb_luma(p: Rgba<u8>) -> f32 {
+    // Rec. 709 luma weights.
+    (0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32) / 255.0
 }
 
 fn flatten_alpha(rgba: &RgbaImage, bg: [u8; 3]) -> image::RgbImage {
