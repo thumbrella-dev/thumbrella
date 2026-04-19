@@ -2,6 +2,6 @@
 resolver = "2"
 
 members = [
-    "crates/thumbrella-types",
     "crates/thumbrella-server",
+    "crates/thumbrella-tier2",
 ]

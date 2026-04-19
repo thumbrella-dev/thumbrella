@@ -1,15 +1,15 @@
-//! Development CLI for quick local thumbnail experiments.
+//! Development CLI for Tier 2 local thumbnail experiments.
 //!
 //! Usage:
-//!   cargo run -p thumbrella-server --bin thumbrella-dev -- <input-path> [output-path]
+//!   cargo run -p thumbrella-tier2 --bin thumbrella-tier2-dev -- <input-path> [output-path]
 
 use serde::Serialize;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
-use thumbrella_tier1::pipeline;
-use thumbrella_tier1::{SourceMetadata, ThumbnailProfile};
+use thumbrella_tier2::pipeline;
+use thumbrella_tier2::{SourceMetadata, ThumbnailProfile};
 
 #[derive(Debug, Serialize)]
 struct CliOutput {
@@ -106,6 +106,6 @@ fn default_output_path(input: &Path) -> PathBuf {
 
 fn usage(msg: &str) -> String {
     format!(
-        "{msg}\nusage: cargo run -p thumbrella-server --bin thumbrella-dev -- <input-path> [output-path]"
+        "{msg}\nusage: cargo run -p thumbrella-tier2 --bin thumbrella-tier2-dev -- <input-path> [output-path]"
     )
 }

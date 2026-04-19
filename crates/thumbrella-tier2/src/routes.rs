@@ -1,8 +1,8 @@
-//! HTTP route handlers.
+//! Tier 2 HTTP route handlers.
 
 use axum::{Json, http::StatusCode};
 use serde_json::{json, Value};
-use crate::{BatchRequest, BatchResponse, ThumbnailProfile};
+use thumbrella_tier1::{BatchRequest, BatchResponse, ThumbnailProfile};
 
 use crate::pipeline;
 
@@ -12,9 +12,6 @@ pub async fn health() -> Json<Value> {
 }
 
 /// POST /batch
-///
-/// Synchronous endpoint: waits for all items and returns a JSON array.
-/// Streaming (NDJSON / SSE) will be added once the pipeline iterator is solid.
 pub async fn batch(
     Json(req): Json<BatchRequest>,
 ) -> Result<Json<BatchResponse>, (StatusCode, Json<Value>)> {
