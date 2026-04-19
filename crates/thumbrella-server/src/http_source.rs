@@ -100,6 +100,37 @@ pub async fn fetch_full(url: &str) -> Result<(Vec<u8>, HashMap<String, String>),
 }
 
 #[cfg(feature = "native-http")]
+pub async fn fetch_range(url: &str, start: u64, end_inclusive: u64) -> Result<(Vec<u8>, HashMap<String, String>), String> {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err("only http and https URLs are supported".into());
+    }
+    if end_inclusive < start {
+        return Err("invalid range".into());
+    }
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(url)
+        .header(reqwest::header::RANGE, format!("bytes={start}-{end_inclusive}"))
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("upstream returned status {}", resp.status()));
+    }
+
+    let headers = flatten_headers(resp.headers());
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("failed to read response body: {e}"))?
+        .to_vec();
+
+    Ok((bytes, headers))
+}
+
+#[cfg(feature = "native-http")]
 fn flatten_headers(headers: &reqwest::header::HeaderMap) -> HashMap<String, String> {
     let mut out = HashMap::new();
     for (k, v) in headers {
@@ -117,5 +148,14 @@ pub async fn fetch_prefix(_url: &str, _max_bytes: usize) -> Result<PrefixDownloa
 
 #[cfg(feature = "worker-fetch")]
 pub async fn fetch_full(_url: &str) -> Result<(Vec<u8>, HashMap<String, String>), String> {
+    Err("worker-fetch backend is not implemented yet".into())
+}
+
+#[cfg(feature = "worker-fetch")]
+pub async fn fetch_range(
+    _url: &str,
+    _start: u64,
+    _end_inclusive: u64,
+) -> Result<(Vec<u8>, HashMap<String, String>), String> {
     Err("worker-fetch backend is not implemented yet".into())
 }
