@@ -19,7 +19,13 @@ pub struct ItemInputObject {
     pub id: Option<String>,
     /// Source URL.
     pub url: String,
-    /// Caller's previously seen ETag.
+    /// Caller's previously seen validator token.
+    ///
+    /// Encoding:
+    /// - `E<value>` => send `<value>` as `If-None-Match`
+    /// - `M<value>` => send `<value>` as `If-Modified-Since`
+    ///
+    /// Backward compatibility: values without a prefix are treated as `E...`.
     pub etag: Option<String>,
     /// What operations to perform for this item.
     #[serde(default)]
@@ -33,8 +39,13 @@ pub struct ItemRequest {
     pub id: Option<String>,
     /// The source to inspect or thumbnail.
     pub source: SourceRef,
-    /// Caller's previously seen ETag for this source. When provided, the
-    /// service can short-circuit to `not_modified` without a full fetch.
+    /// Caller's previously seen validator token for this source.
+    ///
+    /// Encoding:
+    /// - `E<value>` => send `<value>` as `If-None-Match`
+    /// - `M<value>` => send `<value>` as `If-Modified-Since`
+    ///
+    /// Values without a prefix are treated as `E...` for compatibility.
     pub etag: Option<String>,
     /// What operations to perform for this item.
     #[serde(default)]
@@ -42,7 +53,7 @@ pub struct ItemRequest {
 }
 
 /// Which outputs the caller wants for an item.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestedOps {
     /// Return structured file description.
     #[serde(default = "default_true")]
@@ -50,6 +61,12 @@ pub struct RequestedOps {
     /// Return a thumbnail image.
     #[serde(default = "default_true")]
     pub thumbnail: bool,
+}
+
+impl Default for RequestedOps {
+    fn default() -> Self {
+        Self { describe: true, thumbnail: true }
+    }
 }
 
 fn default_true() -> bool { true }

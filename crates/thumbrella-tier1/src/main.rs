@@ -17,6 +17,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/health", get(routes::health))
+        .route("/dev", get(routes::dev))
         .route("/batch", post(routes::batch));
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 8000));

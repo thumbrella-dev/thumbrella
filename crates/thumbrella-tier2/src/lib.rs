@@ -1,9 +1,9 @@
 //! Tier 2 pipeline surface.
 //!
-//! Tier 2 extends Tier 1 with additional source handlers (for example libav)
-//! while preserving Tier 1 behavior via fallback paths.
+//! Tier 2 provides libav-based decode handlers (HEIC, video, AVIF, EXR,
+//! attached picture).  All HTTP routing is handled by Tier 1; Tier 2 registers
+//! itself via `thumbrella_tier1::dispatch::register_tier2` at startup.
 
 pub mod pipeline;
-pub mod routes;
 
 pub use thumbrella_tier1::*;

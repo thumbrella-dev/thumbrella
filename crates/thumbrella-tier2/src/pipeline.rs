@@ -7,7 +7,7 @@ use ffmpeg_next as ffmpeg;
 use image::{DynamicImage, ImageBuffer, Rgb};
 use std::io::Write;
 use tempfile::NamedTempFile;
-use thumbrella_tier1::{ItemRequest, ItemResult, SourceMetadata, SourceRef, ThumbnailProfile};
+use thumbrella_tier1::{ItemRequest, ItemResult, SourceMetadata, SourceRef, ThumbnailProfile, ThumbnailRequestState};
 
 const TIER2_LIBAV_STILL_STRATEGY: &str = "tier2_libav_still";
 const TIER2_LIBAV_VIDEO_STRATEGY: &str = "tier2_libav_video";
@@ -31,13 +31,78 @@ pub fn render_thumbnail_from_bytes(bytes: &[u8], profile: &ThumbnailProfile) -> 
     thumbrella_tier1::pipeline::render_thumbnail_from_bytes(bytes, profile)
 }
 
-/// Process one item with Tier 2 handlers first and Tier 1 fallback.
-pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> ItemResult {
-    if let Some(result) = try_process_item_tier2(item, profile).await {
-        return result;
+/// Try to handle `item` using Tier 2 decode paths.
+///
+/// Returns `Some(result)` when the format is recognised as Tier 2 territory
+/// (HEIC, video, AVIF, EXR, attached picture).  Returns `None` for anything
+/// that Tier 1 can handle so the caller surfaces the original Tier 1 error.
+pub async fn try_process_item(
+    item: &ItemRequest,
+    profile: &ThumbnailProfile,
+    state: &ThumbnailRequestState,
+) -> Option<ItemResult> {
+    let url = source_url(&item.source)?;
+
+    // Fast gate from promoted state: if we already have a head window that is
+    // clearly a Tier1 format, skip Tier2 fetch/decode work.
+    let head = state.head_bytes();
+    if !head.is_empty() {
+        let tier2_candidate = is_tier2_still_format(head)
+            || looks_like_heic(head)
+            || looks_like_exr(head)
+            || looks_like_video(head);
+        if !tier2_candidate {
+            return None;
+        }
     }
 
-    thumbrella_tier1::pipeline::process_item(item, profile).await
+    let (bytes, headers) = match thumbrella_tier1::http_source::fetch_full(url).await {
+        Ok(v) => v,
+        Err(err) => {
+            return Some(ItemResult {
+                id: item.id.clone(),
+                url: Some(url.to_string()),
+                source_meta: None,
+                thumbnail: None,
+                media: None,
+                developer: None,
+                error: Some(err),
+                ..Default::default()
+            });
+        }
+    };
+
+    let meta = thumbrella_tier1::pipeline::metadata_from_local_bytes(
+        &bytes,
+        Some(bytes.len() as u64),
+        headers.get("last-modified").cloned(),
+    );
+
+    // Returns None if not a Tier 2 format — let Tier 1 surface its own error.
+    let render_result = try_render_tier2(&bytes, profile)?;
+
+    match render_result {
+        Ok((jpeg, _info)) => Some(ItemResult {
+            id: item.id.clone(),
+            url: Some(url.to_string()),
+            source_meta: Some(meta),
+            thumbnail: Some(jpeg),
+            media: None,
+            developer: None,
+            error: None,
+            ..Default::default()
+        }),
+        Err(err) => Some(ItemResult {
+            id: item.id.clone(),
+            url: Some(url.to_string()),
+            source_meta: Some(meta),
+            thumbnail: None,
+            media: None,
+            developer: None,
+            error: Some(err),
+            ..Default::default()
+        }),
+    }
 }
 
 fn try_render_tier2(bytes: &[u8], profile: &ThumbnailProfile) -> Option<Result<(Vec<u8>, RenderInfo), String>> {
@@ -85,13 +150,6 @@ fn try_render_tier2(bytes: &[u8], profile: &ThumbnailProfile) -> Option<Result<(
         Err(err) if explicitly_tier2 => Some(Err(err)),
         Err(_) => None,
     }
-}
-
-async fn try_process_item_tier2(item: &ItemRequest, _profile: &ThumbnailProfile) -> Option<ItemResult> {
-    // Placeholder for Tier 2 remote/source handlers. This keeps an explicit
-    // hook where Tier 2 can intercept supported source families first.
-    let _url = source_url(&item.source)?;
-    None
 }
 
 fn source_url(source: &SourceRef) -> Option<&str> {

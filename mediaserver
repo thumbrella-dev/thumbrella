@@ -1,0 +1,4 @@
+#!/bin/bash
+# Media server convenience script
+# Starts a simple HTTP server on port 8001 serving the media directory
+python -m http.server --directory media 8001

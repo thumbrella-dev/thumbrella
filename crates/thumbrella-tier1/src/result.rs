@@ -4,7 +4,51 @@
 //! them all; streaming endpoints forward each one as it arrives.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use crate::source::SourceMetadata;
+use crate::media::MediaMetadata;
+
+/// High-level outcome of processing a single batch item.
+///
+/// Matches the `job_status` field described in schema.md.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobStatus {
+    /// Thumbnail generated successfully this request.
+    Success,
+    /// Result returned from cache — no reprocessing was needed.
+    Cached,
+    /// Source unchanged since the caller's supplied ETag.
+    NotModified,
+    /// Processing failed; see the `error` field for details.
+    Failed,
+    /// Request accepted but deferred to a higher-tier worker.
+    Defer,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaLogData {
+    pub timestamp: String,
+    pub url: String,
+    pub thumbnail_size: u64,
+    pub job_data: u64,
+    pub job_strategy: Option<String>,
+    pub job_image_buffer_width: Option<u32>,
+    pub job_image_buffer_height: Option<u32>,
+    pub download_time_secs: f64,
+    pub process_time_secs: f64,
+    pub file_length: Option<u64>,
+    pub media_type: Option<crate::media::MediaType>,
+    pub extension: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeveloperData {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetch_headers: Option<HashMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_log: Option<MediaLogData>,
+}
 
 /// A single event emitted by the processing pipeline for one item.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19,13 +63,16 @@ pub enum ItemEvent {
     },
     /// Source is unchanged since the caller's supplied ETag — no thumbnail needed.
     NotModified { id: Option<String> },
-    /// Thumbnail generated (or retrieved from cache). Contains the JPEG bytes.
+    /// Thumbnail generated (or retrieved from cache). Contains the JPEG bytes and media metadata.
     Thumbnail {
         id: Option<String>,
         /// Base64-encoded JPEG bytes. Will be replaced by a streaming blob ref
         /// once the streaming endpoint is live.
         #[serde(with = "base64_bytes")]
         jpeg: Vec<u8>,
+        /// Decode strategy, dimensions, metrics, and warnings
+        #[serde(default)]
+        media: MediaMetadata,
     },
     /// This item could not be processed.
     Error {
@@ -38,6 +85,8 @@ pub enum ItemEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ItemResult {
     pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
     pub source_meta: Option<SourceMetadata>,
     /// Base64-encoded JPEG thumbnail, if one was produced.
     #[serde(
@@ -46,7 +95,38 @@ pub struct ItemResult {
         with = "option_base64_bytes"
     )]
     pub thumbnail: Option<Vec<u8>>,
+    /// Media metadata (strategy, metrics, properties, warnings)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<MediaMetadata>,
+    /// High-level media category (image, video, audio, document, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<crate::media::MediaType>,
+    /// Canonical file extension without dot (jpeg, png, pdf, mp4, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension: Option<String>,
+    /// Processing outcome for this item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_status: Option<JobStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub developer: Option<DeveloperData>,
     pub error: Option<String>,
+}
+
+impl Default for ItemResult {
+    fn default() -> Self {
+        Self {
+            id: None,
+            url: None,
+            source_meta: None,
+            thumbnail: None,
+            media: None,
+            media_type: None,
+            extension: None,
+            job_status: None,
+            developer: None,
+            error: None,
+        }
+    }
 }
 
 /// Response body for the synchronous batch endpoint.

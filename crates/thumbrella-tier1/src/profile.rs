@@ -16,8 +16,10 @@ pub struct ThumbnailProfile {
     pub height: u32,
     /// JPEG quality 1-100.
     pub quality: u8,
-    /// Background colour for alpha flattening (R, G, B).
-    pub background: [u8; 3],
+    /// JPEG quality used in pixel-art mode.
+    pub pixel_art_quality: u8,
+    /// Base vignette strength used by the color pipeline.
+    pub vignette_strength: f32,
 }
 
 impl Default for ThumbnailProfile {
@@ -27,7 +29,8 @@ impl Default for ThumbnailProfile {
             width: 250,
             height: 200,
             quality: 50,
-            background: [255, 255, 255],
+            pixel_art_quality: 15,
+            vignette_strength: 0.25,
         }
     }
 }

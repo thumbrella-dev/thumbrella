@@ -11,7 +11,9 @@ use serde::Serialize;
 use std::collections::{HashSet, VecDeque};
 use std::io::Cursor;
 use std::sync::OnceLock;
-use crate::{ItemRequest, ItemResult, SourceMetadata, SourceRef, ThumbnailProfile, http_source};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use crate::{app_config, DeveloperData, ItemRequest, ItemResult, JobStatus, MediaLogData, SourceMetadata, SourceRef, ThumbnailProfile, http_source};
+use crate::http_source::ConditionalRequest;
 use crate::ThumbnailRequestState;
 use zip::read::ZipArchive;
 
@@ -63,7 +65,7 @@ pub struct RenderInfo {
     pub decoded_width: u32,
     pub decoded_height: u32,
     pub source_orientation: String,
-    pub upscaled: bool,
+    pub pixel_art_mode: bool,
     pub output_width: u32,
     pub output_height: u32,
     pub output_quality: u8,
@@ -71,13 +73,19 @@ pub struct RenderInfo {
 
 /// Build source metadata for a local byte source.
 pub fn metadata_from_local_bytes(bytes: &[u8], content_length: Option<u64>, last_modified: Option<String>) -> SourceMetadata {
+    let magic_mime = infer::get(bytes).map(|k| k.mime_type().to_string());
+    let file_kind = crate::media::sniff_file_kind(bytes, None);
     SourceMetadata {
         content_type: None,
-        magic_mime: infer::get(bytes).map(|k| k.mime_type().to_string()),
+        magic_mime,
         content_length,
         etag: None,
         last_modified,
         accepts_ranges: false,
+        file_kind,
+        // Local files have no URL redirect chain or remote cache key.
+        canonical_url: None,
+        cache_key: None,
     }
 }
 
@@ -183,20 +191,26 @@ fn render_thumbnail_from_dynamic_image_with_options(
     let decoded_width = img.width();
     let decoded_height = img.height();
 
+    // Embedded JPEG thumbnails are photographic content — use Lanczos3 when
+    // upscaling them, not Nearest (which is only appropriate for pixel art).
+    let is_embedded = is_embedded_thumbnail_strategy(decode_strategy);
+
     let mut buf = ProcessBuffer::new(img);
-    let scaled_up = buf.fill_crop(profile.width, profile.height);
-    buf.composite_transparency_over_background(profile.background);
+    let scaled_up = buf.fill_crop(profile.width, profile.height, is_embedded);
+    buf.composite_transparency_over_background();
 
-    // Embedded EXIF thumbnails should not be penalized with the low-quality
-    // "upscaled" profile. Treat them as regular renders for filtering/effects.
-    let treat_as_upscaled = scaled_up && !is_embedded_thumbnail_strategy(decode_strategy);
-    buf.apply_color_pipeline(treat_as_upscaled);
+    // Embedded EXIF thumbnails should not be pushed into pixel-art mode.
+    let pixel_art_mode = scaled_up && !is_embedded;
+    buf.apply_color_pipeline(pixel_art_mode, profile.vignette_strength);
 
-    // Upscaled sources often have blocky low-detail content (sprites/icons).
-    // A lower JPEG quality keeps output size bounded for those cases.
-    let effective_quality = if treat_as_upscaled { 15 } else { profile.quality };
+    // Pixel-art mode uses lower JPEG quality to keep output size bounded.
+    let effective_quality = if pixel_art_mode {
+        profile.pixel_art_quality
+    } else {
+        profile.quality
+    };
 
-    let thumb = buf.encode_jpeg(effective_quality, profile.background)?;
+    let thumb = buf.encode_jpeg(effective_quality)?;
     let info = RenderInfo {
         stream_bytes_read,
         decode_strategy: decode_strategy.to_string(),
@@ -205,7 +219,7 @@ fn render_thumbnail_from_dynamic_image_with_options(
         decoded_width,
         decoded_height,
         source_orientation: orientation_name(orientation).to_string(),
-        upscaled: treat_as_upscaled,
+        pixel_art_mode,
         output_width: profile.width,
         output_height: profile.height,
         output_quality: effective_quality,
@@ -952,40 +966,165 @@ fn orientation_name(orientation: Orientation) -> &'static str {
 
 /// Process a single batch item for the general still-image case.
 pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> ItemResult {
+    let started = Instant::now();
+    let developer_mode = app_config().developer_mode;
     let mut request_state = ThumbnailRequestState::new(item);
 
     let Some(url) = source_url(&item.source) else {
         return ItemResult {
             id: item.id.clone(),
+            url: None,
             source_meta: None,
             thumbnail: None,
             media: None,
+            media_type: None,
+            extension: None,
+            job_status: None,
+            developer: None,
             error: Some("unsupported source type".into()),
         };
     };
 
-    let remote = match fetch_remote_prefix(url, REMOTE_PREFIX_READ_BYTES).await {
+    // -----------------------------------------------------------------------
+    // Pre-request cache check
+    //
+    // Derive a preliminary cache key from the raw input URL (stripping auth
+    // query params and normalising scheme/host) — this is possible *before*
+    // any HTTP request because we don't need the post-redirect final URL for
+    // the common non-redirecting case.
+    //
+    // If the cache holds a result we extract the upstream ETag stored in
+    // source_meta and use it as a conditional GET header.  If the upstream
+    // returns 304 our cached copy is confirmed fresh and we return it as
+    // `Cached` without decoding a single byte.  If the upstream returns 200
+    // the cached copy is stale and we fall through to reprocess.
+    //
+    // If there is no cache hit we fall back to the caller-supplied ETag,
+    // which drives the `not_modified` path (the caller already has the
+    // current result).
+    //
+    // Edge-case: a URL that redirects to a different final URL will miss on
+    // the preliminary key for the first request, then land correctly on
+    // subsequent ones once stored under the canonical final URL.
+    // -----------------------------------------------------------------------
+    let preliminary_key = crate::source::canonical_url_for(url);
+
+    let (cache_hit_result, cache_hit_etag): (Option<ItemResult>, Option<String>) =
+        match preliminary_key.as_deref() {
+            Some(key) => {
+                match crate::cache::cache().get(key).await {
+                    Some(hit) => match serde_json::from_slice::<ItemResult>(&hit.data) {
+                        Ok(cached) => {
+                            let etag = cached.source_meta.as_ref().and_then(|m| m.etag.clone());
+                            crate::cache::cache().record_access(crate::cache::CacheAccess {
+                                cache_key: key.to_string(),
+                                result: crate::cache::AccessResult::Hit,
+                            }).await;
+                            (Some(cached), etag)
+                        }
+                        Err(_) => {
+                            // Schema mismatch after a deploy — treat as a miss and reprocess.
+                            crate::cache::cache().record_access(crate::cache::CacheAccess {
+                                cache_key: key.to_string(),
+                                result: crate::cache::AccessResult::Miss,
+                            }).await;
+                            (None, None)
+                        }
+                    },
+                    None => {
+                        crate::cache::cache().record_access(crate::cache::CacheAccess {
+                            cache_key: key.to_string(),
+                            result: crate::cache::AccessResult::Miss,
+                        }).await;
+                        (None, None)
+                    }
+                }
+            }
+            None => (None, None),
+        };
+
+    // Use our stored upstream etag for the conditional if we have a cached
+    // result; otherwise use the caller-supplied etag (not_modified path).
+    let conditional = if cache_hit_etag.is_some() {
+        parse_conditional_request(cache_hit_etag.as_deref())
+    } else {
+        parse_conditional_request(item.etag.as_deref())
+    };
+
+    let fetch_started = Instant::now();
+    let remote = match fetch_remote_prefix(url, REMOTE_PREFIX_READ_BYTES, conditional.as_ref()).await {
         Ok(v) => v,
         Err(err) => {
             return ItemResult {
                 id: item.id.clone(),
+                url: Some(url.to_string()),
                 source_meta: None,
                 thumbnail: None,
                 media: None,
+                developer: None,
                 error: Some(err),
+                ..Default::default()
             }
         }
     };
+    let download_time_secs = fetch_started.elapsed().as_secs_f64();
 
     let meta = remote.meta.clone();
+    let make_developer = |thumbnail_size: u64, job_data: u64, job_strategy: Option<String>, width: Option<u32>, height: Option<u32>| {
+        if !developer_mode {
+            return None;
+        }
+        Some(build_developer_data(
+            url,
+            &remote.headers,
+            &meta,
+            thumbnail_size,
+            job_data,
+            job_strategy,
+            width,
+            height,
+            download_time_secs,
+            started.elapsed().as_secs_f64(),
+        ))
+    };
+
+    if remote.not_modified {
+        if let Some(mut cached) = cache_hit_result {
+            // Upstream confirmed our cached copy is still fresh (our stored
+            // etag matched).  Serve directly from cache.
+            cached.job_status = Some(JobStatus::Cached);
+            return cached;
+        } else {
+            // Upstream confirmed the resource hasn't changed since the
+            // *caller's* etag.  Return a minimal result; no thumbnail needed.
+            return ItemResult {
+                id: item.id.clone(),
+                url: Some(url.to_string()),
+                source_meta: Some(meta.clone()),
+                thumbnail: None,
+                media: None,
+                media_type: meta.file_kind.as_ref().map(|k| k.media_type),
+                extension: meta.file_kind.as_ref().map(|k| k.extension.clone()),
+                job_status: Some(JobStatus::NotModified),
+                developer: make_developer(0, 0, None, None, None),
+                error: None,
+            };
+        }
+    }
+
     request_state.observe_prefix(&remote.prefix_bytes, &meta);
 
     if !item.ops.thumbnail {
         return ItemResult {
             id: item.id.clone(),
+            url: Some(url.to_string()),
             source_meta: Some(meta.clone()),
             thumbnail: None,
             media: None,
+            media_type: None,
+            extension: None,
+            job_status: None,
+            developer: make_developer(0, remote.prefix_bytes.len() as u64, None, None, None),
             error: None,
         };
     }
@@ -1001,10 +1140,13 @@ pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> Ite
                     Err(err) => {
                         return ItemResult {
                             id: item.id.clone(),
+                            url: Some(url.to_string()),
                             source_meta: Some(meta.clone()),
                             thumbnail: None,
                             media: None,
+                            developer: make_developer(0, stream_bytes_read, None, None, None),
                             error: Some(err),
+                            ..Default::default()
                         }
                     }
                 };
@@ -1021,10 +1163,13 @@ pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> Ite
                         }
                         return ItemResult {
                             id: item.id.clone(),
+                            url: Some(url.to_string()),
                             source_meta: Some(meta.clone()),
                             thumbnail: None,
                             media: None,
+                            developer: make_developer(0, stream_bytes_read, None, None, None),
                             error: Some(err),
+                            ..Default::default()
                         };
                     }
                 }
@@ -1036,10 +1181,13 @@ pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> Ite
             Err(err) => {
                 return ItemResult {
                     id: item.id.clone(),
+                    url: Some(url.to_string()),
                     source_meta: Some(meta.clone()),
                     thumbnail: None,
                     media: None,
+                    developer: make_developer(0, stream_bytes_read, None, None, None),
                     error: Some(err),
+                    ..Default::default()
                 }
             }
         };
@@ -1055,21 +1203,34 @@ pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> Ite
                     DecodeStrategy::EmbeddedJpegThumbnail.as_str(),
                 ) {
                     Ok((jpeg, _info)) => {
+                        let thumb_size = jpeg.len() as u64;
                         return ItemResult {
                             id: item.id.clone(),
+                            url: Some(url.to_string()),
                             source_meta: Some(meta.clone()),
                             thumbnail: Some(jpeg),
                             media: None,
+                            developer: make_developer(
+                                thumb_size,
+                                stream_bytes_read,
+                                Some(DecodeStrategy::EmbeddedJpegThumbnail.as_str().to_string()),
+                                Some(profile.width),
+                                Some(profile.height),
+                            ),
                             error: None,
+                            ..Default::default()
                         };
                     }
                     Err(err) => {
                         return ItemResult {
                             id: item.id.clone(),
+                            url: Some(url.to_string()),
                             source_meta: Some(meta.clone()),
                             thumbnail: None,
                             media: None,
+                            developer: make_developer(0, stream_bytes_read, None, None, None),
                             error: Some(err),
+                            ..Default::default()
                         };
                     }
                 }
@@ -1082,12 +1243,22 @@ pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> Ite
             stream_bytes_read,
         ) {
             if info.decode_strategy != DecodeStrategy::FullImage.as_str() || remote.prefix_is_complete() {
+                let thumb_size = jpeg.len() as u64;
                 return ItemResult {
                     id: item.id.clone(),
+                    url: Some(url.to_string()),
                     source_meta: Some(meta.clone()),
                     thumbnail: Some(jpeg),
                     media: None,
+                    developer: make_developer(
+                        thumb_size,
+                        stream_bytes_read,
+                        Some(info.decode_strategy),
+                        Some(profile.width),
+                        Some(profile.height),
+                    ),
                     error: None,
+                    ..Default::default()
                 };
             }
         }
@@ -1097,10 +1268,13 @@ pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> Ite
             Err(err) => {
                 return ItemResult {
                     id: item.id.clone(),
+                    url: Some(url.to_string()),
                     source_meta: Some(meta.clone()),
                     thumbnail: None,
                     media: None,
+                    developer: make_developer(0, stream_bytes_read, None, None, None),
                     error: Some(err),
+                    ..Default::default()
                 }
             }
         };
@@ -1117,21 +1291,95 @@ pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> Ite
                 }
                 return ItemResult {
                     id: item.id.clone(),
+                    url: Some(url.to_string()),
                     source_meta: Some(meta.clone()),
                     thumbnail: None,
                     media: None,
+                    developer: make_developer(0, stream_bytes_read, None, None, None),
                     error: Some(err),
+                    ..Default::default()
                 };
             }
         }
     };
 
-    ItemResult {
+    let thumb_size = thumb.len() as u64;
+    let result = ItemResult {
         id: item.id.clone(),
-        source_meta: Some(meta),
+        url: Some(url.to_string()),
+        source_meta: Some(meta.clone()),
         thumbnail: Some(thumb),
         media: None,
+        media_type: meta.file_kind.as_ref().map(|k| k.media_type),
+        extension: meta.file_kind.as_ref().map(|k| k.extension.clone()),
+        job_status: Some(JobStatus::Success),
+        developer: make_developer(
+            thumb_size,
+            stream_bytes_read,
+            None,
+            Some(profile.width),
+            Some(profile.height),
+        ),
         error: None,
+    };
+
+    // -----------------------------------------------------------------------
+    // Cache store
+    //
+    // Serialise and write under the authoritative post-redirect canonical URL.
+    // If the URL was redirected the preliminary key (raw input URL, stripped)
+    // will differ from the final key; store under both so the next request
+    // using the same raw URL hits the cache pre-request without needing to
+    // follow the redirect again.
+    // -----------------------------------------------------------------------
+    if let Some(final_key) = meta.cache_key.as_deref() {
+        if let Ok(bytes) = serde_json::to_vec(&result) {
+            crate::cache::cache().put(final_key, bytes.clone()).await;
+            // Also index under preliminary key when the redirect changed the URL.
+            if preliminary_key.as_deref() != Some(final_key) {
+                if let Some(ref prelim) = preliminary_key {
+                    crate::cache::cache().put(prelim, bytes).await;
+                }
+            }
+        }
+    }
+
+    result
+}
+
+fn build_developer_data(
+    url: &str,
+    headers: &std::collections::HashMap<String, String>,
+    meta: &SourceMetadata,
+    thumbnail_size: u64,
+    job_data: u64,
+    job_strategy: Option<String>,
+    width: Option<u32>,
+    height: Option<u32>,
+    download_time_secs: f64,
+    process_time_secs: f64,
+) -> DeveloperData {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    DeveloperData {
+        fetch_headers: Some(headers.clone()),
+        media_log: Some(MediaLogData {
+            timestamp: format!("{ts}"),
+            url: url.to_string(),
+            thumbnail_size,
+            job_data,
+            job_strategy,
+            job_image_buffer_width: width,
+            job_image_buffer_height: height,
+            download_time_secs,
+            process_time_secs,
+            file_length: meta.content_length,
+            media_type: meta.file_kind.as_ref().map(|k| k.media_type),
+            extension: meta.file_kind.as_ref().map(|k| k.extension.clone()),
+        }),
     }
 }
 
@@ -1199,7 +1447,9 @@ async fn try_fetch_remote_tiff_embedded_jpeg(
 struct RemotePrefix {
     prefix_bytes: Vec<u8>,
     meta: SourceMetadata,
+    headers: std::collections::HashMap<String, String>,
     complete: bool,
+    not_modified: bool,
 }
 
 impl RemotePrefix {
@@ -1222,8 +1472,44 @@ impl RemotePrefix {
     }
 }
 
-async fn fetch_remote_prefix(url: &str, max_bytes: usize) -> Result<RemotePrefix, String> {
-    let pref = http_source::fetch_prefix(url, max_bytes).await?;
+fn parse_conditional_request(etag: Option<&str>) -> Option<ConditionalRequest> {
+    let raw = etag?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    if raw.len() >= 2 {
+        let (prefix, value) = raw.split_at(1);
+        if value.is_empty() {
+            return None;
+        }
+
+        return match prefix {
+            "E" => Some(ConditionalRequest::IfNoneMatch(value.to_string())),
+            "M" => Some(ConditionalRequest::IfModifiedSince(value.to_string())),
+            _ => Some(ConditionalRequest::IfNoneMatch(raw.to_string())),
+        };
+    }
+
+    Some(ConditionalRequest::IfNoneMatch(raw.to_string()))
+}
+
+fn encode_source_etag(headers: &std::collections::HashMap<String, String>) -> Option<String> {
+    if let Some(etag) = header_string_map(headers, "etag").filter(|v| !v.trim().is_empty()) {
+        return Some(format!("E{etag}"));
+    }
+
+    header_string_map(headers, "last-modified")
+        .filter(|v| !v.trim().is_empty())
+        .map(|v| format!("M{v}"))
+}
+
+async fn fetch_remote_prefix(
+    url: &str,
+    max_bytes: usize,
+    conditional: Option<&ConditionalRequest>,
+) -> Result<RemotePrefix, String> {
+    let pref = http_source::fetch_prefix(url, max_bytes, conditional).await?;
     let content_length = parse_content_length_map(&pref.headers);
 
     if let Some(total) = content_length {
@@ -1244,24 +1530,45 @@ async fn fetch_remote_prefix(url: &str, max_bytes: usize) -> Result<RemotePrefix
 
     let magic_mime = infer::get(&pref.bytes).map(|k| k.mime_type().to_string());
 
+    let content_type_str = header_string_map(&pref.headers, "content-type")
+        .map(|v| v.split(';').next().unwrap_or("").trim().to_string())
+        .filter(|v| !v.is_empty());
+    let file_kind = crate::media::sniff_file_kind(
+        &pref.bytes,
+        content_type_str.as_deref(),
+    );
+
     let content_length = parse_total_content_length_map(&pref.headers).or(content_length);
+
+    // Build the canonical URL from the post-redirect final URL, falling back
+    // to the original request URL if the transport didn't capture it.
+    let canonical_url = crate::source::canonical_url_for(
+        pref.final_url.as_deref().unwrap_or(url),
+    );
+    // Cache key is currently identical to the canonical URL.
+    // Future: incorporate a scoped account ID or hash.
+    let cache_key = canonical_url.clone();
+
     let meta = SourceMetadata {
-        content_type: header_string_map(&pref.headers, "content-type")
-            .map(|v| v.split(';').next().unwrap_or("").trim().to_string())
-            .filter(|v| !v.is_empty()),
+        content_type: content_type_str,
         magic_mime,
         content_length,
-        etag: header_string_map(&pref.headers, "etag"),
+        etag: encode_source_etag(&pref.headers),
         last_modified: header_string_map(&pref.headers, "last-modified"),
         accepts_ranges: header_string_map(&pref.headers, "accept-ranges")
             .map(|v| v.eq_ignore_ascii_case("bytes"))
             .unwrap_or(false),
+        file_kind,
+        canonical_url,
+        cache_key,
     };
 
     Ok(RemotePrefix {
         prefix_bytes: pref.bytes,
         meta,
+        headers: pref.headers,
         complete,
+        not_modified: pref.status == 304,
     })
 }
 
@@ -1322,7 +1629,7 @@ impl ProcessBuffer {
         Self { img }
     }
 
-    fn composite_transparency_over_background(&mut self, fallback_bg: [u8; 3]) {
+    fn composite_transparency_over_background(&mut self) {
         let rgba = self.img.to_rgba8();
         if !image_has_transparency(&rgba) {
             self.img = DynamicImage::ImageRgba8(rgba);
@@ -1331,7 +1638,9 @@ impl ProcessBuffer {
 
         let (w, h) = rgba.dimensions();
         let Some(bg) = load_transparency_background().map(|base| fit_background_to(base, w, h)) else {
-            self.img = DynamicImage::ImageRgba8(rgba);
+            // PNG failed to load — fall back to white.
+            let flattened = flatten_alpha(&rgba, [255, 255, 255]);
+            self.img = DynamicImage::ImageRgb8(flattened);
             return;
         };
 
@@ -1345,19 +1654,24 @@ impl ProcessBuffer {
             }
         }
 
-        let flattened = flatten_alpha(&out, fallback_bg);
+        // All pixels now have alpha=255 after compositing; flatten to RGB.
+        let flattened = flatten_alpha(&out, [255, 255, 255]);
         self.img = DynamicImage::ImageRgb8(flattened);
     }
 
     /// Placeholder for future color and filtering passes.
-    fn apply_color_pipeline(&mut self, upscaled: bool) {
+    fn apply_color_pipeline(&mut self, pixel_art_mode: bool, vignette_strength: f32) {
         // Downscaled images benefit from a mild unsharp pass to recover edge
         // definition lost during resize.
-        if !upscaled {
+        if !pixel_art_mode {
             self.img = self.img.unsharpen(0.85, 2);
         }
 
-        let strength = if upscaled { 0.15 } else { 0.25 };
+        let strength = if pixel_art_mode {
+            (vignette_strength * 0.6).clamp(0.0, 1.0)
+        } else {
+            vignette_strength.clamp(0.0, 1.0)
+        };
         self.apply_soft_vignette(strength, 0.62, 1.25);
     }
 
@@ -1414,7 +1728,7 @@ impl ProcessBuffer {
     /// Scale and center-crop to fill the target aspect ratio.
     ///
     /// Returns whether the operation upscaled the source.
-    fn fill_crop(&mut self, target_w: u32, target_h: u32) -> bool {
+    fn fill_crop(&mut self, target_w: u32, target_h: u32, use_photo_filter_for_upscale: bool) -> bool {
         let src = self.img.to_rgba8();
         let (src_w, src_h) = src.dimensions();
 
@@ -1444,11 +1758,12 @@ impl ProcessBuffer {
         let skip_resize = near_target_w && near_target_h && near_target_scale;
 
         // Pixel art and low-res assets look better with nearest-neighbor when
-        // scaling up. Keep Lanczos for downscaling photographic sources.
+        // scaling up. Keep Lanczos for downscaling or for photographic sources
+        // (e.g. embedded JPEG thumbnails from camera files).
         let resized = if skip_resize {
             src
         } else {
-            let filter = if scale > 1.0 {
+            let filter = if scale > 1.0 && !use_photo_filter_for_upscale {
                 FilterType::Nearest
             } else {
                 FilterType::Lanczos3
@@ -1468,9 +1783,11 @@ impl ProcessBuffer {
         upscaled && !skip_resize
     }
 
-    fn encode_jpeg(&self, quality: u8, bg: [u8; 3]) -> Result<Vec<u8>, String> {
+    fn encode_jpeg(&self, quality: u8) -> Result<Vec<u8>, String> {
         let rgba = self.img.to_rgba8();
-        let rgb = flatten_alpha(&rgba, bg);
+        // After compositing the image should already be fully opaque, but
+        // flatten_alpha handles any residual alpha with a white fallback.
+        let rgb = flatten_alpha(&rgba, [255, 255, 255]);
 
         let width = rgb.width() as usize;
         let height = rgb.height() as usize;

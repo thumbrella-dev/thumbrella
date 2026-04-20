@@ -2,6 +2,11 @@
 resolver = "2"
 
 members = [
-    "crates/thumbrella-server",
+    "crates/thumbrella-tier1",
     "crates/thumbrella-tier2",
 ]
+
+[profile.dev]
+debug = 1
+incremental = true
+codegen-units = 256

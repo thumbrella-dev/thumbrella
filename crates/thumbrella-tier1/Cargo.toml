@@ -2,6 +2,7 @@
 name = "thumbrella-tier1"
 version = "0.1.0"
 edition = "2024"
+default-run = "thumbrella-tier1"
 
 [features]
 default = ["native-http"]

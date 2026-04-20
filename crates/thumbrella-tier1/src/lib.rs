@@ -11,8 +11,16 @@ pub mod pipeline;
 pub mod paged_io;
 pub mod http_source;
 pub mod routes;
+pub mod dispatch;
+pub mod media;
+pub mod request_state;
+pub mod config;
+pub mod cache;
 
 pub use request::*;
 pub use result::*;
 pub use profile::*;
 pub use source::*;
+pub use media::*;
+pub use request_state::*;
+pub use config::*;
