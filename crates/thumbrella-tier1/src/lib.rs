@@ -11,6 +11,7 @@ pub mod pipeline;
 pub mod paged_io;
 pub mod http_source;
 pub mod routes;
+pub mod devpage;
 pub mod dispatch;
 pub mod media;
 pub mod request_state;

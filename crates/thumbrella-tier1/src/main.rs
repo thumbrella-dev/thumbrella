@@ -1,4 +1,4 @@
-//! Thumbrella Tier 2 server — the main HTTP entry point.
+//! Thumbrella Tier 1 server — the main HTTP entry point.
 //!
 //! All endpoints ultimately route through the batch pipeline. Simple
 //! single-item facades are thin wrappers that construct a one-item batch.

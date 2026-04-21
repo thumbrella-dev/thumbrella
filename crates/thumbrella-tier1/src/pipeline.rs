@@ -11,8 +11,10 @@ use serde::Serialize;
 use std::collections::{HashSet, VecDeque};
 use std::io::Cursor;
 use std::sync::OnceLock;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use crate::{app_config, DeveloperData, ItemRequest, ItemResult, JobStatus, MediaLogData, SourceMetadata, SourceRef, ThumbnailProfile, http_source};
+use std::time::Instant;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
+use crate::{ItemProperties, app_config, public_job_strategy, DeveloperData, ItemRequest, ItemResult, JobStatus, MediaLogData, SourceMetadata, SourceRef, ThumbnailProfile, http_source};
 use crate::http_source::ConditionalRequest;
 use crate::ThumbnailRequestState;
 use zip::read::ZipArchive;
@@ -69,6 +71,29 @@ pub struct RenderInfo {
     pub output_width: u32,
     pub output_height: u32,
     pub output_quality: u8,
+    pub process_duration: f64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct DurationBreakdown {
+    download_duration: f64,
+    render_duration: f64,
+    process_duration: f64,
+}
+
+impl DurationBreakdown {
+    fn total(self) -> f64 {
+        self.download_duration + self.render_duration + self.process_duration
+    }
+
+    fn up_to_now(started: Instant, download_duration: f64) -> Self {
+        let total_duration = started.elapsed().as_secs_f64();
+        Self {
+            download_duration,
+            render_duration: (total_duration - download_duration).max(0.0),
+            process_duration: 0.0,
+        }
+    }
 }
 
 /// Build source metadata for a local byte source.
@@ -83,7 +108,6 @@ pub fn metadata_from_local_bytes(bytes: &[u8], content_length: Option<u64>, last
         last_modified,
         accepts_ranges: false,
         file_kind,
-        // Local files have no URL redirect chain or remote cache key.
         canonical_url: None,
         cache_key: None,
     }
@@ -184,6 +208,8 @@ fn render_thumbnail_from_dynamic_image_with_options(
     source_height: u32,
     orientation: Orientation,
 ) -> Result<(Vec<u8>, RenderInfo), String> {
+    let process_started = Instant::now();
+
     // Let the image crate apply EXIF orientation transforms so camera images
     // land upright without custom orientation parsing logic.
     img.apply_orientation(orientation);
@@ -211,6 +237,7 @@ fn render_thumbnail_from_dynamic_image_with_options(
     };
 
     let thumb = buf.encode_jpeg(effective_quality)?;
+    let process_duration = process_started.elapsed().as_secs_f64();
     let info = RenderInfo {
         stream_bytes_read,
         decode_strategy: decode_strategy.to_string(),
@@ -223,6 +250,7 @@ fn render_thumbnail_from_dynamic_image_with_options(
         output_width: profile.width,
         output_height: profile.height,
         output_quality: effective_quality,
+        process_duration,
     };
 
     Ok((thumb, info))
@@ -964,11 +992,16 @@ fn orientation_name(orientation: Orientation) -> &'static str {
     }
 }
 
+fn properties_from_render_info(info: &RenderInfo) -> ItemProperties {
+    ItemProperties::from_dimensions(info.input_width, info.input_height)
+}
+
 /// Process a single batch item for the general still-image case.
 pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> ItemResult {
     let started = Instant::now();
     let developer_mode = app_config().developer_mode;
     let mut request_state = ThumbnailRequestState::new(item);
+    let conditional = parse_conditional_request(item.etag.as_deref());
 
     let Some(url) = source_url(&item.source) else {
         return ItemResult {
@@ -979,76 +1012,14 @@ pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> Ite
             media: None,
             media_type: None,
             extension: None,
-            job_status: None,
+            job_status: Some(JobStatus::Failed),
+            job_duration: None,
+            job_data: None,
+            job_strategy: None,
+            properties: None,
             developer: None,
             error: Some("unsupported source type".into()),
         };
-    };
-
-    // -----------------------------------------------------------------------
-    // Pre-request cache check
-    //
-    // Derive a preliminary cache key from the raw input URL (stripping auth
-    // query params and normalising scheme/host) — this is possible *before*
-    // any HTTP request because we don't need the post-redirect final URL for
-    // the common non-redirecting case.
-    //
-    // If the cache holds a result we extract the upstream ETag stored in
-    // source_meta and use it as a conditional GET header.  If the upstream
-    // returns 304 our cached copy is confirmed fresh and we return it as
-    // `Cached` without decoding a single byte.  If the upstream returns 200
-    // the cached copy is stale and we fall through to reprocess.
-    //
-    // If there is no cache hit we fall back to the caller-supplied ETag,
-    // which drives the `not_modified` path (the caller already has the
-    // current result).
-    //
-    // Edge-case: a URL that redirects to a different final URL will miss on
-    // the preliminary key for the first request, then land correctly on
-    // subsequent ones once stored under the canonical final URL.
-    // -----------------------------------------------------------------------
-    let preliminary_key = crate::source::canonical_url_for(url);
-
-    let (cache_hit_result, cache_hit_etag): (Option<ItemResult>, Option<String>) =
-        match preliminary_key.as_deref() {
-            Some(key) => {
-                match crate::cache::cache().get(key).await {
-                    Some(hit) => match serde_json::from_slice::<ItemResult>(&hit.data) {
-                        Ok(cached) => {
-                            let etag = cached.source_meta.as_ref().and_then(|m| m.etag.clone());
-                            crate::cache::cache().record_access(crate::cache::CacheAccess {
-                                cache_key: key.to_string(),
-                                result: crate::cache::AccessResult::Hit,
-                            }).await;
-                            (Some(cached), etag)
-                        }
-                        Err(_) => {
-                            // Schema mismatch after a deploy — treat as a miss and reprocess.
-                            crate::cache::cache().record_access(crate::cache::CacheAccess {
-                                cache_key: key.to_string(),
-                                result: crate::cache::AccessResult::Miss,
-                            }).await;
-                            (None, None)
-                        }
-                    },
-                    None => {
-                        crate::cache::cache().record_access(crate::cache::CacheAccess {
-                            cache_key: key.to_string(),
-                            result: crate::cache::AccessResult::Miss,
-                        }).await;
-                        (None, None)
-                    }
-                }
-            }
-            None => (None, None),
-        };
-
-    // Use our stored upstream etag for the conditional if we have a cached
-    // result; otherwise use the caller-supplied etag (not_modified path).
-    let conditional = if cache_hit_etag.is_some() {
-        parse_conditional_request(cache_hit_etag.as_deref())
-    } else {
-        parse_conditional_request(item.etag.as_deref())
     };
 
     let fetch_started = Instant::now();
@@ -1061,288 +1032,444 @@ pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> Ite
                 source_meta: None,
                 thumbnail: None,
                 media: None,
+                media_type: None,
+                extension: None,
+                job_status: Some(JobStatus::Failed),
+                job_duration: Some(started.elapsed().as_secs_f64()),
+                job_data: None,
+                job_strategy: None,
+                properties: None,
                 developer: None,
                 error: Some(err),
-                ..Default::default()
             }
         }
     };
-    let download_time_secs = fetch_started.elapsed().as_secs_f64();
+    let mut total_download_time_secs = fetch_started.elapsed().as_secs_f64();
+    let mut download_tail_bytes: u64 = 0;
 
     let meta = remote.meta.clone();
-    let make_developer = |thumbnail_size: u64, job_data: u64, job_strategy: Option<String>, width: Option<u32>, height: Option<u32>| {
+    let media_type = meta.file_kind.as_ref().map(|k| k.media_type);
+    let extension = meta.file_kind.as_ref().map(|k| k.extension.clone());
+    let build_result = |
+        job_status: JobStatus,
+        thumbnail: Option<Vec<u8>>,
+        job_data: u64,
+        raw_strategy: Option<&str>,
+        properties: Option<ItemProperties>,
+        durations: DurationBreakdown,
+        developer: Option<DeveloperData>,
+        error: Option<String>,
+    | ItemResult {
+        id: item.id.clone(),
+        url: Some(url.to_string()),
+        source_meta: Some(meta.clone()),
+        thumbnail,
+        media: None,
+        media_type,
+        extension: extension.clone(),
+        job_status: Some(job_status),
+        job_duration: Some(durations.total()),
+        job_data: Some(job_data),
+        job_strategy: raw_strategy.map(public_job_strategy),
+        properties,
+        developer,
+        error,
+    };
+
+    // -----------------------------------------------------------------------
+    // Cache lookup
+    //
+    // Now that we have a stable `cache_key` (canonical URL, stripped of any
+    // expiring auth tokens) we can check whether we already have a result for
+    // this resource.  On a hit, return the cached response immediately with
+    // `job_status: cached` — no further downloading or rendering needed.
+    //
+    // TODO: implement actual cache storage and retrieval.
+    //   let cached = cache::get(meta.cache_key.as_deref().unwrap_or("")).await;
+    //   if let Some(cached_result) = cached {
+    //       return ItemResult { job_status: Some(JobStatus::Cached), ..cached_result };
+    //   }
+    // -----------------------------------------------------------------------
+
+    let make_developer = |
+        download_bytes: u64,
+        download_tail_bytes: u64,
+        durations: DurationBreakdown,
+        process_width: Option<u32>,
+        process_height: Option<u32>,
+        pixel_art: Option<bool>,
+    | {
         if !developer_mode {
             return None;
         }
         Some(build_developer_data(
             url,
             &remote.headers,
-            &meta,
-            thumbnail_size,
-            job_data,
-            job_strategy,
-            width,
-            height,
-            download_time_secs,
-            started.elapsed().as_secs_f64(),
+            download_bytes,
+            download_tail_bytes,
+            process_width,
+            process_height,
+            pixel_art,
+            durations,
+            1,
         ))
     };
 
     if remote.not_modified {
-        if let Some(mut cached) = cache_hit_result {
-            // Upstream confirmed our cached copy is still fresh (our stored
-            // etag matched).  Serve directly from cache.
-            cached.job_status = Some(JobStatus::Cached);
-            return cached;
-        } else {
-            // Upstream confirmed the resource hasn't changed since the
-            // *caller's* etag.  Return a minimal result; no thumbnail needed.
-            return ItemResult {
-                id: item.id.clone(),
-                url: Some(url.to_string()),
-                source_meta: Some(meta.clone()),
-                thumbnail: None,
-                media: None,
-                media_type: meta.file_kind.as_ref().map(|k| k.media_type),
-                extension: meta.file_kind.as_ref().map(|k| k.extension.clone()),
-                job_status: Some(JobStatus::NotModified),
-                developer: make_developer(0, 0, None, None, None),
-                error: None,
-            };
-        }
+        return build_result(
+            JobStatus::NotModified,
+            None,
+            0,
+            None,
+            None,
+            DurationBreakdown::up_to_now(started, total_download_time_secs),
+            make_developer(
+                0,
+                download_tail_bytes,
+                DurationBreakdown::up_to_now(started, total_download_time_secs),
+                None,
+                None,
+                None,
+            ),
+            None,
+        );
     }
 
     request_state.observe_prefix(&remote.prefix_bytes, &meta);
 
-    if !item.ops.thumbnail {
-        return ItemResult {
-            id: item.id.clone(),
-            url: Some(url.to_string()),
-            source_meta: Some(meta.clone()),
-            thumbnail: None,
-            media: None,
-            media_type: None,
-            extension: None,
-            job_status: None,
-            developer: make_developer(0, remote.prefix_bytes.len() as u64, None, None, None),
-            error: None,
+    // -----------------------------------------------------------------------
+    // Cache lookup
+    //
+    // Now that we have a stable `cache_key` (canonical URL, stripped of any
+    // expiring auth tokens) check whether we already have a stored result.
+    // On a hit we deserialise and return immediately — no decode/render needed.
+    // `record_access` is always called so every request can be tracked/billed.
+    // The not-modified path above is intentionally excluded: if the upstream
+    // already said nothing changed there is nothing new to cache-check either.
+    // -----------------------------------------------------------------------
+    if let Some(cache_key) = meta.cache_key.as_deref() {
+        let hit = crate::cache::cache().get(cache_key).await;
+        let access_result = if hit.is_some() {
+            crate::cache::AccessResult::Hit
+        } else {
+            crate::cache::AccessResult::Miss
         };
+        crate::cache::cache().record_access(crate::cache::CacheAccess {
+            cache_key: cache_key.to_string(),
+            result: access_result,
+        }).await;
+        if let Some(cached) = hit {
+            // Deserialise the stored ItemResult and return it immediately.
+            if let Ok(mut cached_result) = serde_json::from_slice::<ItemResult>(&cached.data) {
+                cached_result.job_status = Some(JobStatus::Cached);
+                cached_result.job_duration = Some(DurationBreakdown::up_to_now(started, total_download_time_secs).total());
+                cached_result.job_data = Some(remote.prefix_bytes.len() as u64);
+                return cached_result;
+            }
+            // Deserialisation failed (schema change after a deploy) — fall
+            // through and reprocess as if this were a cache miss.
+        }
+    }
+
+    if !item.ops.thumbnail {
+        return build_result(
+            JobStatus::Success,
+            None,
+            remote.prefix_bytes.len() as u64,
+            None,
+            None,
+            DurationBreakdown::up_to_now(started, total_download_time_secs),
+            make_developer(
+                remote.prefix_bytes.len() as u64,
+                download_tail_bytes,
+                DurationBreakdown::up_to_now(started, total_download_time_secs),
+                None,
+                None,
+                None,
+            ),
+            None,
+        );
     }
 
     let mut stream_bytes_read = remote.prefix_bytes.len() as u64;
 
-    let thumb = if remote.is_probably_jpeg() {
+    let (thumb, render_info, durations) = if remote.is_probably_jpeg() {
+        let pre_render_elapsed = started.elapsed().as_secs_f64();
         match render_thumbnail_from_bytes_with_stream_bytes(&remote.prefix_bytes, profile, stream_bytes_read) {
-            Ok((jpeg, info)) if info.decode_strategy != DecodeStrategy::FullImage.as_str() || remote.prefix_is_complete() => jpeg,
+            Ok((jpeg, info)) if info.decode_strategy != DecodeStrategy::FullImage.as_str() || remote.prefix_is_complete() => {
+                let durations = DurationBreakdown {
+                    download_duration: total_download_time_secs,
+                    render_duration: (pre_render_elapsed - total_download_time_secs).max(0.0),
+                    process_duration: info.process_duration,
+                };
+                (jpeg, info, durations)
+            }
             Ok(_) | Err(_) => {
+                let fetch_started = Instant::now();
                 let full = match fetch_url_full(url).await {
                     Ok(v) => v,
                     Err(err) => {
-                        return ItemResult {
-                            id: item.id.clone(),
-                            url: Some(url.to_string()),
-                            source_meta: Some(meta.clone()),
-                            thumbnail: None,
-                            media: None,
-                            developer: make_developer(0, stream_bytes_read, None, None, None),
-                            error: Some(err),
-                            ..Default::default()
-                        }
+                        return build_result(
+                            JobStatus::Failed,
+                            None,
+                            stream_bytes_read,
+                            None,
+                            None,
+                            DurationBreakdown::up_to_now(started, total_download_time_secs),
+                            make_developer(
+                                stream_bytes_read,
+                                download_tail_bytes,
+                                DurationBreakdown::up_to_now(started, total_download_time_secs),
+                                None,
+                                None,
+                                None,
+                            ),
+                            Some(err),
+                        );
                     }
                 };
+                total_download_time_secs += fetch_started.elapsed().as_secs_f64();
 
                 request_state.switch_to_streaming_mode();
                 request_state.note_stream_bytes(full.len());
                 stream_bytes_read = stream_bytes_read.saturating_add(full.len() as u64);
 
+                let pre_render_elapsed = started.elapsed().as_secs_f64();
                 match render_thumbnail_from_bytes_with_stream_bytes(&full, profile, stream_bytes_read) {
-                    Ok((jpeg, _info)) => jpeg,
+                    Ok((jpeg, info)) => {
+                        let durations = DurationBreakdown {
+                            download_duration: total_download_time_secs,
+                            render_duration: (pre_render_elapsed - total_download_time_secs).max(0.0),
+                            process_duration: info.process_duration,
+                        };
+                        (jpeg, info, durations)
+                    }
                     Err(err) => {
                         if let Some(dispatched) = crate::dispatch::try_dispatch_tier2(item, profile, &request_state).await {
                             return dispatched;
                         }
-                        return ItemResult {
-                            id: item.id.clone(),
-                            url: Some(url.to_string()),
-                            source_meta: Some(meta.clone()),
-                            thumbnail: None,
-                            media: None,
-                            developer: make_developer(0, stream_bytes_read, None, None, None),
-                            error: Some(err),
-                            ..Default::default()
-                        };
+                        return build_result(
+                            JobStatus::Failed,
+                            None,
+                            stream_bytes_read,
+                            None,
+                            None,
+                            DurationBreakdown::up_to_now(started, total_download_time_secs),
+                            make_developer(
+                                stream_bytes_read,
+                                download_tail_bytes,
+                                DurationBreakdown::up_to_now(started, total_download_time_secs),
+                                None,
+                                None,
+                                None,
+                            ),
+                            Some(err),
+                        );
                     }
                 }
             }
         }
     } else {
+        let fetch_started = Instant::now();
         let embedded = match try_fetch_remote_tiff_embedded_jpeg(url, &remote).await {
             Ok(v) => v,
             Err(err) => {
-                return ItemResult {
-                    id: item.id.clone(),
-                    url: Some(url.to_string()),
-                    source_meta: Some(meta.clone()),
-                    thumbnail: None,
-                    media: None,
-                    developer: make_developer(0, stream_bytes_read, None, None, None),
-                    error: Some(err),
-                    ..Default::default()
-                }
+                return build_result(
+                    JobStatus::Failed,
+                    None,
+                    stream_bytes_read,
+                    None,
+                    None,
+                    DurationBreakdown::up_to_now(started, total_download_time_secs),
+                    make_developer(
+                        stream_bytes_read,
+                        download_tail_bytes,
+                        DurationBreakdown::up_to_now(started, total_download_time_secs),
+                        None,
+                        None,
+                        None,
+                    ),
+                    Some(err),
+                )
             }
         };
+        total_download_time_secs += fetch_started.elapsed().as_secs_f64();
 
         if let Some((embedded_jpeg, extra_read)) = embedded {
             stream_bytes_read = stream_bytes_read.saturating_add(extra_read);
+            download_tail_bytes = download_tail_bytes.saturating_add(extra_read);
 
             if let Ok(img) = image::load_from_memory(&embedded_jpeg) {
+                let pre_render_elapsed = started.elapsed().as_secs_f64();
                 match render_thumbnail_from_dynamic_image_with_stream_bytes(
                     img,
                     profile,
                     stream_bytes_read,
                     DecodeStrategy::EmbeddedJpegThumbnail.as_str(),
                 ) {
-                    Ok((jpeg, _info)) => {
-                        let thumb_size = jpeg.len() as u64;
-                        return ItemResult {
-                            id: item.id.clone(),
-                            url: Some(url.to_string()),
-                            source_meta: Some(meta.clone()),
-                            thumbnail: Some(jpeg),
-                            media: None,
-                            developer: make_developer(
-                                thumb_size,
-                                stream_bytes_read,
-                                Some(DecodeStrategy::EmbeddedJpegThumbnail.as_str().to_string()),
-                                Some(profile.width),
-                                Some(profile.height),
-                            ),
-                            error: None,
-                            ..Default::default()
+                    Ok((jpeg, info)) => {
+                        let raw_strategy = info.decode_strategy.clone();
+                        let durations = DurationBreakdown {
+                            download_duration: total_download_time_secs,
+                            render_duration: (pre_render_elapsed - total_download_time_secs).max(0.0),
+                            process_duration: info.process_duration,
                         };
+                        return build_result(
+                            JobStatus::Success,
+                            Some(jpeg),
+                            stream_bytes_read,
+                            Some(raw_strategy.as_str()),
+                            Some(properties_from_render_info(&info)),
+                            durations,
+                            make_developer(
+                                stream_bytes_read,
+                                download_tail_bytes,
+                                durations,
+                                Some(info.decoded_width),
+                                Some(info.decoded_height),
+                                Some(info.pixel_art_mode),
+                            ),
+                            None,
+                        );
                     }
                     Err(err) => {
-                        return ItemResult {
-                            id: item.id.clone(),
-                            url: Some(url.to_string()),
-                            source_meta: Some(meta.clone()),
-                            thumbnail: None,
-                            media: None,
-                            developer: make_developer(0, stream_bytes_read, None, None, None),
-                            error: Some(err),
-                            ..Default::default()
-                        };
+                        return build_result(
+                            JobStatus::Failed,
+                            None,
+                            stream_bytes_read,
+                            None,
+                            None,
+                            DurationBreakdown::up_to_now(started, total_download_time_secs),
+                            make_developer(
+                                stream_bytes_read,
+                                download_tail_bytes,
+                                DurationBreakdown::up_to_now(started, total_download_time_secs),
+                                None,
+                                None,
+                                None,
+                            ),
+                            Some(err),
+                        );
                     }
                 }
             }
         }
 
+        let pre_render_elapsed = started.elapsed().as_secs_f64();
         if let Ok((jpeg, info)) = render_thumbnail_from_bytes_with_stream_bytes(
             &remote.prefix_bytes,
             profile,
             stream_bytes_read,
         ) {
             if info.decode_strategy != DecodeStrategy::FullImage.as_str() || remote.prefix_is_complete() {
-                let thumb_size = jpeg.len() as u64;
-                return ItemResult {
-                    id: item.id.clone(),
-                    url: Some(url.to_string()),
-                    source_meta: Some(meta.clone()),
-                    thumbnail: Some(jpeg),
-                    media: None,
-                    developer: make_developer(
-                        thumb_size,
-                        stream_bytes_read,
-                        Some(info.decode_strategy),
-                        Some(profile.width),
-                        Some(profile.height),
-                    ),
-                    error: None,
-                    ..Default::default()
+                let raw_strategy = info.decode_strategy.clone();
+                let durations = DurationBreakdown {
+                    download_duration: total_download_time_secs,
+                    render_duration: (pre_render_elapsed - total_download_time_secs).max(0.0),
+                    process_duration: info.process_duration,
                 };
+                return build_result(
+                    JobStatus::Success,
+                    Some(jpeg),
+                    stream_bytes_read,
+                    Some(raw_strategy.as_str()),
+                    Some(properties_from_render_info(&info)),
+                    durations,
+                    make_developer(
+                        stream_bytes_read,
+                        download_tail_bytes,
+                        durations,
+                        Some(info.decoded_width),
+                        Some(info.decoded_height),
+                        Some(info.pixel_art_mode),
+                    ),
+                    None,
+                );
             }
         }
 
+        let fetch_started = Instant::now();
         let full = match fetch_url_full(url).await {
             Ok(v) => v,
             Err(err) => {
-                return ItemResult {
-                    id: item.id.clone(),
-                    url: Some(url.to_string()),
-                    source_meta: Some(meta.clone()),
-                    thumbnail: None,
-                    media: None,
-                    developer: make_developer(0, stream_bytes_read, None, None, None),
-                    error: Some(err),
-                    ..Default::default()
-                }
+                return build_result(
+                    JobStatus::Failed,
+                    None,
+                    stream_bytes_read,
+                    None,
+                    None,
+                    DurationBreakdown::up_to_now(started, total_download_time_secs),
+                    make_developer(
+                        stream_bytes_read,
+                        download_tail_bytes,
+                        DurationBreakdown::up_to_now(started, total_download_time_secs),
+                        None,
+                        None,
+                        None,
+                    ),
+                    Some(err),
+                )
             }
         };
+        total_download_time_secs += fetch_started.elapsed().as_secs_f64();
 
         request_state.switch_to_streaming_mode();
         request_state.note_stream_bytes(full.len());
         stream_bytes_read = stream_bytes_read.saturating_add(full.len() as u64);
 
+        let pre_render_elapsed = started.elapsed().as_secs_f64();
         match render_thumbnail_from_bytes_with_stream_bytes(&full, profile, stream_bytes_read) {
-            Ok((jpeg, _info)) => jpeg,
+            Ok((jpeg, info)) => {
+                let durations = DurationBreakdown {
+                    download_duration: total_download_time_secs,
+                    render_duration: (pre_render_elapsed - total_download_time_secs).max(0.0),
+                    process_duration: info.process_duration,
+                };
+                (jpeg, info, durations)
+            }
             Err(err) => {
                 if let Some(dispatched) = crate::dispatch::try_dispatch_tier2(item, profile, &request_state).await {
                     return dispatched;
                 }
-                return ItemResult {
-                    id: item.id.clone(),
-                    url: Some(url.to_string()),
-                    source_meta: Some(meta.clone()),
-                    thumbnail: None,
-                    media: None,
-                    developer: make_developer(0, stream_bytes_read, None, None, None),
-                    error: Some(err),
-                    ..Default::default()
-                };
+                return build_result(
+                    JobStatus::Failed,
+                    None,
+                    stream_bytes_read,
+                    None,
+                    None,
+                    DurationBreakdown::up_to_now(started, total_download_time_secs),
+                    make_developer(
+                        stream_bytes_read,
+                        download_tail_bytes,
+                        DurationBreakdown::up_to_now(started, total_download_time_secs),
+                        None,
+                        None,
+                        None,
+                    ),
+                    Some(err),
+                );
             }
         }
     };
 
-    let thumb_size = thumb.len() as u64;
-    let result = ItemResult {
-        id: item.id.clone(),
-        url: Some(url.to_string()),
-        source_meta: Some(meta.clone()),
-        thumbnail: Some(thumb),
-        media: None,
-        media_type: meta.file_kind.as_ref().map(|k| k.media_type),
-        extension: meta.file_kind.as_ref().map(|k| k.extension.clone()),
-        job_status: Some(JobStatus::Success),
-        developer: make_developer(
-            thumb_size,
+    let raw_strategy = render_info.decode_strategy.clone();
+    let result = build_result(
+        JobStatus::Success,
+        Some(thumb),
+        stream_bytes_read,
+        Some(raw_strategy.as_str()),
+        Some(properties_from_render_info(&render_info)),
+        durations,
+        make_developer(
             stream_bytes_read,
-            None,
-            Some(profile.width),
-            Some(profile.height),
+            download_tail_bytes,
+            durations,
+            Some(render_info.decoded_width),
+            Some(render_info.decoded_height),
+            Some(render_info.pixel_art_mode),
         ),
-        error: None,
-    };
-
-    // -----------------------------------------------------------------------
-    // Cache store
-    //
-    // Serialise and write under the authoritative post-redirect canonical URL.
-    // If the URL was redirected the preliminary key (raw input URL, stripped)
-    // will differ from the final key; store under both so the next request
-    // using the same raw URL hits the cache pre-request without needing to
-    // follow the redirect again.
-    // -----------------------------------------------------------------------
-    if let Some(final_key) = meta.cache_key.as_deref() {
-        if let Ok(bytes) = serde_json::to_vec(&result) {
-            crate::cache::cache().put(final_key, bytes.clone()).await;
-            // Also index under preliminary key when the redirect changed the URL.
-            if preliminary_key.as_deref() != Some(final_key) {
-                if let Some(ref prelim) = preliminary_key {
-                    crate::cache::cache().put(prelim, bytes).await;
-                }
-            }
-        }
-    }
+        None,
+    );
 
     result
 }
@@ -1350,35 +1477,34 @@ pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> Ite
 fn build_developer_data(
     url: &str,
     headers: &std::collections::HashMap<String, String>,
-    meta: &SourceMetadata,
-    thumbnail_size: u64,
-    job_data: u64,
-    job_strategy: Option<String>,
-    width: Option<u32>,
-    height: Option<u32>,
-    download_time_secs: f64,
-    process_time_secs: f64,
+    download_bytes: u64,
+    download_tail: u64,
+    process_width: Option<u32>,
+    process_height: Option<u32>,
+    pixel_art: Option<bool>,
+    durations: DurationBreakdown,
+    server_tier: u8,
 ) -> DeveloperData {
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let timestamp = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
 
     DeveloperData {
         fetch_headers: Some(headers.clone()),
         media_log: Some(MediaLogData {
-            timestamp: format!("{ts}"),
+            timestamp,
             url: url.to_string(),
-            thumbnail_size,
-            job_data,
-            job_strategy,
-            job_image_buffer_width: width,
-            job_image_buffer_height: height,
-            download_time_secs,
-            process_time_secs,
-            file_length: meta.content_length,
-            media_type: meta.file_kind.as_ref().map(|k| k.media_type),
-            extension: meta.file_kind.as_ref().map(|k| k.extension.clone()),
+            customer_id: "dev".to_string(),
+            download_bytes,
+            download_tail,
+            download_duration: durations.download_duration,
+            render_duration: durations.render_duration,
+            process_duration: durations.process_duration,
+            process_width,
+            process_height,
+            pixel_art,
+            server_host: "dev".to_string(),
+            server_tier,
         }),
     }
 }
@@ -1545,7 +1671,7 @@ async fn fetch_remote_prefix(
     let canonical_url = crate::source::canonical_url_for(
         pref.final_url.as_deref().unwrap_or(url),
     );
-    // Cache key is currently identical to the canonical URL.
+    // The cache key is currently identical to the canonical URL.
     // Future: incorporate a scoped account ID or hash.
     let cache_key = canonical_url.clone();
 

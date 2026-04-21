@@ -31,5 +31,5 @@ pub async fn batch(
 
     let item_results = futures::future::join_all(tasks).await;
 
-    Ok(Json(BatchResponse { items: item_results }))
+    Ok(Json(BatchResponse::from_item_results(item_results)))
 }

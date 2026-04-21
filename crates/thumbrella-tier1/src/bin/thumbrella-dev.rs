@@ -11,30 +11,12 @@
 //! Processing follows the identical path as the HTTP server: partial prefix
 //! fetch → magic sniffing → progressive/embedded/full decode → post-process.
 
-use serde::Serialize;
 use std::env;
 use std::path::PathBuf;
 use thumbrella_tier1::pipeline;
 use thumbrella_tier1::request::{ItemRequest, RequestedOps};
 use thumbrella_tier1::source::SourceRef;
-use thumbrella_tier1::{ItemResult, ThumbnailProfile};
-
-/// Thin wrapper printed to stdout; the full `ItemResult` is flattened in so
-/// callers see all the same fields as the HTTP API response plus the two
-/// CLI-specific fields below.
-#[derive(Debug, Serialize)]
-struct CliOutput {
-    input_url: String,
-    /// Path the thumbnail JPEG was written to (only when `thumbnail` was produced).
-    output_path: String,
-    profile: ThumbnailProfile,
-    /// `true` when the thumbnail was written to `output_path`.
-    thumbnail_written: bool,
-    /// The full ItemResult — same shape as the batch API.  The `thumbnail`
-    /// field is cleared here (bytes are on disk) so it won't appear in output.
-    #[serde(flatten)]
-    result: ItemResult,
-}
+use thumbrella_tier1::{BatchResponse, ThumbnailProfile};
 
 #[tokio::main]
 async fn main() {
@@ -88,7 +70,7 @@ async fn run() -> Result<(), String> {
     let mut result = pipeline::process_item(&item, &profile).await;
 
     // Write thumbnail to disk and clear the bytes so they don't pollute stdout.
-    let thumbnail_written = if let Some(ref jpeg) = result.thumbnail {
+    if let Some(ref jpeg) = result.thumbnail {
         if let Some(parent) = output_path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).map_err(|e| {
@@ -99,20 +81,11 @@ async fn run() -> Result<(), String> {
         std::fs::write(&output_path, jpeg)
             .map_err(|e| format!("failed to write output {}: {e}", output_path.display()))?;
         result.thumbnail = None;
-        true
-    } else {
-        false
-    };
+    }
 
-    let cli_out = CliOutput {
-        input_url: url,
-        output_path: output_path.display().to_string(),
-        profile,
-        thumbnail_written,
-        result,
-    };
+    let response = BatchResponse::from_item_results(vec![result]);
 
-    let json = serde_json::to_string_pretty(&cli_out)
+    let json = serde_json::to_string_pretty(&response)
         .map_err(|e| format!("failed to serialize output JSON: {e}"))?;
     println!("{json}");
 

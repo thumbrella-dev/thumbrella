@@ -30,16 +30,17 @@ pub enum JobStatus {
 pub struct MediaLogData {
     pub timestamp: String,
     pub url: String,
-    pub thumbnail_size: u64,
-    pub job_data: u64,
-    pub job_strategy: Option<String>,
-    pub job_image_buffer_width: Option<u32>,
-    pub job_image_buffer_height: Option<u32>,
-    pub download_time_secs: f64,
-    pub process_time_secs: f64,
-    pub file_length: Option<u64>,
-    pub media_type: Option<crate::media::MediaType>,
-    pub extension: Option<String>,
+    pub customer_id: String,
+    pub download_bytes: u64,
+    pub download_tail: u64,
+    pub download_duration: f64,
+    pub render_duration: f64,
+    pub process_duration: f64,
+    pub process_width: Option<u32>,
+    pub process_height: Option<u32>,
+    pub pixel_art: Option<bool>,
+    pub server_host: String,
+    pub server_tier: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +49,83 @@ pub struct DeveloperData {
     pub fetch_headers: Option<HashMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_log: Option<MediaLogData>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ItemProperties {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+}
+
+impl ItemProperties {
+    pub fn from_dimensions(width: u32, height: u32) -> Self {
+        Self {
+            width: Some(width),
+            height: Some(height),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetch_headers: Option<HashMap<String, String>>,
+    pub timestamp: String,
+    pub url: String,
+    pub customer_id: String,
+    pub download_bytes: u64,
+    pub download_tail: u64,
+    pub download_duration: f64,
+    pub render_duration: f64,
+    pub process_duration: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pixel_art: Option<bool>,
+    pub server_host: String,
+    pub server_tier: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiItemResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<JobStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "option_base64_bytes"
+    )]
+    pub thumbnail: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<crate::media::MediaType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub properties: Option<ItemProperties>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<ServerInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// A single event emitted by the processing pipeline for one item.
@@ -107,6 +185,18 @@ pub struct ItemResult {
     /// Processing outcome for this item.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_status: Option<JobStatus>,
+    /// Wall time for the request handling path in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_duration: Option<f64>,
+    /// Total source bytes read while handling this item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_data: Option<u64>,
+    /// Public-facing render strategy family.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_strategy: Option<String>,
+    /// Stable item properties exposed in the public response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub properties: Option<ItemProperties>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub developer: Option<DeveloperData>,
     pub error: Option<String>,
@@ -123,6 +213,10 @@ impl Default for ItemResult {
             media_type: None,
             extension: None,
             job_status: None,
+            job_duration: None,
+            job_data: None,
+            job_strategy: None,
+            properties: None,
             developer: None,
             error: None,
         }
@@ -132,7 +226,88 @@ impl Default for ItemResult {
 /// Response body for the synchronous batch endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchResponse {
-    pub items: Vec<ItemResult>,
+    pub items: Vec<ApiItemResult>,
+}
+
+impl BatchResponse {
+    pub fn from_item_results(items: Vec<ItemResult>) -> Self {
+        Self {
+            items: items.into_iter().map(ItemResult::into_api).collect(),
+        }
+    }
+}
+
+impl ItemResult {
+    pub fn into_api(self) -> ApiItemResult {
+        let ItemResult {
+            id: _,
+            url,
+            source_meta,
+            thumbnail,
+            media: _,
+            media_type,
+            extension,
+            job_status,
+            job_duration,
+            job_data: _,
+            job_strategy,
+            properties,
+            developer,
+            error,
+        } = self;
+
+        let etag = source_meta.as_ref().and_then(|meta| meta.etag.clone());
+        let mime = source_meta.as_ref().and_then(|meta| {
+            meta.magic_mime.clone().or_else(|| meta.content_type.clone())
+        });
+        let length = source_meta.as_ref().and_then(|meta| meta.content_length);
+        let server = developer.and_then(|developer| {
+            developer.media_log.map(|log| ServerInfo {
+                canonical_url: source_meta.as_ref().and_then(|meta| meta.canonical_url.clone()),
+                cache_key: source_meta.as_ref().and_then(|meta| meta.cache_key.clone()),
+                fetch_headers: developer.fetch_headers,
+                timestamp: log.timestamp,
+                url: log.url,
+                customer_id: log.customer_id,
+                download_bytes: log.download_bytes,
+                download_tail: log.download_tail,
+                download_duration: log.download_duration,
+                render_duration: log.render_duration,
+                process_duration: log.process_duration,
+                process_width: log.process_width,
+                process_height: log.process_height,
+                pixel_art: log.pixel_art,
+                server_host: log.server_host,
+                server_tier: log.server_tier,
+            })
+        });
+
+        ApiItemResult {
+            url,
+            duration: job_duration,
+            status: job_status,
+            strategy: job_strategy,
+            etag,
+            thumbnail,
+            mime,
+            length,
+            r#type: media_type,
+            extension,
+            properties,
+            server,
+            error,
+        }
+    }
+}
+
+pub fn public_job_strategy(raw_strategy: &str) -> String {
+    let strategy = match raw_strategy {
+        "progressive_partial" | "jpeg_progressive" | "png_interlaced_partial" | "png_interlaced" => "progressive",
+        "embedded_jpeg_thumbnail" | "tier2_embedded_heic_thumbnail" | "odt_package_thumbnail" | "docx_package_thumbnail" | "container_internal" => "embedded",
+        "full_image" | "tier2_libav_still" | "tier2_libav_video" | "tier2_libav_heic" | "tier2_libav_avif" | "tier2_libav_exr" => "render",
+        _ => "fallback",
+    };
+    strategy.to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -140,56 +315,22 @@ pub struct BatchResponse {
 // ---------------------------------------------------------------------------
 
 mod base64_bytes {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     pub fn serialize<S: Serializer>(v: &Vec<u8>, s: S) -> Result<S::Ok, S::Error> {
-        let mut enc = String::new();
-        // Inline base64 — swap for the `base64` crate once added to dependencies.
-        base64_encode(v, &mut enc);
+        let enc = STANDARD.encode(v);
         enc.serialize(s)
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
         let s = String::deserialize(d)?;
-        base64_decode(&s).map_err(serde::de::Error::custom)
-    }
-
-    fn base64_encode(input: &[u8], out: &mut String) {
-        const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut i = 0;
-        while i + 2 < input.len() {
-            let b = ((input[i] as u32) << 16) | ((input[i+1] as u32) << 8) | (input[i+2] as u32);
-            out.push(TABLE[((b >> 18) & 63) as usize] as char);
-            out.push(TABLE[((b >> 12) & 63) as usize] as char);
-            out.push(TABLE[((b >> 6)  & 63) as usize] as char);
-            out.push(TABLE[(b & 63) as usize] as char);
-            i += 3;
-        }
-        match input.len() - i {
-            1 => {
-                let b = (input[i] as u32) << 16;
-                out.push(TABLE[((b >> 18) & 63) as usize] as char);
-                out.push(TABLE[((b >> 12) & 63) as usize] as char);
-                out.push_str("==");
-            }
-            2 => {
-                let b = ((input[i] as u32) << 16) | ((input[i+1] as u32) << 8);
-                out.push(TABLE[((b >> 18) & 63) as usize] as char);
-                out.push(TABLE[((b >> 12) & 63) as usize] as char);
-                out.push(TABLE[((b >> 6)  & 63) as usize] as char);
-                out.push('=');
-            }
-            _ => {}
-        }
-    }
-
-    fn base64_decode(_s: &str) -> Result<Vec<u8>, &'static str> {
-        // Placeholder — replace with the `base64` crate once added to dependencies.
-        Err("base64 decoding not yet implemented (add the base64 crate)")
+        STANDARD.decode(s).map_err(serde::de::Error::custom)
     }
 }
 
 mod option_base64_bytes {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     use serde::{Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(v: &Option<Vec<u8>>, s: S) -> Result<S::Ok, S::Error> {
@@ -203,7 +344,10 @@ mod option_base64_bytes {
         let opt = Option::<String>::deserialize(d)?;
         match opt {
             None => Ok(None),
-            Some(_) => Err(serde::de::Error::custom("base64 decoding not yet implemented")),
+            Some(s) => STANDARD
+                .decode(s)
+                .map(Some)
+                .map_err(serde::de::Error::custom),
         }
     }
 

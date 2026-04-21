@@ -6,8 +6,9 @@
 use ffmpeg_next as ffmpeg;
 use image::{DynamicImage, ImageBuffer, Rgb};
 use std::io::Write;
+use std::time::Instant;
 use tempfile::NamedTempFile;
-use thumbrella_tier1::{ItemRequest, ItemResult, SourceMetadata, SourceRef, ThumbnailProfile, ThumbnailRequestState};
+use thumbrella_tier1::{ItemProperties, ItemRequest, ItemResult, JobStatus, SourceMetadata, SourceRef, ThumbnailProfile, ThumbnailRequestState, public_job_strategy};
 
 const TIER2_LIBAV_STILL_STRATEGY: &str = "tier2_libav_still";
 const TIER2_LIBAV_VIDEO_STRATEGY: &str = "tier2_libav_video";
@@ -41,6 +42,7 @@ pub async fn try_process_item(
     profile: &ThumbnailProfile,
     state: &ThumbnailRequestState,
 ) -> Option<ItemResult> {
+    let started = Instant::now();
     let url = source_url(&item.source)?;
 
     // Fast gate from promoted state: if we already have a head window that is
@@ -65,9 +67,15 @@ pub async fn try_process_item(
                 source_meta: None,
                 thumbnail: None,
                 media: None,
+                media_type: None,
+                extension: None,
+                job_status: Some(JobStatus::Failed),
+                job_duration: Some(started.elapsed().as_secs_f64()),
+                job_data: None,
+                job_strategy: None,
+                properties: None,
                 developer: None,
                 error: Some(err),
-                ..Default::default()
             });
         }
     };
@@ -77,20 +85,28 @@ pub async fn try_process_item(
         Some(bytes.len() as u64),
         headers.get("last-modified").cloned(),
     );
+    let media_type = meta.file_kind.as_ref().map(|kind| kind.media_type);
+    let extension = meta.file_kind.as_ref().map(|kind| kind.extension.clone());
 
     // Returns None if not a Tier 2 format — let Tier 1 surface its own error.
     let render_result = try_render_tier2(&bytes, profile)?;
 
     match render_result {
-        Ok((jpeg, _info)) => Some(ItemResult {
+        Ok((jpeg, info)) => Some(ItemResult {
             id: item.id.clone(),
             url: Some(url.to_string()),
             source_meta: Some(meta),
             thumbnail: Some(jpeg),
             media: None,
+            media_type,
+            extension,
+            job_status: Some(JobStatus::Success),
+            job_duration: Some(started.elapsed().as_secs_f64()),
+            job_data: Some(bytes.len() as u64),
+            job_strategy: Some(public_job_strategy(&info.decode_strategy)),
+            properties: Some(ItemProperties::from_dimensions(info.input_width, info.input_height)),
             developer: None,
             error: None,
-            ..Default::default()
         }),
         Err(err) => Some(ItemResult {
             id: item.id.clone(),
@@ -98,9 +114,15 @@ pub async fn try_process_item(
             source_meta: Some(meta),
             thumbnail: None,
             media: None,
+            media_type,
+            extension,
+            job_status: Some(JobStatus::Failed),
+            job_duration: Some(started.elapsed().as_secs_f64()),
+            job_data: Some(bytes.len() as u64),
+            job_strategy: None,
+            properties: None,
             developer: None,
             error: Some(err),
-            ..Default::default()
         }),
     }
 }
