@@ -4,7 +4,6 @@
 //! them all; streaming endpoints forward each one as it arrives.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use crate::source::SourceMetadata;
 use crate::media::MediaMetadata;
 
@@ -26,29 +25,78 @@ pub enum JobStatus {
     Defer,
 }
 
+/// Per-HTTP-request tracking record.
+///
+/// One of these is created for each inbound HTTP request (batch call, dev page
+/// load, etc.) and links together all the per-thumbnail `ServerInfo` records
+/// produced by that request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MediaLogData {
+pub struct RequestRecord {
+    pub id: String,
+    pub customer: String,
+    pub host: String,
+    pub path: String,
     pub timestamp: String,
-    pub url: String,
-    pub customer_id: String,
-    pub download_bytes: u64,
-    pub download_tail: u64,
-    pub download_duration: f64,
-    pub render_duration: f64,
-    pub process_duration: f64,
-    pub process_width: Option<u32>,
-    pub process_height: Option<u32>,
-    pub pixel_art: Option<bool>,
-    pub server_host: String,
-    pub server_tier: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
+    /// Wall-clock seconds from request start to all items complete.
+    /// Populated after all pipeline tasks finish; None while in-flight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<f64>,
 }
 
+/// Per-thumbnail server-side tracking record.
+///
+/// Populated on every request regardless of developer mode. Whether it is
+/// included in the public batch API response is controlled by
+/// `THUMBRELLA_DEVELOPER_MODE`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeveloperData {
+pub struct ServerInfo {
+    /// ID of the enclosing HTTP request (`RequestRecord.id`).
+    pub request_id: String,
+    /// Canonical fetch URL (query params / auth tokens stripped).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fetch_headers: Option<HashMap<String, String>>,
+    pub fetch_url: Option<String>,
+    /// Hashed compound cache key: sha256("{customer}:{canonical_url}").
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub media_log: Option<MediaLogData>,
+    pub cache_key: Option<String>,
+    /// Source byte length from Content-Length header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetch_size: Option<u64>,
+    /// Source MIME type (magic-sniffed preferred over Content-Type).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetch_mime: Option<String>,
+    /// ETag / Last-Modified validator token as returned by upstream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetch_etag: Option<String>,
+    /// Whether the upstream source supports byte-range requests.
+    pub fetch_ranges: bool,
+    /// Last-Modified header value from the upstream source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetch_last_modified: Option<String>,
+    /// Total bytes received from the upstream source.
+    pub download_bytes: u64,
+    /// Extra bytes fetched in a tail read (e.g. TIFF range request).
+    pub download_tail: u64,
+    /// Seconds spent waiting for upstream download(s).
+    pub download_duration: f64,
+    /// Seconds spent on decode and pre-processing (excluding encode).
+    pub render_duration: f64,
+    /// Seconds spent on the image encode / post-process step.
+    pub process_duration: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pixel_art: Option<bool>,
+    /// Byte length of the encoded JPEG thumbnail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail_bytes: Option<u64>,
+    pub server_host: String,
+    pub server_tier: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,31 +116,7 @@ impl ItemProperties {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServerInfo {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub canonical_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fetch_headers: Option<HashMap<String, String>>,
-    pub timestamp: String,
-    pub url: String,
-    pub customer_id: String,
-    pub download_bytes: u64,
-    pub download_tail: u64,
-    pub download_duration: f64,
-    pub render_duration: f64,
-    pub process_duration: f64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub process_width: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub process_height: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pixel_art: Option<bool>,
-    pub server_host: String,
-    pub server_tier: u8,
-}
+// ServerInfo is defined above (replaces old struct)
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiItemResult {
@@ -122,6 +146,9 @@ pub struct ApiItemResult {
     pub extension: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub properties: Option<ItemProperties>,
+    /// Byte length of the encoded JPEG thumbnail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<ServerInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -198,7 +225,7 @@ pub struct ItemResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub properties: Option<ItemProperties>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub developer: Option<DeveloperData>,
+    pub server: Option<ServerInfo>,
     pub error: Option<String>,
 }
 
@@ -217,7 +244,7 @@ impl Default for ItemResult {
             job_data: None,
             job_strategy: None,
             properties: None,
-            developer: None,
+            server: None,
             error: None,
         }
     }
@@ -226,12 +253,14 @@ impl Default for ItemResult {
 /// Response body for the synchronous batch endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchResponse {
+    pub request: RequestRecord,
     pub items: Vec<ApiItemResult>,
 }
 
 impl BatchResponse {
-    pub fn from_item_results(items: Vec<ItemResult>) -> Self {
+    pub fn from_item_results(items: Vec<ItemResult>, request: RequestRecord) -> Self {
         Self {
+            request,
             items: items.into_iter().map(ItemResult::into_api).collect(),
         }
     }
@@ -252,7 +281,7 @@ impl ItemResult {
             job_data: _,
             job_strategy,
             properties,
-            developer,
+            server,
             error,
         } = self;
 
@@ -261,26 +290,7 @@ impl ItemResult {
             meta.magic_mime.clone().or_else(|| meta.content_type.clone())
         });
         let length = source_meta.as_ref().and_then(|meta| meta.content_length);
-        let server = developer.and_then(|developer| {
-            developer.media_log.map(|log| ServerInfo {
-                canonical_url: source_meta.as_ref().and_then(|meta| meta.canonical_url.clone()),
-                cache_key: source_meta.as_ref().and_then(|meta| meta.cache_key.clone()),
-                fetch_headers: developer.fetch_headers,
-                timestamp: log.timestamp,
-                url: log.url,
-                customer_id: log.customer_id,
-                download_bytes: log.download_bytes,
-                download_tail: log.download_tail,
-                download_duration: log.download_duration,
-                render_duration: log.render_duration,
-                process_duration: log.process_duration,
-                process_width: log.process_width,
-                process_height: log.process_height,
-                pixel_art: log.pixel_art,
-                server_host: log.server_host,
-                server_tier: log.server_tier,
-            })
-        });
+        let thumbnail_bytes = thumbnail.as_ref().map(|b| b.len() as u64);
 
         ApiItemResult {
             url,
@@ -294,6 +304,7 @@ impl ItemResult {
             r#type: media_type,
             extension,
             properties,
+            thumbnail_bytes,
             server,
             error,
         }

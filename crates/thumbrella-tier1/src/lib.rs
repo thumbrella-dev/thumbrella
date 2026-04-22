@@ -8,7 +8,7 @@ pub mod result;
 pub mod profile;
 pub mod source;
 pub mod pipeline;
-pub mod paged_io;
+pub mod stream_buf;
 pub mod http_source;
 pub mod routes;
 pub mod devpage;

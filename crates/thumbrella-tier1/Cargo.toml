@@ -22,8 +22,9 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 image = { version = "0.25", default-features = true, features = ["jpeg", "png", "webp", "gif"] }
 infer = "0.16"
 futures = "0.3"
-mozjpeg = "0.10"
+mozjpeg-rs = "0.9"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 base64 = "0.22"
 v_htmlescape = "0.15"
 time = { version = "0.3", features = ["formatting"] }
+sha2 = "0.10"

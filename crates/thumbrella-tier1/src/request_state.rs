@@ -84,7 +84,13 @@ impl SparseFileBuffer {
 pub struct ThumbnailRequestState {
     pub request_id: String,
     pub item_id: Option<String>,
+    /// Original URL as supplied by the caller. May contain expiring auth tokens.
+    /// Request-lifetime only — never persist or log this value.
     pub source_url: String,
+    /// Canonical URL: auth tokens stripped, scheme+host normalised. Resolved
+    /// from the fetch response in `observe_prefix`; falls back to `source_url`
+    /// until the first fetch completes. Safe to persist, log, and use as a
+    /// cache key component.
     pub source_url_canonical: String,
     pub account_id: Option<String>,
     pub hop_count: u32,
@@ -122,6 +128,11 @@ impl ThumbnailRequestState {
     pub fn observe_prefix(&mut self, bytes: &[u8], meta: &SourceMetadata) {
         self.bytes_downloaded = self.bytes_downloaded.saturating_add(bytes.len() as u64);
         self.source_meta = Some(meta.clone());
+
+        // Update the canonical URL once we have it from the fetch response.
+        if let Some(canonical) = &meta.canonical_url {
+            self.source_url_canonical = canonical.clone();
+        }
 
         if self.sniffed_mime.is_none() {
             self.sniffed_mime = meta.magic_mime.clone().or_else(|| meta.content_type.clone());

@@ -7,6 +7,13 @@ members = [
 ]
 
 [profile.dev]
+opt-level = 1
 debug = 1
 incremental = true
 codegen-units = 256
+
+# Compile dependencies with full optimization so heavy crates (image, jpeg-encoder,
+# ravif, etc.) run at near-release speed. They're cached after the first build so
+# this only adds time on a clean build.
+[profile.dev.package."*"]
+opt-level = 3

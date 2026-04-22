@@ -6,15 +6,12 @@
 
 use image::imageops::{FilterType, crop_imm, resize};
 use image::{DynamicImage, ImageDecoder, ImageReader, Rgba, RgbaImage, metadata::Orientation};
-use mozjpeg::{ColorSpace, Compress, Marker};
 use serde::Serialize;
 use std::collections::{HashSet, VecDeque};
 use std::io::Cursor;
 use std::sync::OnceLock;
 use std::time::Instant;
-use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
-use crate::{ItemProperties, app_config, public_job_strategy, DeveloperData, ItemRequest, ItemResult, JobStatus, MediaLogData, SourceMetadata, SourceRef, ThumbnailProfile, http_source};
+use crate::{ItemProperties, public_job_strategy, ServerInfo, ItemRequest, ItemResult, JobStatus, SourceMetadata, SourceRef, ThumbnailProfile, http_source};
 use crate::http_source::ConditionalRequest;
 use crate::ThumbnailRequestState;
 use zip::read::ZipArchive;
@@ -66,12 +63,18 @@ pub struct RenderInfo {
     pub input_height: u32,
     pub decoded_width: u32,
     pub decoded_height: u32,
+    /// Width of the image entering the Triangle resize — after power-of-2 pre-scaling.
+    pub process_width: u32,
+    /// Height of the image entering the Triangle resize — after power-of-2 pre-scaling.
+    pub process_height: u32,
     pub source_orientation: String,
     pub pixel_art_mode: bool,
     pub output_width: u32,
     pub output_height: u32,
     pub output_quality: u8,
     pub process_duration: f64,
+    /// Byte length of the encoded JPEG thumbnail.
+    pub thumbnail_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -115,6 +118,34 @@ pub fn metadata_from_local_bytes(bytes: &[u8], content_length: Option<u64>, last
 
 /// Decode bytes, run through the canonical post-process pipeline, and return
 /// a low-quality JPEG plus render details.
+/// Reduce an image by the largest power-of-2 factor such that both dimensions
+/// remain at or above the given target. Nearest-neighbour at an exact integer
+/// ratio is O(output pixels) and produces no visible quality loss before a
+/// subsequent Triangle pass — at integer divisors it's a perfect box filter.
+/// Returns the image unchanged when no reduction is possible or worthwhile.
+fn pre_scale_to_target(img: DynamicImage, target_w: u32, target_h: u32) -> DynamicImage {
+    let w = img.width();
+    let h = img.height();
+    let tw = target_w.max(1);
+    let th = target_h.max(1);
+
+    let mut divisor = 1u32;
+    loop {
+        let next = divisor * 2;
+        if w / next >= tw && h / next >= th {
+            divisor = next;
+        } else {
+            break;
+        }
+    }
+
+    if divisor <= 1 {
+        return img;
+    }
+
+    img.resize_exact(w / divisor, h / divisor, FilterType::Nearest)
+}
+
 pub fn render_thumbnail_from_bytes(bytes: &[u8], profile: &ThumbnailProfile) -> Result<(Vec<u8>, RenderInfo), String> {
     render_thumbnail_from_bytes_with_stream_bytes(bytes, profile, bytes.len() as u64)
 }
@@ -217,6 +248,15 @@ fn render_thumbnail_from_dynamic_image_with_options(
     let decoded_width = img.width();
     let decoded_height = img.height();
 
+    // Pre-reduce large images by the largest power-of-2 factor that keeps both
+    // dimensions above the render target. Nearest at an exact integer ratio is
+    // O(output pixels) — negligible — and shrinks the buffer that the
+    // subsequent Triangle resize has to work on from e.g. 3000×4000 to
+    // 375×500 before the final pass to 250×200.
+    let img = pre_scale_to_target(img, profile.width, profile.height);
+    let process_width = img.width();
+    let process_height = img.height();
+
     // Embedded JPEG thumbnails are photographic content — use Lanczos3 when
     // upscaling them, not Nearest (which is only appropriate for pixel art).
     let is_embedded = is_embedded_thumbnail_strategy(decode_strategy);
@@ -237,6 +277,7 @@ fn render_thumbnail_from_dynamic_image_with_options(
     };
 
     let thumb = buf.encode_jpeg(effective_quality)?;
+    let thumbnail_bytes = thumb.len() as u64;
     let process_duration = process_started.elapsed().as_secs_f64();
     let info = RenderInfo {
         stream_bytes_read,
@@ -245,12 +286,15 @@ fn render_thumbnail_from_dynamic_image_with_options(
         input_height: source_height,
         decoded_width,
         decoded_height,
+        process_width,
+        process_height,
         source_orientation: orientation_name(orientation).to_string(),
         pixel_art_mode,
         output_width: profile.width,
         output_height: profile.height,
         output_quality: effective_quality,
         process_duration,
+        thumbnail_bytes,
     };
 
     Ok((thumb, info))
@@ -281,9 +325,12 @@ fn decode_image_with_strategy(bytes: &[u8]) -> Result<(DynamicImage, DecodeStrat
     }
 
     if let Some(png) = inspect_png(bytes) {
-        let partial_read_bytes = png_partial_read_bytes(&png, bytes.len());
-        if png.is_interlaced && bytes.len() > partial_read_bytes {
-            let partial = &bytes[..partial_read_bytes];
+        if png.is_interlaced {
+            // Attempt partial decode using however many bytes we have, up to the
+            // target window. Even if we have fewer bytes than ideal, an interlaced
+            // PNG often yields a usable lower-resolution pass from partial data.
+            let target = png_partial_read_bytes(&png);
+            let partial = &bytes[..target.min(bytes.len())];
             if let Ok(img) = decode_partial_interlaced_png(partial) {
                 return Ok((img, DecodeStrategy::PngInterlacedPartial));
             }
@@ -297,9 +344,13 @@ fn decode_image_with_strategy(bytes: &[u8]) -> Result<(DynamicImage, DecodeStrat
             }
         }
 
-        let partial_read_bytes = progressive_partial_read_bytes(&jpeg, bytes.len());
-        if jpeg.is_progressive && bytes.len() > partial_read_bytes {
-            let partial = &bytes[..partial_read_bytes];
+        if jpeg.is_progressive {
+            // Attempt partial decode using however many bytes we have, up to the
+            // target window. Even when the prefix is smaller than the target, a
+            // progressive JPEG first scan is often fully contained in the prefix
+            // and yields a complete (lower-quality) image.
+            let target = progressive_partial_read_bytes(&jpeg);
+            let partial = &bytes[..target.min(bytes.len())];
             if let Ok(img) = decode_partial_progressive(partial) {
                 return Ok((img, DecodeStrategy::ProgressivePartial));
             }
@@ -425,9 +476,9 @@ fn inspect_png(bytes: &[u8]) -> Option<PngInspect> {
     })
 }
 
-fn png_partial_read_bytes(png: &PngInspect, available_len: usize) -> usize {
+fn png_partial_read_bytes(png: &PngInspect) -> usize {
     let estimated = ((png.width as u64 * png.height as u64) / 18) as usize;
-    (estimated.max(16 * 1024)).min(available_len)
+    estimated.max(16 * 1024)
 }
 
 fn decode_partial_interlaced_png(partial: &[u8]) -> Result<DynamicImage, image::ImageError> {
@@ -528,14 +579,14 @@ fn inspect_jpeg(bytes: &[u8]) -> Option<JpegInspect> {
     })
 }
 
-fn progressive_partial_read_bytes(jpeg: &JpegInspect, available_len: usize) -> usize {
+fn progressive_partial_read_bytes(jpeg: &JpegInspect) -> usize {
     let estimated = jpeg
         .width
         .zip(jpeg.height)
         .map(|(w, h)| ((w as u64 * h as u64) / 42) as usize)
         .unwrap_or(256 * 1024);
 
-    (estimated.max(10 * 1024)).min(available_len)
+    estimated.max(10 * 1024)
 }
 
 fn extract_exif_thumbnail_jpeg(app1_data: &[u8]) -> Option<Vec<u8>> {
@@ -997,9 +1048,8 @@ fn properties_from_render_info(info: &RenderInfo) -> ItemProperties {
 }
 
 /// Process a single batch item for the general still-image case.
-pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> ItemResult {
+pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile, request_id: &str) -> ItemResult {
     let started = Instant::now();
-    let developer_mode = app_config().developer_mode;
     let mut request_state = ThumbnailRequestState::new(item);
     let conditional = parse_conditional_request(item.etag.as_deref());
 
@@ -1017,13 +1067,13 @@ pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> Ite
             job_data: None,
             job_strategy: None,
             properties: None,
-            developer: None,
+            server: None,
             error: Some("unsupported source type".into()),
         };
     };
 
     let fetch_started = Instant::now();
-    let remote = match fetch_remote_prefix(url, REMOTE_PREFIX_READ_BYTES, conditional.as_ref()).await {
+    let mut remote = match begin_remote_fetch(url, conditional.as_ref()).await {
         Ok(v) => v,
         Err(err) => {
             return ItemResult {
@@ -1039,7 +1089,7 @@ pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> Ite
                 job_data: None,
                 job_strategy: None,
                 properties: None,
-                developer: None,
+                server: None,
                 error: Some(err),
             }
         }
@@ -1057,7 +1107,7 @@ pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> Ite
         raw_strategy: Option<&str>,
         properties: Option<ItemProperties>,
         durations: DurationBreakdown,
-        developer: Option<DeveloperData>,
+        server: Option<ServerInfo>,
         error: Option<String>,
     | ItemResult {
         id: item.id.clone(),
@@ -1072,7 +1122,7 @@ pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> Ite
         job_data: Some(job_data),
         job_strategy: raw_strategy.map(public_job_strategy),
         properties,
-        developer,
+        server,
         error,
     };
 
@@ -1098,18 +1148,17 @@ pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> Ite
         process_width: Option<u32>,
         process_height: Option<u32>,
         pixel_art: Option<bool>,
-    | {
-        if !developer_mode {
-            return None;
-        }
-        Some(build_developer_data(
-            url,
-            &remote.headers,
+        thumbnail_bytes: Option<u64>,
+    | -> Option<ServerInfo> {
+        Some(build_server_info(
+            request_id,
+            &meta,
             download_bytes,
             download_tail_bytes,
             process_width,
             process_height,
             pixel_art,
+            thumbnail_bytes,
             durations,
             1,
         ))
@@ -1130,12 +1179,13 @@ pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> Ite
                 None,
                 None,
                 None,
+                None,
             ),
             None,
         );
     }
 
-    request_state.observe_prefix(&remote.prefix_bytes, &meta);
+    request_state.observe_prefix(remote.bytes(), &meta);
 
     // -----------------------------------------------------------------------
     // Cache lookup
@@ -1163,7 +1213,7 @@ pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> Ite
             if let Ok(mut cached_result) = serde_json::from_slice::<ItemResult>(&cached.data) {
                 cached_result.job_status = Some(JobStatus::Cached);
                 cached_result.job_duration = Some(DurationBreakdown::up_to_now(started, total_download_time_secs).total());
-                cached_result.job_data = Some(remote.prefix_bytes.len() as u64);
+                cached_result.job_data = Some(remote.network_bytes());
                 return cached_result;
             }
             // Deserialisation failed (schema change after a deploy) — fall
@@ -1172,17 +1222,19 @@ pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> Ite
     }
 
     if !item.ops.thumbnail {
+        let nbytes = remote.network_bytes();
         return build_result(
             JobStatus::Success,
             None,
-            remote.prefix_bytes.len() as u64,
+            nbytes,
             None,
             None,
             DurationBreakdown::up_to_now(started, total_download_time_secs),
             make_developer(
-                remote.prefix_bytes.len() as u64,
+                nbytes,
                 download_tail_bytes,
                 DurationBreakdown::up_to_now(started, total_download_time_secs),
+                None,
                 None,
                 None,
                 None,
@@ -1191,12 +1243,10 @@ pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> Ite
         );
     }
 
-    let mut stream_bytes_read = remote.prefix_bytes.len() as u64;
-
     let (thumb, render_info, durations) = if remote.is_probably_jpeg() {
         let pre_render_elapsed = started.elapsed().as_secs_f64();
-        match render_thumbnail_from_bytes_with_stream_bytes(&remote.prefix_bytes, profile, stream_bytes_read) {
-            Ok((jpeg, info)) if info.decode_strategy != DecodeStrategy::FullImage.as_str() || remote.prefix_is_complete() => {
+        match render_thumbnail_from_bytes_with_stream_bytes(remote.bytes(), profile, remote.network_bytes()) {
+            Ok((jpeg, info)) if info.decode_strategy != DecodeStrategy::FullImage.as_str() || remote.is_complete() => {
                 let durations = DurationBreakdown {
                     download_duration: total_download_time_secs,
                     render_duration: (pre_render_elapsed - total_download_time_secs).max(0.0),
@@ -1205,37 +1255,37 @@ pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> Ite
                 (jpeg, info, durations)
             }
             Ok(_) | Err(_) => {
+                // Partial decode insufficient — read the rest of the file from the same
+                // open connection.  No new HTTP request is opened.
                 let fetch_started = Instant::now();
-                let full = match fetch_url_full(url).await {
-                    Ok(v) => v,
-                    Err(err) => {
-                        return build_result(
-                            JobStatus::Failed,
-                            None,
-                            stream_bytes_read,
-                            None,
-                            None,
+                if let Err(err) = remote.read_all().await {
+                    let sbr = remote.network_bytes();
+                    return build_result(
+                        JobStatus::Failed,
+                        None,
+                        sbr,
+                        None,
+                        None,
+                        DurationBreakdown::up_to_now(started, total_download_time_secs),
+                        make_developer(
+                            sbr,
+                            download_tail_bytes,
                             DurationBreakdown::up_to_now(started, total_download_time_secs),
-                            make_developer(
-                                stream_bytes_read,
-                                download_tail_bytes,
-                                DurationBreakdown::up_to_now(started, total_download_time_secs),
-                                None,
-                                None,
-                                None,
-                            ),
-                            Some(err),
-                        );
-                    }
-                };
+                            None,
+                            None,
+                            None,
+                            None,
+                        ),
+                        Some(err),
+                    );
+                }
                 total_download_time_secs += fetch_started.elapsed().as_secs_f64();
 
                 request_state.switch_to_streaming_mode();
-                request_state.note_stream_bytes(full.len());
-                stream_bytes_read = stream_bytes_read.saturating_add(full.len() as u64);
+                request_state.note_stream_bytes(remote.bytes().len());
 
                 let pre_render_elapsed = started.elapsed().as_secs_f64();
-                match render_thumbnail_from_bytes_with_stream_bytes(&full, profile, stream_bytes_read) {
+                match render_thumbnail_from_bytes_with_stream_bytes(remote.bytes(), profile, remote.network_bytes()) {
                     Ok((jpeg, info)) => {
                         let durations = DurationBreakdown {
                             download_duration: total_download_time_secs,
@@ -1248,17 +1298,19 @@ pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> Ite
                         if let Some(dispatched) = crate::dispatch::try_dispatch_tier2(item, profile, &request_state).await {
                             return dispatched;
                         }
+                        let sbr = remote.network_bytes();
                         return build_result(
                             JobStatus::Failed,
                             None,
-                            stream_bytes_read,
+                            sbr,
                             None,
                             None,
                             DurationBreakdown::up_to_now(started, total_download_time_secs),
                             make_developer(
-                                stream_bytes_read,
+                                sbr,
                                 download_tail_bytes,
                                 DurationBreakdown::up_to_now(started, total_download_time_secs),
+                                None,
                                 None,
                                 None,
                                 None,
@@ -1271,20 +1323,22 @@ pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> Ite
         }
     } else {
         let fetch_started = Instant::now();
-        let embedded = match try_fetch_remote_tiff_embedded_jpeg(url, &remote).await {
+        let embedded = match try_fetch_remote_tiff_embedded_jpeg(&mut remote).await {
             Ok(v) => v,
             Err(err) => {
+                let sbr = remote.network_bytes();
                 return build_result(
                     JobStatus::Failed,
                     None,
-                    stream_bytes_read,
+                    sbr,
                     None,
                     None,
                     DurationBreakdown::up_to_now(started, total_download_time_secs),
                     make_developer(
-                        stream_bytes_read,
+                        sbr,
                         download_tail_bytes,
                         DurationBreakdown::up_to_now(started, total_download_time_secs),
+                        None,
                         None,
                         None,
                         None,
@@ -1296,7 +1350,6 @@ pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> Ite
         total_download_time_secs += fetch_started.elapsed().as_secs_f64();
 
         if let Some((embedded_jpeg, extra_read)) = embedded {
-            stream_bytes_read = stream_bytes_read.saturating_add(extra_read);
             download_tail_bytes = download_tail_bytes.saturating_add(extra_read);
 
             if let Ok(img) = image::load_from_memory(&embedded_jpeg) {
@@ -1304,10 +1357,11 @@ pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> Ite
                 match render_thumbnail_from_dynamic_image_with_stream_bytes(
                     img,
                     profile,
-                    stream_bytes_read,
+                    remote.network_bytes(),
                     DecodeStrategy::EmbeddedJpegThumbnail.as_str(),
                 ) {
                     Ok((jpeg, info)) => {
+                        let sbr = remote.network_bytes();
                         let raw_strategy = info.decode_strategy.clone();
                         let durations = DurationBreakdown {
                             download_duration: total_download_time_secs,
@@ -1317,33 +1371,36 @@ pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> Ite
                         return build_result(
                             JobStatus::Success,
                             Some(jpeg),
-                            stream_bytes_read,
+                            sbr,
                             Some(raw_strategy.as_str()),
                             Some(properties_from_render_info(&info)),
                             durations,
                             make_developer(
-                                stream_bytes_read,
+                                sbr,
                                 download_tail_bytes,
                                 durations,
-                                Some(info.decoded_width),
-                                Some(info.decoded_height),
+                                Some(info.process_width),
+                                Some(info.process_height),
                                 Some(info.pixel_art_mode),
+                                Some(info.thumbnail_bytes),
                             ),
                             None,
                         );
                     }
                     Err(err) => {
+                        let sbr = remote.network_bytes();
                         return build_result(
                             JobStatus::Failed,
                             None,
-                            stream_bytes_read,
+                            sbr,
                             None,
                             None,
                             DurationBreakdown::up_to_now(started, total_download_time_secs),
                             make_developer(
-                                stream_bytes_read,
+                                sbr,
                                 download_tail_bytes,
                                 DurationBreakdown::up_to_now(started, total_download_time_secs),
+                                None,
                                 None,
                                 None,
                                 None,
@@ -1357,11 +1414,12 @@ pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> Ite
 
         let pre_render_elapsed = started.elapsed().as_secs_f64();
         if let Ok((jpeg, info)) = render_thumbnail_from_bytes_with_stream_bytes(
-            &remote.prefix_bytes,
+            remote.bytes(),
             profile,
-            stream_bytes_read,
+            remote.network_bytes(),
         ) {
-            if info.decode_strategy != DecodeStrategy::FullImage.as_str() || remote.prefix_is_complete() {
+            if info.decode_strategy != DecodeStrategy::FullImage.as_str() || remote.is_complete() {
+                let sbr = remote.network_bytes();
                 let raw_strategy = info.decode_strategy.clone();
                 let durations = DurationBreakdown {
                     download_duration: total_download_time_secs,
@@ -1371,54 +1429,55 @@ pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> Ite
                 return build_result(
                     JobStatus::Success,
                     Some(jpeg),
-                    stream_bytes_read,
+                    sbr,
                     Some(raw_strategy.as_str()),
                     Some(properties_from_render_info(&info)),
                     durations,
                     make_developer(
-                        stream_bytes_read,
+                        sbr,
                         download_tail_bytes,
                         durations,
-                        Some(info.decoded_width),
-                        Some(info.decoded_height),
+                        Some(info.process_width),
+                        Some(info.process_height),
                         Some(info.pixel_art_mode),
+                        Some(info.thumbnail_bytes),
                     ),
                     None,
                 );
             }
         }
 
+        // Partial decode insufficient — read the rest of the file from the same
+        // open connection.  No new HTTP request is opened.
         let fetch_started = Instant::now();
-        let full = match fetch_url_full(url).await {
-            Ok(v) => v,
-            Err(err) => {
-                return build_result(
-                    JobStatus::Failed,
-                    None,
-                    stream_bytes_read,
-                    None,
-                    None,
+        if let Err(err) = remote.read_all().await {
+            let sbr = remote.network_bytes();
+            return build_result(
+                JobStatus::Failed,
+                None,
+                sbr,
+                None,
+                None,
+                DurationBreakdown::up_to_now(started, total_download_time_secs),
+                make_developer(
+                    sbr,
+                    download_tail_bytes,
                     DurationBreakdown::up_to_now(started, total_download_time_secs),
-                    make_developer(
-                        stream_bytes_read,
-                        download_tail_bytes,
-                        DurationBreakdown::up_to_now(started, total_download_time_secs),
-                        None,
-                        None,
-                        None,
-                    ),
-                    Some(err),
-                )
-            }
-        };
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                Some(err),
+            )
+        }
         total_download_time_secs += fetch_started.elapsed().as_secs_f64();
 
         request_state.switch_to_streaming_mode();
-        request_state.note_stream_bytes(full.len());
-        stream_bytes_read = stream_bytes_read.saturating_add(full.len() as u64);
+        request_state.note_stream_bytes(remote.bytes().len());
 
         let pre_render_elapsed = started.elapsed().as_secs_f64();
-        match render_thumbnail_from_bytes_with_stream_bytes(&full, profile, stream_bytes_read) {
+        match render_thumbnail_from_bytes_with_stream_bytes(remote.bytes(), profile, remote.network_bytes()) {
             Ok((jpeg, info)) => {
                 let durations = DurationBreakdown {
                     download_duration: total_download_time_secs,
@@ -1431,17 +1490,19 @@ pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> Ite
                 if let Some(dispatched) = crate::dispatch::try_dispatch_tier2(item, profile, &request_state).await {
                     return dispatched;
                 }
+                let sbr = remote.network_bytes();
                 return build_result(
                     JobStatus::Failed,
                     None,
-                    stream_bytes_read,
+                    sbr,
                     None,
                     None,
                     DurationBreakdown::up_to_now(started, total_download_time_secs),
                     make_developer(
-                        stream_bytes_read,
+                        sbr,
                         download_tail_bytes,
                         DurationBreakdown::up_to_now(started, total_download_time_secs),
+                        None,
                         None,
                         None,
                         None,
@@ -1452,21 +1513,23 @@ pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> Ite
         }
     };
 
+    let sbr = remote.network_bytes();
     let raw_strategy = render_info.decode_strategy.clone();
     let result = build_result(
         JobStatus::Success,
         Some(thumb),
-        stream_bytes_read,
+        sbr,
         Some(raw_strategy.as_str()),
         Some(properties_from_render_info(&render_info)),
         durations,
         make_developer(
-            stream_bytes_read,
+            sbr,
             download_tail_bytes,
             durations,
-            Some(render_info.decoded_width),
-            Some(render_info.decoded_height),
+            Some(render_info.process_width),
+            Some(render_info.process_height),
             Some(render_info.pixel_art_mode),
+            Some(render_info.thumbnail_bytes),
         ),
         None,
     );
@@ -1474,38 +1537,47 @@ pub async fn process_item(item: &ItemRequest, profile: &ThumbnailProfile) -> Ite
     result
 }
 
-fn build_developer_data(
-    url: &str,
-    headers: &std::collections::HashMap<String, String>,
+fn build_server_info(
+    request_id: &str,
+    meta: &SourceMetadata,
     download_bytes: u64,
     download_tail: u64,
     process_width: Option<u32>,
     process_height: Option<u32>,
     pixel_art: Option<bool>,
+    thumbnail_bytes: Option<u64>,
     durations: DurationBreakdown,
     server_tier: u8,
-) -> DeveloperData {
-    let timestamp = OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
+) -> ServerInfo {
+    use sha2::{Digest, Sha256};
 
-    DeveloperData {
-        fetch_headers: Some(headers.clone()),
-        media_log: Some(MediaLogData {
-            timestamp,
-            url: url.to_string(),
-            customer_id: "dev".to_string(),
-            download_bytes,
-            download_tail,
-            download_duration: durations.download_duration,
-            render_duration: durations.render_duration,
-            process_duration: durations.process_duration,
-            process_width,
-            process_height,
-            pixel_art,
-            server_host: "dev".to_string(),
-            server_tier,
-        }),
+    let fetch_url = meta.canonical_url.clone();
+    let cache_key = fetch_url.as_deref().map(|canonical| {
+        let compound = format!("unknown:{canonical}");
+        let hash = Sha256::digest(compound.as_bytes());
+        format!("{hash:x}")
+    });
+
+    ServerInfo {
+        request_id: request_id.to_string(),
+        fetch_url,
+        cache_key,
+        fetch_size: meta.content_length,
+        fetch_mime: meta.magic_mime.clone().or_else(|| meta.content_type.clone()),
+        fetch_etag: meta.etag.clone(),
+        fetch_ranges: meta.accepts_ranges,
+        fetch_last_modified: meta.last_modified.clone(),
+        download_bytes,
+        download_tail,
+        download_duration: durations.download_duration,
+        render_duration: durations.render_duration,
+        process_duration: durations.process_duration,
+        process_width,
+        process_height,
+        pixel_art,
+        thumbnail_bytes,
+        server_host: "dev".to_string(),
+        server_tier,
     }
 }
 
@@ -1522,10 +1594,9 @@ fn looks_like_tiff_container(bytes: &[u8]) -> bool {
 }
 
 async fn try_fetch_remote_tiff_embedded_jpeg(
-    url: &str,
-    remote: &RemotePrefix,
+    remote: &mut RemoteStream,
 ) -> Result<Option<(Vec<u8>, u64)>, String> {
-    if !looks_like_tiff_container(&remote.prefix_bytes)
+    if !looks_like_tiff_container(remote.bytes())
         && !remote
             .meta
             .magic_mime
@@ -1536,7 +1607,7 @@ async fn try_fetch_remote_tiff_embedded_jpeg(
         return Ok(None);
     }
 
-    let Some((off, len)) = find_tiff_embedded_jpeg_span(&remote.prefix_bytes) else {
+    let Some((off, len)) = find_tiff_embedded_jpeg_span(remote.bytes()) else {
         return Ok(None);
     };
     if len == 0 || len > MAX_DOWNLOAD_BYTES {
@@ -1548,39 +1619,58 @@ async fn try_fetch_remote_tiff_embedded_jpeg(
         None => return Ok(None),
     };
 
-    if end <= remote.prefix_bytes.len() {
-        let thumb = remote.prefix_bytes[off..end].to_vec();
+    if end <= remote.bytes().len() {
+        let thumb = remote.bytes()[off..end].to_vec();
         if thumb.starts_with(&[0xFF, 0xD8]) {
             return Ok(Some((thumb, 0)));
         }
         return Ok(None);
     }
 
-    if !remote.meta.accepts_ranges {
+    // Need more bytes from the same open stream — no new request.
+    let bytes_before = remote.network_bytes();
+    remote.ensure_bytes(end).await?;
+    let extra = remote.network_bytes().saturating_sub(bytes_before);
+
+    if remote.bytes().len() < end {
+        // Stream ended before we reached the embedded JPEG.
         return Ok(None);
     }
 
-    let range_start = off as u64;
-    let range_end = (end - 1) as u64;
-    let bytes = fetch_url_range(url, range_start, range_end).await?;
-    if bytes.len() != len || !bytes.starts_with(&[0xFF, 0xD8]) {
+    let thumb = remote.bytes()[off..end].to_vec();
+    if !thumb.starts_with(&[0xFF, 0xD8]) {
         return Ok(None);
     }
 
-    Ok(Some((bytes, len as u64)))
+    Ok(Some((thumb, extra)))
 }
 
-struct RemotePrefix {
-    prefix_bytes: Vec<u8>,
+/// An open streaming connection to a remote image source.
+///
+/// The first `REMOTE_PREFIX_READ_BYTES` have been fetched eagerly and are available via
+/// `bytes()`.  Call `ensure_bytes` / `read_all` to pull more data from the **same** HTTP
+/// connection — no new request is ever made.
+///
+/// `network_bytes()` always reflects the true number of bytes received from the network,
+/// so `stream_bytes_read` accounting is trivially correct everywhere.
+struct RemoteStream {
+    download: http_source::StreamingDownload,
     meta: SourceMetadata,
-    headers: std::collections::HashMap<String, String>,
-    complete: bool,
     not_modified: bool,
 }
 
-impl RemotePrefix {
-    fn prefix_is_complete(&self) -> bool {
-        self.complete
+impl RemoteStream {
+    fn bytes(&self) -> &[u8] {
+        &self.download.bytes
+    }
+
+    fn is_complete(&self) -> bool {
+        self.download.is_complete
+    }
+
+    /// Exact number of bytes received from the network so far.
+    fn network_bytes(&self) -> u64 {
+        self.download.bytes.len() as u64
     }
 
     fn is_probably_jpeg(&self) -> bool {
@@ -1589,12 +1679,19 @@ impl RemotePrefix {
                 return true;
             }
         }
-
         self.meta
             .content_type
             .as_deref()
             .map(|v| v.eq_ignore_ascii_case("image/jpeg"))
             .unwrap_or(false)
+    }
+
+    async fn ensure_bytes(&mut self, n: usize) -> Result<(), String> {
+        self.download.ensure_bytes(n).await
+    }
+
+    async fn read_all(&mut self) -> Result<(), String> {
+        self.download.read_all(MAX_DOWNLOAD_BYTES).await
     }
 }
 
@@ -1630,58 +1727,54 @@ fn encode_source_etag(headers: &std::collections::HashMap<String, String>) -> Op
         .map(|v| format!("M{v}"))
 }
 
-async fn fetch_remote_prefix(
+/// Open a single streaming GET connection to `url` and build the source metadata from
+/// the response headers.  No `Range` header is sent — the server streams from byte 0.
+///
+/// Returns a [`RemoteStream`] whose open body can be read further via `ensure_bytes` /
+/// `read_all` without ever opening a second HTTP connection.
+async fn begin_remote_fetch(
     url: &str,
-    max_bytes: usize,
     conditional: Option<&ConditionalRequest>,
-) -> Result<RemotePrefix, String> {
-    let pref = http_source::fetch_prefix(url, max_bytes, conditional).await?;
-    let content_length = parse_content_length_map(&pref.headers);
+) -> Result<RemoteStream, String> {
+    let download = http_source::open_stream(url, REMOTE_PREFIX_READ_BYTES, conditional).await?;
 
+    let content_length = parse_content_length_map(&download.headers);
     if let Some(total) = content_length {
         if total > MAX_DOWNLOAD_BYTES as u64 {
             return Err("source is too large".into());
         }
     }
 
-    if pref.bytes.len() > MAX_DOWNLOAD_BYTES {
+    if download.bytes.len() > MAX_DOWNLOAD_BYTES {
         return Err("source is too large".into());
     }
 
-    let complete = if let Some(total) = content_length {
-        pref.bytes.len() as u64 >= total
-    } else {
-        pref.stream_finished && pref.status != 206
-    };
+    let not_modified = download.status == 304;
 
-    let magic_mime = infer::get(&pref.bytes).map(|k| k.mime_type().to_string());
-
-    let content_type_str = header_string_map(&pref.headers, "content-type")
+    let magic_mime = infer::get(&download.bytes).map(|k| k.mime_type().to_string());
+    let content_type_str = header_string_map(&download.headers, "content-type")
         .map(|v| v.split(';').next().unwrap_or("").trim().to_string())
         .filter(|v| !v.is_empty());
     let file_kind = crate::media::sniff_file_kind(
-        &pref.bytes,
+        &download.bytes,
         content_type_str.as_deref(),
     );
 
-    let content_length = parse_total_content_length_map(&pref.headers).or(content_length);
+    let total_content_length =
+        parse_total_content_length_map(&download.headers).or(content_length);
 
-    // Build the canonical URL from the post-redirect final URL, falling back
-    // to the original request URL if the transport didn't capture it.
     let canonical_url = crate::source::canonical_url_for(
-        pref.final_url.as_deref().unwrap_or(url),
+        download.final_url.as_deref().unwrap_or(url),
     );
-    // The cache key is currently identical to the canonical URL.
-    // Future: incorporate a scoped account ID or hash.
     let cache_key = canonical_url.clone();
 
     let meta = SourceMetadata {
         content_type: content_type_str,
         magic_mime,
-        content_length,
-        etag: encode_source_etag(&pref.headers),
-        last_modified: header_string_map(&pref.headers, "last-modified"),
-        accepts_ranges: header_string_map(&pref.headers, "accept-ranges")
+        content_length: total_content_length,
+        etag: encode_source_etag(&download.headers),
+        last_modified: header_string_map(&download.headers, "last-modified"),
+        accepts_ranges: header_string_map(&download.headers, "accept-ranges")
             .map(|v| v.eq_ignore_ascii_case("bytes"))
             .unwrap_or(false),
         file_kind,
@@ -1689,29 +1782,14 @@ async fn fetch_remote_prefix(
         cache_key,
     };
 
-    Ok(RemotePrefix {
-        prefix_bytes: pref.bytes,
+    Ok(RemoteStream {
+        download,
         meta,
-        headers: pref.headers,
-        complete,
-        not_modified: pref.status == 304,
+        not_modified,
     })
 }
 
-async fn fetch_url_full(url: &str) -> Result<Vec<u8>, String> {
-    let (bytes, headers) = http_source::fetch_full(url).await?;
-
-    if parse_content_length_map(&headers).is_some_and(|n| n > MAX_DOWNLOAD_BYTES as u64) {
-        return Err("source is too large".into());
-    }
-
-    if bytes.len() > MAX_DOWNLOAD_BYTES {
-        return Err("source is too large".into());
-    }
-
-    Ok(bytes)
-}
-
+#[allow(dead_code)]
 async fn fetch_url_range(url: &str, start: u64, end_inclusive: u64) -> Result<Vec<u8>, String> {
     let (bytes, headers) = http_source::fetch_range(url, start, end_inclusive).await?;
 
@@ -1884,15 +1962,16 @@ impl ProcessBuffer {
         let skip_resize = near_target_w && near_target_h && near_target_scale;
 
         // Pixel art and low-res assets look better with nearest-neighbor when
-        // scaling up. Keep Lanczos for downscaling or for photographic sources
-        // (e.g. embedded JPEG thumbnails from camera files).
+        // Pixel art and low-res assets use nearest-neighbor when scaling up.
+        // Everything else uses bilinear (Triangle): fast, smooth enough for
+        // low-quality JPEG output where finer filters are indistinguishable.
         let resized = if skip_resize {
             src
         } else {
             let filter = if scale > 1.0 && !use_photo_filter_for_upscale {
                 FilterType::Nearest
             } else {
-                FilterType::Lanczos3
+                FilterType::Triangle
             };
             resize(&src, new_w, new_h, filter)
         };
@@ -1910,36 +1989,18 @@ impl ProcessBuffer {
     }
 
     fn encode_jpeg(&self, quality: u8) -> Result<Vec<u8>, String> {
+        use mozjpeg_rs::{Encoder, Subsampling};
         let rgba = self.img.to_rgba8();
-        // After compositing the image should already be fully opaque, but
-        // flatten_alpha handles any residual alpha with a white fallback.
         let rgb = flatten_alpha(&rgba, [255, 255, 255]);
-
-        let width = rgb.width() as usize;
-        let height = rgb.height() as usize;
+        let width = rgb.width();
+        let height = rgb.height();
         let pixels = rgb.into_raw();
 
-        let mut enc = Compress::new(ColorSpace::JCS_RGB);
-        enc.set_size(width, height);
-        enc.set_quality(quality as f32);
-        enc.set_smoothing_factor(20);
-        // Force 4:2:0 chroma subsampling for smaller files.
-        enc.set_chroma_sampling_pixel_sizes((2, 2), (2, 2));
-        enc.set_optimize_coding(true);
-
-        let mut started = enc
-            .start_compress(Vec::new())
-            .map_err(|e| format!("jpeg start_compress failed: {e}"))?;
-
-        // Tiny vanity marker for generated thumbnails.
-        started.write_marker(Marker::COM, b"thumbrella");
-
-        started
-            .write_scanlines(&pixels)
-            .map_err(|e| format!("jpeg write_scanlines failed: {e}"))?;
-        started
-            .finish()
-            .map_err(|e| format!("jpeg finish failed: {e}"))
+        Encoder::fastest()
+            .quality(quality)
+            .subsampling(Subsampling::S420)
+            .encode_rgb(&pixels, width, height)
+            .map_err(|e| format!("jpeg encode failed: {e}"))
     }
 }
 
@@ -1969,7 +2030,7 @@ fn fit_background_to(bg: &RgbaImage, target_w: u32, target_h: u32) -> RgbaImage 
     let new_w = ((src_w as f32) * scale).ceil() as u32;
     let new_h = ((src_h as f32) * scale).ceil() as u32;
 
-    let resized = resize(bg, new_w.max(1), new_h.max(1), FilterType::Lanczos3);
+    let resized = resize(bg, new_w.max(1), new_h.max(1), FilterType::Triangle);
     let x = resized.width().saturating_sub(target_w) / 2;
     let y = resized.height().saturating_sub(target_h) / 2;
     crop_imm(&resized, x, y, target_w, target_h).to_image()

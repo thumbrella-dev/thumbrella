@@ -34,6 +34,187 @@ impl PrefixDownload {
     }
 }
 
+/// A streaming HTTP download that keeps the response body open for incremental reading.
+///
+/// All bytes received from the network accumulate in `bytes` — the single source of
+/// truth for download accounting.  Call [`StreamingDownload::ensure_bytes`] or
+/// [`StreamingDownload::read_all`] to pull more data from the **same** open HTTP
+/// connection without opening a new request.
+pub struct StreamingDownload {
+    /// Every byte received from the network so far, in order.
+    pub bytes: Vec<u8>,
+    pub status: u16,
+    pub headers: HashMap<String, String>,
+    /// Final URL after following any HTTP redirects.
+    pub final_url: Option<String>,
+    /// `true` once the server stream has been fully consumed.
+    pub is_complete: bool,
+    #[cfg(feature = "native-http")]
+    body: Option<reqwest::Response>,
+}
+
+#[cfg(feature = "native-http")]
+impl StreamingDownload {
+    fn new_complete(
+        bytes: Vec<u8>,
+        status: u16,
+        headers: HashMap<String, String>,
+        final_url: Option<String>,
+    ) -> Self {
+        Self {
+            bytes,
+            status,
+            headers,
+            final_url,
+            is_complete: true,
+            body: None,
+        }
+    }
+
+    /// Read chunks from the open stream until `bytes.len() >= n` or EOF.
+    ///
+    /// If enough bytes are already buffered this is a no-op.  Never opens a
+    /// new HTTP connection.
+    pub async fn ensure_bytes(&mut self, n: usize) -> Result<(), String> {
+        if self.is_complete || self.bytes.len() >= n {
+            return Ok(());
+        }
+        let Some(body) = self.body.as_mut() else {
+            self.is_complete = true;
+            return Ok(());
+        };
+        loop {
+            if self.bytes.len() >= n {
+                break;
+            }
+            match body.chunk().await.map_err(|e| format!("stream read error: {e}"))? {
+                None => {
+                    self.is_complete = true;
+                    self.body = None;
+                    break;
+                }
+                Some(chunk) => {
+                    self.bytes.extend_from_slice(&chunk);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Drain the remaining stream into `bytes`, up to `max_total` bytes total.
+    pub async fn read_all(&mut self, max_total: usize) -> Result<(), String> {
+        if self.is_complete || self.bytes.len() >= max_total {
+            return Ok(());
+        }
+        let Some(body) = self.body.as_mut() else {
+            self.is_complete = true;
+            return Ok(());
+        };
+        loop {
+            if self.bytes.len() >= max_total {
+                break;
+            }
+            match body.chunk().await.map_err(|e| format!("stream read error: {e}"))? {
+                None => {
+                    self.is_complete = true;
+                    self.body = None;
+                    break;
+                }
+                Some(chunk) => {
+                    let remaining = max_total - self.bytes.len();
+                    let take = chunk.len().min(remaining);
+                    self.bytes.extend_from_slice(&chunk[..take]);
+                    if take < chunk.len() {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Open a streaming GET connection and buffer the first `initial_bytes` from the response.
+///
+/// No `Range` header is sent — the server streams from byte 0 and we stop reading when
+/// we have `initial_bytes` buffered (or the stream ends).  The body stays open so callers
+/// can call [`StreamingDownload::ensure_bytes`] / [`StreamingDownload::read_all`] to pull
+/// more data from the **same** connection without opening a new request.
+#[cfg(feature = "native-http")]
+pub async fn open_stream(
+    url: &str,
+    initial_bytes: usize,
+    conditional: Option<&ConditionalRequest>,
+) -> Result<StreamingDownload, String> {
+    if url.starts_with("file://") {
+        let bytes = read_file_url(url)?;
+        let mut headers = HashMap::new();
+        headers.insert("content-length".to_string(), bytes.len().to_string());
+        return Ok(StreamingDownload::new_complete(
+            bytes,
+            200,
+            headers,
+            Some(url.to_string()),
+        ));
+    }
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err("only http, https and file URLs are supported".into());
+    }
+
+    let _permit = acquire_host_permit(url).await?;
+    let client = shared_http_client();
+    let mut req = client.get(url);
+    if let Some(cond) = conditional {
+        req = apply_conditional_header(req, cond);
+    }
+
+    let mut resp = req
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+
+    let status = resp.status().as_u16();
+    let final_url = Some(resp.url().to_string());
+    if !resp.status().is_success() && status != 304 {
+        return Err(format!("upstream returned status {}", resp.status()));
+    }
+    let headers = flatten_headers(resp.headers());
+
+    if status == 304 {
+        return Ok(StreamingDownload::new_complete(Vec::new(), status, headers, final_url));
+    }
+
+    // Read initial chunks eagerly.  Keep all bytes from each chunk even if a
+    // chunk pushes us past `initial_bytes` — we've already paid the network
+    // cost and the extra bytes may be needed for inspection anyway.
+    let mut bytes = Vec::with_capacity(initial_bytes.min(512 * 1024));
+    let mut is_complete = false;
+    while bytes.len() < initial_bytes {
+        match resp
+            .chunk()
+            .await
+            .map_err(|e| format!("failed to read response body: {e}"))?
+        {
+            None => {
+                is_complete = true;
+                break;
+            }
+            Some(chunk) => {
+                bytes.extend_from_slice(&chunk);
+            }
+        }
+    }
+
+    Ok(StreamingDownload {
+        bytes,
+        status,
+        headers,
+        final_url,
+        is_complete,
+        body: if is_complete { None } else { Some(resp) },
+    })
+}
+
 #[cfg(feature = "native-http")]
 const MAX_CONCURRENT_REQUESTS_PER_HOST: usize = 3;
 

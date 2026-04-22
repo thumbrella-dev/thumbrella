@@ -1,9 +1,10 @@
-use axum::response::Html;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use std::time::Instant;
 use v_htmlescape::escape;
 
 use crate::{
     ItemRequest,
+    RequestRecord,
     RequestedOps,
     SourceRef,
     app_config,
@@ -14,9 +15,9 @@ const DEV_FORM_TEMPLATE: &str = include_str!("templates/dev_form.html");
 const DEV_CARD_TEMPLATE: &str = include_str!("templates/dev_card.html");
 const DEV_RESULTS_TEMPLATE: &str = include_str!("templates/dev_results.html");
 
-pub async fn render(urls: Vec<String>) -> Html<String> {
+pub async fn render(urls: Vec<String>, record: &mut RequestRecord, start: Instant) -> String {
     if urls.is_empty() {
-        return Html(DEV_FORM_TEMPLATE.to_string());
+        return DEV_FORM_TEMPLATE.to_string();
     }
 
     let profile = app_config().thumbnail_profile();
@@ -32,17 +33,21 @@ pub async fn render(urls: Vec<String>) -> Html<String> {
 
     let mut tasks = Vec::with_capacity(items.len());
     for item in &items {
-        tasks.push(pipeline::process_item(item, &profile));
+        tasks.push(pipeline::process_item(item, &profile, &record.id));
     }
 
     let results = futures::future::join_all(tasks).await;
+    record.duration_secs = Some(start.elapsed().as_secs_f64());
 
     let mut cards = String::new();
     for (idx, (url, result)) in urls.iter().zip(results.iter()).enumerate() {
         let thumb_html = if let Some(bytes) = &result.thumbnail {
             let b64 = STANDARD.encode(bytes);
             format!(
-                "<img alt=\"thumb {idx}\" src=\"data:image/jpeg;base64,{b64}\" loading=\"lazy\" />"
+                "<img alt=\"thumb {idx}\" src=\"data:image/jpeg;base64,{b64}\" \
+                 width=\"{}\" height=\"{}\" loading=\"lazy\" \
+                 style=\"image-rendering:auto;display:block\" />",
+                profile.width, profile.height
             )
         } else {
             "<div class=\"missing\">No thumbnail</div>".to_string()
@@ -59,7 +64,7 @@ pub async fn render(urls: Vec<String>) -> Html<String> {
             Some(record) => serde_json::to_string_pretty(&record)
                 .unwrap_or_else(|_| "{}".to_string()),
             None => {
-                "{\n  \"hint\": \"run with `$THUMBRELLA_DEVELOPER_MODE` for internals\"\n}"
+                "{\n  \"note\": \"no server record for this item\"\n}"
                     .to_string()
             }
         };
@@ -88,12 +93,19 @@ pub async fn render(urls: Vec<String>) -> Html<String> {
     }
 
     let count = urls.len().to_string();
+    let request_json = serde_json::to_string_pretty(record)
+        .unwrap_or_else(|_| "{}".to_string());
+    let request_escaped = escape(&request_json).to_string();
     let html = render_template(
         DEV_RESULTS_TEMPLATE,
-        &[("__COUNT__", &count), ("__CARDS__", &cards)],
+        &[
+            ("__COUNT__", &count),
+            ("__CARDS__", &cards),
+            ("__REQUEST_ESCAPED__", &request_escaped),
+        ],
     );
 
-    Html(html)
+    html
 }
 
 fn render_template(template: &str, replacements: &[(&str, &str)]) -> String {

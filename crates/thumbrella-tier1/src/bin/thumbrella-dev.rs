@@ -13,8 +13,12 @@
 
 use std::env;
 use std::path::PathBuf;
+use std::time::Instant;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use thumbrella_tier1::pipeline;
 use thumbrella_tier1::request::{ItemRequest, RequestedOps};
+use thumbrella_tier1::result::RequestRecord;
 use thumbrella_tier1::source::SourceRef;
 use thumbrella_tier1::{BatchResponse, ThumbnailProfile};
 
@@ -67,7 +71,22 @@ async fn run() -> Result<(), String> {
         etag,
         ops: RequestedOps::default(),
     };
-    let mut result = pipeline::process_item(&item, &profile).await;
+    let start = Instant::now();
+    let mut result = pipeline::process_item(&item, &profile, "cli-0").await;
+    let duration_secs = start.elapsed().as_secs_f64();
+
+    let request_record = RequestRecord {
+        id: "cli-0".to_string(),
+        customer: "unknown".to_string(),
+        host: "localhost".to_string(),
+        path: url.clone(),
+        timestamp: OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string()),
+        method: None,
+        user_agent: None,
+        duration_secs: Some(duration_secs),
+    };
 
     // Write thumbnail to disk and clear the bytes so they don't pollute stdout.
     if let Some(ref jpeg) = result.thumbnail {
@@ -83,7 +102,7 @@ async fn run() -> Result<(), String> {
         result.thumbnail = None;
     }
 
-    let response = BatchResponse::from_item_results(vec![result]);
+    let response = BatchResponse::from_item_results(vec![result], request_record);
 
     let json = serde_json::to_string_pretty(&response)
         .map_err(|e| format!("failed to serialize output JSON: {e}"))?;

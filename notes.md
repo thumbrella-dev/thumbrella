@@ -1,3 +1,184 @@
+i feel like we've pulled non-rust dependencies into tier 1. maybe just mozjpeg. this is going to prevent building tier1 to wasm (although I'm pretty sure there's wasm mozjpeg builds out there?). but for my sanity I think it would all be easier if all of tier1 was pure rust; part of this is the reason for having a tier1.
+
+
+
+
+
+my plans for payment
+--------------------
+
+for the "no-profit-to-me" run engines like fal.ai or vertex, offer a paid
+caching service that can easily be plugged into thsoe endpoints. the sales
+pitch being something like
+
+"oh, your enjoying thumbrella, here are some ways to slash your costs".
+1. add a caching layer with an account (free for some usage, cheap for lots)
+2. use our cloud service directly, we can run it far cheaper than fal.ai
+3. self host with our free open source docker container
+3b. or use our professional docker container with more controls and performance
+
+note, signing up for any of the services (1,2,3b) should easily allow switching
+or transitioning into the other layers. even "3" may want some optional signup
+step where we also offer a limited free caching service also?
+
+for projects that want embedded file pickers or browsers or asset libraries;
+
+4. want to include thumbrella directly into your own product; its open source?
+4b. it's open source, go for it
+4c. or, lets chat at get it integrated expertly
+
+
+other "pro level features" provided at that '3b' level
+- webhooks, proactively create thumbnails
+- redis/postgres caching 
+  - this may be desirable for 3.(free self host) also
+    - but maybe only simple TTL cache maintentance
+- cache maintenance tools
+- dashboard and analytics (like when you subscribe with 1. and 2.)
+
+also note on 3. self hosted. I'm expecting this will be less efficient and
+possibly slower for many cases, aside from completely internal network use
+cases. it definitely won't have the "horizontal scale out" you get from the
+cloud hosting. possibly comes "preconfigured" with conservative settings,
+assuming it will be run on "potato level hardware".
+
+the 3. and 3b. self hosted containers do not contain any of the code for
+multiple tenants. so will need to find a way that can be built in modularly.
+perhaps that is the "cloudflare workers" level code that enhances tier 1,
+not part of the open source product. maybe we call that the "tier 0" layer
+and it has the deeper connections to cloudflare also.
+some of that does creep into the "3b. professional self hosting" when we
+talk about the dashboards and tracking tools.
+
+interesting note that tier1 and tier2 can be provided as standalone executables.
+that may be a more desirable delivery mechanism for people who don't care about
+documents/pdf/3d model thumbnails? maybe that is the free platform?
+tier3 is going to need a carefully organized docker container with a lot of
+complicated dependencies. Perhaps the standalone binary for tier3 is the 
+"free to run for yourself" and it gracefully degrades when it can't run the
+subtools in whatever environment it is running in...
+this seems good. if someone wants some subset of filters on the free tool
+they are welcome to put together their environment. even 1 or 2 specific cases
+probably aren't too hard to get going. Although running some of these in a
+headless environment will likely not be straightforward.
+
+so the free and open source delivery is the tier3 executable.
+it does not include the "cloudflare worker integration for tier 0" and
+does not include the dashboard account management tools on the pro version.
+the pro version also is a docker container.
+
+i'm thinking we may want to build a unique docker container per licensed
+user. a couple of things this does; bake the client name into the thumbnail jpgs,
+wants some sort of provisioned license key (envvar, secret lookup?).
+this is some hashed customer id so I can know who generated them but it 
+doesn't leak company info.
+
+another bonus of 2. and beyond is that the runtime can skip tier1 and beyond,
+which ends up being less read requests, which may matter for s3 types of
+storage that charge per request.
+
+there may be a future where we want to host thumbrella ourselves in popular
+cloud datacenters so customers can avoid outgress charges for their data
+and only serve the samller thumbnails. (this may need to be a "use 3b for
+yourself) type of situation.
+
+
+buying 3b is something that gives you a license that allows running 
+the pro/commercial docker image and any version updates for 1 year.
+potentially with some mechanism for security updates for awhile beyond that.
+
+there may also be a "key revoke list" we build into future containers that
+deny certain use cases.
+
+when free plans start requesting too many resources we just naturally
+slow them down. unless that starts also backing up and then we do proper 429.
+(this is only on our tier0 service)
+
+
+pricing structure
+
+free service
+    $0, signup process (or github,google,other account)
+    10mb cache (~1,000+ thumbnails, 1 week ttl)
+    1k thumbnails per day (on our own provider)
+    100 renders per day (tier 3, on our own provider)
+    cache works from any provider (fal.ai, etc)
+    simple dashboard
+
+fan service
+    $0 but star on github (or social media post?) for double?
+    20mb cache (~2,000+ thumbnails, 2 week ttl)
+    2k thumbnails per day
+    200 renders per day
+    simple dashboard
+
+easy service
+    $4 per month
+    200mb cache (6 month ttl)
+    100k thumbnails per day (cached is free)
+    10k renders per day
+    simple dashboard
+
+pro service
+    $8 per month
+    (triple the flat service amounts)
+    scales up at $2 per
+    +200mb of cache 
+    +100k of thumbnails
+    +10k of renders
+    dashboards, cache maintenance tools
+    cache maintenance and tracking tools
+    customize resolutions and settings
+    able to set maximum spent on limits
+    reduce number of remote read requests (lower s3 reads)
+
+self hosted
+    free
+    source and/or binary executable
+        disk/volume based caching
+    provide additional render processes as desired
+    customize resolutions and settings
+
+pro hosted
+    $200 gets 1 year of upgrades (+1 year security updates)
+    keyed docker images
+    variety of caching hookups (redis/postgres/cloudflare/aws/disk_volume)
+    dashboards, cache maintenance tools
+    cache maintenance and tracking tools
+    customize resolutions and settings
+
+
+
+My thinking is there will be four+ repos where this is managed
+
+- The regular project, written in rust, very easy to grab an executable and self
+  host, or get the source and build for yourself (What license?)
+- My recipe for building the "tier 3 runtime" docker image. This will probably
+  be everything except thumbrella. xvfb environments, usd, and more. I'm
+  thinking I'll have this all build on demand, it will be a big and beefy build
+  step with a lot of annoying dependencies. The paid commercial service will be
+  built on this image. This is also the base I'll use for running on platforms
+  like fal.ai, cloudflare, and more
+- The cloudflare worker build of tier 1. This adds the account management,
+  throttling, platform control features to the tier 1 server. It will also be
+  able to build to wasm (something the regular 1. repo probably won't have build
+  instructions for?)
+- simple dashboard functionality for the pro customers. also tools to chart and
+  breakdown and manage the cache usage. also controls to configure the server
+  (resolutions, jpeg settings, watermarks?, etc)
+- open source client integrations. this may actually be a collections of
+  separate repos, forks from existing "web file browsers" and "web media
+  libraries" where we either integrate thumbrella, or make it usable as a simple
+  embeddable plugin where that makes sense. owncloud, etc. there's also some
+  standalone client web component that people can embed into anything that is
+  dressed up and ready to thumbrella out of the box.
+
+
+
+
+
+
+
 # Thumbrella Greenfield Architecture Notes
 
 ## Design Stance
