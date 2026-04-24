@@ -9,15 +9,9 @@
   ],
   "customizations": {
     "vscode": {
-      "extensions": [
-        "ms-python.python",
-        "ms-python.debugpy",
-        "charliermarsh.ruff"
-      ],
+      "extensions": [],
       "settings": {
-        "python.defaultInterpreterPath": "/usr/local/bin/python"
       }
     }
-  },
-  "postCreateCommand": "pip install -e '.[dev]'"
+  }
 }

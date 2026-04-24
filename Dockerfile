@@ -6,9 +6,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
 # Dev stage - adds tooling
 FROM base AS dev
 
@@ -20,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install a pinned Rust toolchain for reproducible dev containers.
-ARG RUST_TOOLCHAIN=1.88.0
+ARG RUST_TOOLCHAIN=1.95.0
 ENV CARGO_HOME=/usr/local/cargo
 ENV RUSTUP_HOME=/usr/local/rustup
 ENV PATH=/usr/local/cargo/bin:${PATH}
@@ -30,8 +27,6 @@ RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-too
     && cargo --version \
     && rustc --version
 
-RUN pip install --no-cache-dir debugpy pytest ipython ruff
-
 WORKDIR /workspace
 
 # Prod stage - copies source, minimal
@@ -39,4 +34,4 @@ FROM base AS prod
 
 COPY src/ /app/src/
 WORKDIR /app
-CMD ["python", "-m", "thumbrella.server"]
+CMD ["python", "-V"]

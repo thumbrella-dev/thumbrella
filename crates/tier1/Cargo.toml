@@ -1,0 +1,62 @@
+[package]
+name = "tier1"
+version = "0.1.0"
+edition = "2024"
+description = "Thumbrella Tier 1 — lightweight thumbnail and file-inspection service"
+
+[lib]
+name = "tier1"
+
+[[bin]]
+name = "tier1"
+path = "src/bin/tier1.rs"
+required-features = ["native"]
+
+[features]
+# Default: full native HTTP server with threading and async runtime.
+default = ["native"]
+
+# native — enables the tokio runtime, axum HTTP server, reqwest outbound
+# fetch, and all other OS/thread-dependent plumbing.  Disable this feature
+# when targeting wasm32 (the workers build lives in a downstream crate that
+# provides its own runtime and HTTP bindings via workers-rs).
+native = [
+    "dep:tokio",
+    "dep:axum",
+    "dep:axum-extra",
+    "dep:tower-http",
+    "dep:reqwest",
+    "dep:tracing-subscriber",
+    "dep:time",
+]
+
+[dependencies]
+# ── Core — always available, WASM-compatible ─────────────────────────────────
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+tracing     = "0.1"
+futures     = { version = "0.3", default-features = false, features = ["alloc"] }
+base64      = "0.22"
+sha2        = "0.10"
+infer       = "0.16"
+mozjpeg-rs  = "0.9"
+
+# Image decode/encode — pure-Rust decoders used here are WASM-compatible.
+# heavy native decoders (e.g. mozjpeg) belong in a higher tier or a
+# native-only feature so they don't block the wasm32 target.
+image = { version = "0.25", default-features = false, features = [
+    "jpeg", "png", "gif", "webp", "bmp", "tiff",
+] }
+
+# ZIP for container formats (DOCX, ODT, …). miniz_oxide backend is pure Rust.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# ── Native-only ───────────────────────────────────────────────────────────────
+tokio           = { version = "1", features = ["full"],                      optional = true }
+axum            = { version = "0.8",                                         optional = true }
+axum-extra      = { version = "0.10", features = ["query"],                  optional = true }
+tower-http      = { version = "0.6", features = ["trace", "cors"],           optional = true }
+reqwest         = { version = "0.12", default-features = false,
+                    features = ["rustls-tls", "stream"],                     optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"],          optional = true }
+time            = { version = "0.3", features = ["formatting"],              optional = true }

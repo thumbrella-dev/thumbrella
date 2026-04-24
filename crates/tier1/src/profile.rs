@@ -1,0 +1,47 @@
+//! Canonical thumbnail output profile.
+//!
+//! The profile is a product decision, not a caller parameter.  There is exactly
+//! one canonical profile at any given time.  The `version` field is incremented
+//! whenever any value changes so that cache entries from an older profile are
+//! automatically invalidated.
+
+use serde::{Deserialize, Serialize};
+
+/// The canonical thumbnail output configuration.
+///
+/// All thumbnails produced by this service conform to this config.  Callers
+/// cannot override it; that is an intentional product constraint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThumbnailConfig {
+    /// Monotonically increasing version.  Bust this when any field changes.
+    pub version: u32,
+    /// Maximum output width in pixels.
+    pub max_width: u32,
+    /// Maximum output height in pixels.
+    pub max_height: u32,
+    /// JPEG quality 1–100 for photographic content.
+    pub jpeg_quality: u8,
+    /// JPEG quality for pixel-art / icon content (typically higher to avoid
+    /// visible DCT artifacts on hard edges).
+    pub pixel_art_quality: u8,
+    /// Background colour used when flattening transparency (RGB).
+    pub background_rgb: [u8; 3],
+}
+
+impl Default for ThumbnailConfig {
+    fn default() -> Self {
+        Self::CANONICAL
+    }
+}
+
+impl ThumbnailConfig {
+    /// The one canonical config.  Update `version` whenever any value changes.
+    pub const CANONICAL: Self = Self {
+        version: 1,
+        max_width: 256,
+        max_height: 204,
+        jpeg_quality: 46,
+        pixel_art_quality: 18,
+        background_rgb: [255, 255, 255],
+    };
+}
