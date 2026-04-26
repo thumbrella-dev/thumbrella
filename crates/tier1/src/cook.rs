@@ -38,6 +38,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::http_buf::{HttpBuffer, HttpStream};
 use crate::result::{JobStatus, ThumbResult};
+use crate::pipeline;
 
 
 // ── ThumbSpec ─────────────────────────────────────────────────────────────────
@@ -61,6 +62,12 @@ pub struct ThumbSpec {
     /// - `E…` → `If-None-Match`
     /// - `M…` → `If-Modified-Since`
     pub etag: Option<String>,
+    /// Allow `file://` URLs to be fetched from the local filesystem.
+    ///
+    /// **Security**: defaults to `false`.  Only the CLI entry point sets this
+    /// to `true`; HTTP route handlers must never set it.  The pipeline
+    /// `connect` step enforces this as a second line of defence.
+    pub allow_local: bool,
 }
 
 impl ThumbSpec {
@@ -96,7 +103,7 @@ pub struct ThumbnailImage {
 ///
 /// Never sent to clients.  Populated incrementally as pipeline steps run;
 /// emitted to the log sink when the cook finishes.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize)]
 pub struct ThumbTrace {
     // ── Source identity ───────────────────────────────────────────────────────
     /// Canonical URL (query params / signing tokens stripped).
@@ -207,23 +214,37 @@ impl<S: HttpStream> ThumbCook<S> {
         self.response.message = message.into();
     }
 
-    /// Consume the cook and return the finished response.
-    pub fn into_result(self) -> ThumbResult {
-        self.response
+    /// Consume the cook and return the finished response and trace.
+    pub fn into_result(self) -> (ThumbResult, ThumbTrace) {
+        (self.response, self.trace)
     }
 
-    /// Run the full pipeline and return the result.
+    /// Run the full pipeline and return `(result, trace)`.
     ///
-    /// Drives: preflight → connect → inspect → fallback/shortcut/render → deliver.
-    /// Step functions will live in `pipeline.rs` and be called from here as they
-    /// are implemented.  The cook is cancelled early if `cancelled()` returns true
-    /// between steps.
-    pub async fn cook(mut self) -> ThumbResult {
-        // TODO: pipeline::connect(&mut self).await;
-        // TODO: pipeline::inspect(&mut self).await;
+    /// Sequences: preflight → connect → inspect → fallback/shortcut/render → deliver.
+    /// Step functions live in `pipeline/` and are called from here as they are
+    /// implemented.  Returns early if `cook.http` is `None` after a step
+    /// (the step's signal that it set a definitive outcome).
+    pub async fn run(mut self) -> (ThumbResult, ThumbTrace) {
+        pipeline::connect(&mut self).await;
+        if self.http.is_none() {
+            // connect set a definitive outcome (error, 304, 4xx, 5xx) — done.
+            return self.into_result();
+        }
+
+        pipeline::inspect(&mut self).await;
+        if self.http.is_none() {
+            return self.into_result();
+        }
+
         // TODO: pipeline::render(&mut self).await;
         // TODO: pipeline::deliver(&mut self).await;
-        self.fail("pipeline not yet implemented");
+
+        // Pipeline incomplete — return what we have so far.
+        // The status remains `Failed` until deliver sets it to `Success`.
+        if self.response.message.is_empty() {
+            self.response.message = "pipeline incomplete".to_string();
+        }
         self.into_result()
     }
 }

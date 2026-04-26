@@ -475,16 +475,55 @@ impl<S: HttpStream> HttpBuffer<S> {
 ///
 /// Use as `HttpBuffer::<ReqwestStream>::open(url, options)`.
 /// The workers crate provides its own `FetchStream` without touching this.
+///
+/// Supports both `http://`/`https://` URLs (via reqwest) and `file://` URLs
+/// (read from the local filesystem).  `file://` is useful for local testing
+/// via the CLI — pass a path and it is promoted to a `file://` URL before
+/// this point.
 #[cfg(feature = "native")]
 pub struct ReqwestStream {
     status: u16,
     headers: HashMap<String, String>,
-    body: reqwest::Response,
+    inner: ReqwestStreamInner,
+}
+
+#[cfg(feature = "native")]
+enum ReqwestStreamInner {
+    Http(reqwest::Response),
+    File { data: Vec<u8>, pos: usize },
 }
 
 #[cfg(feature = "native")]
 impl HttpStream for ReqwestStream {
     async fn connect(url: &str, options: &ConnectOptions) -> Result<Self, HttpError> {
+        // ── file:// — read from disk ──────────────────────────────────────────
+        if let Some(path) = url.strip_prefix("file://") {
+            return match std::fs::read(path) {
+                Ok(data) => {
+                    let mut headers = HashMap::new();
+                    headers.insert("content-length".to_string(), data.len().to_string());
+                    Ok(Self {
+                        status: 200,
+                        headers,
+                        inner: ReqwestStreamInner::File { data, pos: 0 },
+                    })
+                }
+                Err(e) => {
+                    let status = match e.kind() {
+                        std::io::ErrorKind::NotFound => 404,
+                        std::io::ErrorKind::PermissionDenied => 403,
+                        _ => 500,
+                    };
+                    Ok(Self {
+                        status,
+                        headers: HashMap::new(),
+                        inner: ReqwestStreamInner::File { data: vec![], pos: 0 },
+                    })
+                }
+            };
+        }
+
+        // ── http:// / https:// — reqwest ──────────────────────────────────────
         // TODO: replace with a shared per-host connection pool
         let client = reqwest::Client::new();
         let mut req = client.get(url);
@@ -498,25 +537,35 @@ impl HttpStream for ReqwestStream {
             .map_err(|e| HttpError::Network(e.to_string()))?;
 
         let status = resp.status().as_u16();
-        if !resp.status().is_success() && status != 304 {
-            return Err(HttpError::Network(format!("server returned {status}")));
-        }
-
         let headers = flatten_headers(resp.headers());
 
-        Ok(Self { status, headers, body: resp })
+        Ok(Self { status, headers, inner: ReqwestStreamInner::Http(resp) })
     }
 
     fn status(&self) -> u16 { self.status }
     fn response_headers(&self) -> HashMap<String, String> { self.headers.clone() }
 
     async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, HttpError> {
-        let chunk = self
-            .body
-            .chunk()
-            .await
-            .map_err(|e| HttpError::Network(e.to_string()))?;
-        Ok(chunk.map(|b| b.to_vec()))
+        match &mut self.inner {
+            ReqwestStreamInner::Http(resp) => {
+                let chunk = resp
+                    .chunk()
+                    .await
+                    .map_err(|e| HttpError::Network(e.to_string()))?;
+                Ok(chunk.map(|b| b.to_vec()))
+            }
+            ReqwestStreamInner::File { data, pos } => {
+                if *pos >= data.len() {
+                    return Ok(None);
+                }
+                // Yield in PAGE_SIZE chunks so the buffer's page cache logic
+                // works the same as it does for HTTP responses.
+                let end = (*pos + PAGE_SIZE).min(data.len());
+                let chunk = data[*pos..end].to_vec();
+                *pos = end;
+                Ok(Some(chunk))
+            }
+        }
     }
 }
 

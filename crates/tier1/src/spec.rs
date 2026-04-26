@@ -1,4 +1,4 @@
-//! Canonical thumbnail output profile.
+//! Canonical thumbnail output spec.
 //!
 //! The profile is a product decision, not a caller parameter.  There is exactly
 //! one canonical profile at any given time.  The `version` field is incremented

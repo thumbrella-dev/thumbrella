@@ -28,6 +28,7 @@ native = [
     "dep:reqwest",
     "dep:tracing-subscriber",
     "dep:time",
+    "dep:clap",
 ]
 
 [dependencies]
@@ -51,6 +52,10 @@ image = { version = "0.25", default-features = false, features = [
 # ZIP for container formats (DOCX, ODT, …). miniz_oxide backend is pure Rust.
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
+# Bytes — zero-copy buffer primitive.  WASM-compatible; used by the native
+# streaming handler and transitively by tokio/axum/reqwest.
+bytes = "1"
+
 # ── Native-only ───────────────────────────────────────────────────────────────
 tokio           = { version = "1", features = ["full"],                      optional = true }
 axum            = { version = "0.8",                                         optional = true }
@@ -60,3 +65,4 @@ reqwest         = { version = "0.12", default-features = false,
                     features = ["rustls-tls", "stream"],                     optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"],          optional = true }
 time            = { version = "0.3", features = ["formatting"],              optional = true }
+clap            = { version = "4", features = ["derive"],                    optional = true }

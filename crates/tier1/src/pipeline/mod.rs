@@ -12,13 +12,17 @@
 //! - **preflight** — Validate inputs, check credentials and rate limits,
 //!   reject obvious bad inputs early.
 //!
-//! - **connect** — Open the HTTP connection, read response headers, perform
-//!   the ETag/validator freshness check, pull the first bytes, and sniff
-//!   the file type.
+//! - **connect** — Open the HTTP connection, read response headers, and
+//!   perform the ETag/validator freshness check.  Populates `file_size`,
+//!   `etag`, `trace.final_url`, `trace.canonical_url`.  Fails fast on
+//!   network errors and HTTP error statuses (404, 403, 5xx, …); returns
+//!   `NotModified` on 304.  Does **not** sniff the file type.
 //!
-//! - **inspect** — Read format-specific metadata without processing pixels
-//!   (dimensions, duration, page count, codec info, …).  Often happens
-//!   during connect when a prefix read is enough.
+//! - **inspect** — Pull the first bytes of the body, sniff the MIME type,
+//!   and read format-specific metadata without processing pixels
+//!   (dimensions, duration, page count, codec info, …).  Calls
+//!   `dispatch::route()` to determine the processing tier.  Populates
+//!   `mime`, `kind`, `extension`, `properties`, and `trace.job_tier`.
 //!
 //! - **fallback** — Serve a pre-rendered placeholder for a file type that
 //!   cannot be thumbnailed.  Tier 1 only; no pixel work required.
@@ -44,5 +48,10 @@
 //! # Build note
 //!
 //! This module must compile on `wasm32-unknown-unknown`.  Each step function
-//! will be generic over `S: HttpStream`.
+//! is generic over `S: HttpStream`.
 
+mod connect;
+mod inspect;
+
+pub use connect::connect;
+pub use inspect::inspect;

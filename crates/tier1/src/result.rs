@@ -35,6 +35,12 @@ pub enum JobStatus {
     DeferUser,
     /// Request deferred — server is at capacity (shared resource limit).
     DeferServer,
+    /// Thumbnail is being rendered by a higher-tier worker; a placeholder is
+    /// present now and a final result will follow on streaming endpoints.
+    ///
+    /// Only emitted on `POST /stream`.  Clients that do not handle streaming
+    /// (e.g. callers of `POST /batch`) will never see this status.
+    Rendering,
 }
 
 // ── Call record ───────────────────────────────────────────────────────────────
