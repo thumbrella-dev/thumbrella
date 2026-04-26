@@ -17,6 +17,72 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use crate::media::{FileKind, Strategy};
 
+// ── Cache outcome ─────────────────────────────────────────────────────────────
+
+/// Which cache backend provided (or skipped) this result — internal detail.
+///
+/// Stored in [`ThumbTrace`](crate::cook::ThumbTrace); never sent to clients
+/// verbatim.  The public-facing field on [`ThumbResult`] collapses all hit
+/// variants to `"hit"` via [`CacheOutcome::public_label`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheOutcome {
+    /// Cache was checked; no entry was found.
+    #[default]
+    Miss,
+    /// Cache check was skipped for this request (e.g. forced refresh).
+    Ignore,
+    /// Result came from an on-disk local file cache.
+    File,
+    /// Result came from a Cloudflare Cache API entry.
+    CfCache,
+    /// Result came from a Cloudflare KV store entry.
+    CfKv,
+    /// Result came from a Redis cache.
+    Redis,
+}
+
+impl CacheOutcome {
+    /// Whether this outcome represents a cache hit (no recomputation was done).
+    pub fn is_hit(self) -> bool {
+        matches!(self, Self::File | Self::CfCache | Self::CfKv | Self::Redis)
+    }
+
+    /// Public-facing label: `"hit"` for any backend, `"miss"`, or `"ignore"`.
+    ///
+    /// Use this when populating [`ThumbResult::cache`] — it hides which
+    /// specific backend was used.
+    pub fn public_label(self) -> &'static str {
+        match self {
+            Self::Ignore => "ignore",
+            Self::Miss => "miss",
+            _ => "hit",
+        }
+    }
+}
+
+// ── Render handler ────────────────────────────────────────────────────────────
+
+/// Which renderer handled (or attempted to handle) this item.
+///
+/// Stored in [`ThumbTrace`](crate::cook::ThumbTrace).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RenderHandler {
+    /// No rendering was needed — result came from cache, shortcut, or fallback.
+    #[default]
+    None,
+    /// Rendered inline by this tier's built-in decoder.
+    Builtin,
+    /// Handed off to a higher-tier renderer; clean result returned.
+    Handoff,
+    /// Handed off to a higher tier, but that tier failed; fell back to a
+    /// lower-quality result on this tier.
+    Fumble,
+    /// All renderers failed, even though we expected it should work; result is a placeholder icon.
+    Punt,
+}
+
 // ── Job status ────────────────────────────────────────────────────────────────
 
 /// High-level outcome of processing a single item.
@@ -111,6 +177,11 @@ pub struct ThumbResult {
     pub extension: Option<String>,
     /// Format-specific properties; shape varies by `kind`.
     pub properties: Option<Value>,
+    /// Cache outcome from the client's perspective: `"hit"`, `"miss"`, or
+    /// `"ignore"`.  Implementation details (which backend) are not exposed.
+    /// `null` when cache is not yet wired up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<String>,
 }
 
 impl Default for ThumbResult {
@@ -130,6 +201,7 @@ impl Default for ThumbResult {
             kind: None,
             extension: None,
             properties: None,
+            cache: None,
         }
     }
 }

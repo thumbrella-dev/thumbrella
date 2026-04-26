@@ -1,4 +1,66 @@
-#!/bin/bash
-# Media server convenience script
-# Starts a simple HTTP server on port 8001 serving the media directory
-python -m http.server --directory media 8001
+#!/usr/bin/env python3
+"""Media server — serves the media/ directory on port 8001 with Range support."""
+
+import http.server, os, re, socketserver, sys
+
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8001
+ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "media")
+
+class RangeHandler(http.server.SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=ROOT, **kwargs)
+
+    def do_HEAD(self):
+        path = self.translate_path(self.path)
+        if not os.path.isfile(path):
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self._send_common_headers(path)
+        self.end_headers()
+
+    def do_GET(self):
+        path = self.translate_path(self.path)
+        if not os.path.isfile(path):
+            self.send_error(404)
+            return
+        size = os.path.getsize(path)
+        rng  = self.headers.get("Range")
+        with open(path, "rb") as f:
+            if rng:
+                m = re.fullmatch(r"bytes=(\d+)-(\d*)", rng.strip())
+                if not m:
+                    self.send_error(400, "Bad Range")
+                    return
+                start = int(m.group(1))
+                end   = int(m.group(2)) if m.group(2) else size - 1
+                end   = min(end, size - 1)
+                length = end - start + 1
+                self.send_response(206)
+                self.send_header("Content-Range",  f"bytes {start}-{end}/{size}")
+                self.send_header("Content-Length", str(length))
+                self._send_common_headers(path)
+                self.end_headers()
+                f.seek(start)
+                self.wfile.write(f.read(length))
+            else:
+                self.send_response(200)
+                self.send_header("Content-Length", str(size))
+                self._send_common_headers(path)
+                self.end_headers()
+                self.wfile.write(f.read())
+
+    def _send_common_headers(self, path):
+        import mimetypes
+        ct, _ = mimetypes.guess_type(path)
+        self.send_header("Content-Type",   ct or "application/octet-stream")
+        self.send_header("Accept-Ranges",  "bytes")
+        self.send_header("Cache-Control",  "no-cache")
+
+    def log_message(self, fmt, *args):
+        print(f"[media] {self.address_string()} {fmt % args}", flush=True)
+
+with socketserver.TCPServer(("", PORT), RangeHandler) as httpd:
+    httpd.allow_reuse_address = True
+    print(f"Serving media/ on http://localhost:{PORT}  (Range requests supported)", flush=True)
+    httpd.serve_forever()

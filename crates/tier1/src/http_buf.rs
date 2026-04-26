@@ -377,11 +377,11 @@ impl<S: HttpStream> HttpBuffer<S> {
             }
         }
 
-        if self.cursor < self.stream_pos {
-            return Err(HttpError::SeekBehindStream);
-        }
-
-        loop {
+        // Check the current streaming chunk BEFORE the SeekBehindStream guard.
+        // When a chunk larger than the read buffer arrives, stream_pos jumps
+        // past cursor after the first partial read.  Subsequent reads into the
+        // same chunk would incorrectly trigger SeekBehindStream without this.
+        {
             let chunk_end = self.streaming_chunk_start + self.streaming_chunk.len() as u64;
             if !self.streaming_chunk.is_empty()
                 && self.cursor >= self.streaming_chunk_start
@@ -393,7 +393,16 @@ impl<S: HttpStream> HttpBuffer<S> {
                 self.cursor += n as u64;
                 return Ok(n);
             }
+        }
 
+        // cursor is neither in the page cache nor in the current chunk.
+        // If it's behind the stream head that data is truly gone.
+        if self.cursor < self.stream_pos {
+            return Err(HttpError::SeekBehindStream);
+        }
+
+        // cursor >= stream_pos: fetch the next chunk(s) until cursor lands inside.
+        loop {
             let Some(chunk) = self.stream.next_chunk().await? else {
                 return Ok(0);
             };
@@ -401,6 +410,15 @@ impl<S: HttpStream> HttpBuffer<S> {
             self.stream_pos += chunk.len() as u64;
             self.bytes_fetched_count += chunk.len() as u64;
             self.streaming_chunk = chunk;
+
+            let chunk_end = self.streaming_chunk_start + self.streaming_chunk.len() as u64;
+            if self.cursor >= self.streaming_chunk_start && self.cursor < chunk_end {
+                let in_chunk = (self.cursor - self.streaming_chunk_start) as usize;
+                let n = buf.len().min(self.streaming_chunk.len() - in_chunk);
+                buf[..n].copy_from_slice(&self.streaming_chunk[in_chunk..in_chunk + n]);
+                self.cursor += n as u64;
+                return Ok(n);
+            }
         }
     }
 
@@ -442,6 +460,35 @@ impl<S: HttpStream> HttpBuffer<S> {
         self.bytes_fetched_count += bytes.len() as u64;
         self.store_chunk_at(tail_start, &bytes);
         Ok(())
+    }
+
+    /// Issue a direct `Range: bytes=start-(start+len-1)` request and return
+    /// the raw bytes.
+    ///
+    /// Unlike `read_at`, this always opens a fresh connection for the range
+    /// regardless of the current stream cursor position.  The response is
+    /// stored in the page cache so any subsequent `read_at` call that overlaps
+    /// the same range is served from cache.
+    ///
+    /// Use this for shortcut paths that need a large, targeted slice of the
+    /// remote file (e.g. the ZIP tail containing the Central Directory and
+    /// embedded thumbnail) without streaming the bytes in between.
+    pub async fn fetch_range(&mut self, start: u64, len: usize) -> Result<Vec<u8>, HttpError> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let end = start + len as u64 - 1;
+        let opts = ConnectOptions {
+            headers: vec![("range".into(), format!("bytes={start}-{end}"))],
+        };
+        let mut stream = S::connect(&self.url, &opts).await?;
+        let mut bytes = Vec::with_capacity(len);
+        while let Some(chunk) = stream.next_chunk().await? {
+            bytes.extend_from_slice(&chunk);
+        }
+        self.bytes_fetched_count += bytes.len() as u64;
+        self.store_chunk_at(start, &bytes);
+        Ok(bytes)
     }
 
     fn store_chunk_at(&mut self, mut offset: u64, bytes: &[u8]) {
@@ -524,8 +571,8 @@ impl HttpStream for ReqwestStream {
         }
 
         // ── http:// / https:// — reqwest ──────────────────────────────────────
-        // TODO: replace with a shared per-host connection pool
-        let client = reqwest::Client::new();
+        let client = http_client();
+
         let mut req = client.get(url);
         for (k, v) in &options.headers {
             req = req.header(k.as_str(), v.as_str());
@@ -578,6 +625,37 @@ fn flatten_headers(headers: &reqwest::header::HeaderMap) -> HashMap<String, Stri
         }
     }
     out
+}
+
+/// The process-global reqwest client.  One connection pool shared by every request.
+#[cfg(feature = "native")]
+static HTTP_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+/// Build and store the shared reqwest client.  Call once from [`startup`] before
+/// the server starts accepting requests.  Safe to call multiple times — only the
+/// first call has any effect.
+///
+/// [`startup`]: crate::startup::startup
+#[cfg(feature = "native")]
+pub fn init_http_client() {
+    HTTP_CLIENT.get_or_init(build_http_client);
+}
+
+/// Return a reference to the shared client, initialising it on first use if
+/// [`init_http_client`] was never called (e.g. in the CLI `thumb` subcommand).
+#[cfg(feature = "native")]
+fn http_client() -> &'static reqwest::Client {
+    HTTP_CLIENT.get_or_init(build_http_client)
+}
+
+#[cfg(feature = "native")]
+fn build_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .http2_adaptive_window(true)
+        .tcp_nodelay(true)
+        .pool_max_idle_per_host(8)
+        .build()
+        .expect("failed to build reqwest client")
 }
 
 // ── Platform stream alias ─────────────────────────────────────────────────────

@@ -36,9 +36,29 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use image::DynamicImage;
+
 use crate::http_buf::{HttpBuffer, HttpStream};
-use crate::result::{JobStatus, ThumbResult};
+use crate::result::{JobStatus, RenderHandler, ThumbResult};
 use crate::pipeline;
+
+// ── CallerContext ─────────────────────────────────────────────────────────────
+
+/// How this cook was invoked — stored in [`ThumbTrace`], never sent to clients.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum CallerContext {
+    /// HTTP client identified by IP address.
+    ///
+    /// The IP is taken from the connection or from a trusted proxy header
+    /// (configured via `AppConfig`).  When proxy trust is disabled the
+    /// forwarded header is ignored and the raw connection IP is used.
+    Ip { addr: String },
+    /// Invoked from the `tier1 thumb` CLI subcommand.
+    Cli,
+    /// Invoked programmatically as a library (e.g. unit tests, embedders).
+    Library,
+}
 
 
 // ── ThumbSpec ─────────────────────────────────────────────────────────────────
@@ -79,24 +99,6 @@ impl ThumbSpec {
 
 // ── Live resource placeholders ────────────────────────────────────────────────
 
-/// Decoded pixel buffer from the render step.
-///
-/// Stub — will wrap an `image::DynamicImage` or similar once rendering is live.
-pub struct RenderImage {
-    pub width: u32,
-    pub height: u32,
-    pub data: Vec<u8>,
-}
-
-/// Encoded JPEG ready for delivery.
-///
-/// Stub — will be produced by the deliver step (mozjpeg encode).
-pub struct ThumbnailImage {
-    pub width: u32,
-    pub height: u32,
-    pub jpeg: Vec<u8>,
-}
-
 // ── ThumbTrace ────────────────────────────────────────────────────────────────
 
 /// Internal per-item telemetry — the server's private record of work done.
@@ -110,8 +112,15 @@ pub struct ThumbTrace {
     pub canonical_url: Option<String>,
     /// Final URL after following HTTP redirects (if different from canonical).
     pub final_url: Option<String>,
-    /// SHA-256 of the canonical URL — used as the storage key.
-    pub url_hash: Option<String>,
+    /// SHA-256(customer_id ":" content_identity) — used as the storage key.
+    ///
+    /// `content_identity` is the best available stable identifier for the
+    /// content: a server-provided hash header when present, otherwise the
+    /// canonical URL.  Always base64url-encoded (no padding) for brevity.
+    pub cache_hash: Option<String>,
+    /// Which header (or fallback) was used as the identity input for `cache_hash`.
+    /// Examples: `"x-amz-checksum-sha256"`, `"etag"`, `"url"`.
+    pub cache_hash_source: Option<String>,
     /// Upstream freshness token (ETag or Last-Modified) in the opaque format
     /// produced by `etag_from_headers`.  Returned to the client as `etag` in
     /// the `ThumbResult` so they can send it back on future requests.
@@ -120,19 +129,25 @@ pub struct ThumbTrace {
     // ── Download metrics ──────────────────────────────────────────────────────
     /// Bytes received from the primary forward stream.
     pub download_bytes: u64,
-    /// Extra bytes from a tail Range request (e.g. TIFF IFD).
+    /// Extra bytes from a tail Range request (e.g. TIFF IFD ZIP).
     pub download_tail_bytes: u64,
-    /// Seconds waiting for upstream download(s).
-    pub download_secs: f64,
+    /// Seconds to establish the HTTP connection (TCP + response headers).
+    pub connect_secs: f64,
 
     // ── Render metrics ────────────────────────────────────────────────────────
+    /// Seconds spent in the inspect step (sniff + type detection).
+    pub inspect_secs: f64,
+    /// Seconds spent in the shortcut step (EXIF scan, progressive read, ZIP tail).
+    pub shortcut_secs: f64,
     /// Seconds spent in the render step (decode + colour convert).
     pub render_secs: f64,
     /// Seconds spent in the deliver step (resize + mozjpeg encode).
-    pub encode_secs: f64,
-    /// Pixel dimensions of the image buffer entering the encode step.
-    pub encode_width: Option<u32>,
-    pub encode_height: Option<u32>,
+    pub deliver_secs: f64,
+    /// Pixel dimensions of the image buffer that entered the render/encode step.
+    /// Stored as `[width, height]`.  For the full-decode path this equals the
+    /// original media dimensions; for shortcut paths it is the embedded
+    /// thumbnail's decoded size.
+    pub render_resolution: Option<[u32; 2]>,
     /// Byte length of the encoded JPEG.
     pub thumbnail_bytes: Option<u64>,
 
@@ -153,7 +168,28 @@ pub struct ThumbTrace {
     /// Customer identifier for billing and quota attribution.
     /// Set by the entry point; absent for open/unauthenticated deployments.
     pub customer_id: Option<String>,
-}
+    // ── Cache ─────────────────────────────────────────────────────────────────────
+    /// Which cache backend produced this result, if any.
+    /// `None` until the cache layer is wired up.
+    pub cache_hit: Option<crate::result::CacheOutcome>,
+
+    // ── Render path ───────────────────────────────────────────────────────────────
+    /// How the thumbnail was ultimately produced.
+    pub render_handler: RenderHandler,
+
+    // ── Request context ───────────────────────────────────────────────────────────
+    /// How (and from where) this cook was invoked.
+    /// Set by the entry point; absent for programmatic calls that don’t specify.
+    pub caller: Option<CallerContext>,
+    /// True if the client connection dropped before this item completed.
+    /// Items that finished before the drop keep `cancelled = false`.
+    pub cancelled: bool,
+    /// Server identifier — a 3-letter Cloudflare colo code (e.g. `"SJC"`),
+    /// or an operator-configured name for self-hosted deployments.
+    /// Set by the entry point from the `TBR_SERVER` environment variable.
+    pub server: Option<String>,
+    /// Thumbrella build version that processed this item.
+    pub version: String,}
 
 // ── ThumbCook ─────────────────────────────────────────────────────────────────
 
@@ -182,10 +218,8 @@ pub struct ThumbCook<S: HttpStream> {
     // Live resources — allocated and dropped as steps complete.
     /// Open HTTP connection; present from connect through render, then closed.
     pub http: Option<HttpBuffer<S>>,
-    /// Decoded pixel buffer; present from render through deliver, then dropped.
-    pub render: Option<RenderImage>,
-    /// Encoded JPEG; present after deliver until `into_result()` is called.
-    pub thumb: Option<ThumbnailImage>,
+    /// Decoded pixel buffer; populated by shortcut, consumed and cleared by deliver.
+    pub render: Option<DynamicImage>,
 }
 
 impl<S: HttpStream> ThumbCook<S> {
@@ -195,11 +229,13 @@ impl<S: HttpStream> ThumbCook<S> {
         Self {
             spec,
             response: ThumbResult { url, ..ThumbResult::default() },
-            trace: ThumbTrace::default(),
+            trace: ThumbTrace {
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                ..ThumbTrace::default()
+            },
             cancel: Arc::new(AtomicBool::new(false)),
             http: None,
             render: None,
-            thumb: None,
         }
     }
 
@@ -214,6 +250,23 @@ impl<S: HttpStream> ThumbCook<S> {
         self.response.message = message.into();
     }
 
+    /// Snapshot `http.bytes_fetched()` into `trace.download_bytes` and
+    /// `response.download_size`, unless those fields have already been set by
+    /// a pipeline step (shortcut success paths set them directly).
+    ///
+    /// Call this at every pipeline exit point so the trace always reflects the
+    /// real bytes pulled from the network, even on defer or failure paths.
+    pub fn stamp_download_bytes(&mut self) {
+        let fetched = self.http.as_ref().map(|h| h.bytes_fetched()).unwrap_or(0);
+        // Only overwrite if the step hasn't set a more precise value already.
+        if self.trace.download_bytes == 0 && fetched > 0 {
+            self.trace.download_bytes = fetched;
+        }
+        if self.response.download_size == 0 && fetched > 0 {
+            self.response.download_size = fetched;
+        }
+    }
+
     /// Consume the cook and return the finished response and trace.
     pub fn into_result(self) -> (ThumbResult, ThumbTrace) {
         (self.response, self.trace)
@@ -221,30 +274,81 @@ impl<S: HttpStream> ThumbCook<S> {
 
     /// Run the full pipeline and return `(result, trace)`.
     ///
-    /// Sequences: preflight → connect → inspect → fallback/shortcut/render → deliver.
-    /// Step functions live in `pipeline/` and are called from here as they are
-    /// implemented.  Returns early if `cook.http` is `None` after a step
-    /// (the step's signal that it set a definitive outcome).
+    /// Sequences: connect → inspect → shortcut → [tier-gate] → deliver.
+    /// Each step is called only if the previous one left `cook.http` open
+    /// (`Some`).  Steps signal completion by setting `cook.http = None`.
     pub async fn run(mut self) -> (ThumbResult, ThumbTrace) {
+        let t0 = std::time::Instant::now();
+
+        let t_dl = std::time::Instant::now();
         pipeline::connect(&mut self).await;
-        if self.http.is_none() {
-            // connect set a definitive outcome (error, 304, 4xx, 5xx) — done.
-            return self.into_result();
+        self.trace.connect_secs = t_dl.elapsed().as_secs_f64();
+        if self.http.is_none() { self.stamp_download_bytes(); self.response.duration = t0.elapsed().as_secs_f64(); return self.into_result(); }
+
+        // Derive the cache storage key: SHA-256( customer_id ":" content_identity ).
+        // Prefer a server-supplied content hash (ETag, Content-MD5, AWS/GCS checksum
+        // headers) — these are stable even when URLs contain signing tokens.
+        // Falls back to the canonical URL when no usable hash header is present.
+        // Always base64url-encoded (no padding) for compact, URL-safe keys.
+        {
+            use sha2::{Sha256, Digest};
+            use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+            use crate::source::content_hash_from_headers;
+
+            let (identity, source) = self.http
+                .as_ref()
+                .and_then(|h| content_hash_from_headers(&h.headers))
+                .map(|(hash, src)| (hash, src.to_string()))
+                .unwrap_or_else(|| {
+                    let url = self.trace.final_url.as_deref()
+                        .or(self.trace.canonical_url.as_deref())
+                        .unwrap_or(self.spec.url.as_str());
+                    (url.to_string(), "url".to_string())
+                });
+
+            let input = format!(
+                "{}:{identity}",
+                self.trace.customer_id.as_deref().unwrap_or("")
+            );
+            self.trace.cache_hash = Some(URL_SAFE_NO_PAD.encode(Sha256::digest(input.as_bytes())));
+            self.trace.cache_hash_source = Some(source);
         }
 
+        let t_inspect = std::time::Instant::now();
         pipeline::inspect(&mut self).await;
-        if self.http.is_none() {
+        self.trace.inspect_secs = t_inspect.elapsed().as_secs_f64();
+        if self.http.is_none() { self.stamp_download_bytes(); self.response.duration = t0.elapsed().as_secs_f64(); return self.into_result(); }
+
+        // Shortcut: try to populate cook.render cheaply (small file read, EXIF
+        // thumbnail, ZIP preview, …).  Closes cook.http when done either way.
+        let t_shortcut = std::time::Instant::now();
+        pipeline::shortcut(&mut self).await;
+        self.trace.shortcut_secs = t_shortcut.elapsed().as_secs_f64();
+        self.stamp_download_bytes();
+
+        if self.response.status == JobStatus::Success {
+            // Shortcut fully produced the thumbnail — return without going through deliver.
+            self.response.duration = t0.elapsed().as_secs_f64();
             return self.into_result();
         }
 
-        // TODO: pipeline::render(&mut self).await;
-        // TODO: pipeline::deliver(&mut self).await;
-
-        // Pipeline incomplete — return what we have so far.
-        // The status remains `Failed` until deliver sets it to `Success`.
-        if self.response.message.is_empty() {
-            self.response.message = "pipeline incomplete".to_string();
+        if self.render.is_some() {
+            // Shortcut populated the render buffer — deliver encodes the final JPEG.
+            pipeline::deliver(&mut self).await;
+            self.response.duration = t0.elapsed().as_secs_f64();
+            return self.into_result();
         }
+
+        // Shortcut found nothing — ensure the connection is closed.
+        if let Some(h) = self.http.as_mut() { h.close().await; }
+        self.http = None;
+
+        // TODO: check kind/tier and handoff to tier 2/3.
+        // TODO: fall back to placeholder icon.
+        self.response.status = JobStatus::DeferServer;
+        self.response.message =
+            "deferred to higher-tier renderer (not yet connected)".to_string();
+        self.response.duration = t0.elapsed().as_secs_f64();
         self.into_result()
     }
 }

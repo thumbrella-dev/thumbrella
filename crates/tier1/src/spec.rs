@@ -15,10 +15,10 @@ use serde::{Deserialize, Serialize};
 pub struct ThumbnailConfig {
     /// Monotonically increasing version.  Bust this when any field changes.
     pub version: u32,
-    /// Maximum output width in pixels.
-    pub max_width: u32,
-    /// Maximum output height in pixels.
-    pub max_height: u32,
+    /// Exact output width in pixels.  All thumbnails are scaled to fill this size.
+    pub exact_width: u32,
+    /// Exact output height in pixels.
+    pub exact_height: u32,
     /// JPEG quality 1–100 for photographic content.
     pub jpeg_quality: u8,
     /// JPEG quality for pixel-art / icon content (typically higher to avoid
@@ -26,6 +26,8 @@ pub struct ThumbnailConfig {
     pub pixel_art_quality: u8,
     /// Background colour used when flattening transparency (RGB).
     pub background_rgb: [u8; 3],
+    /// Vignette darkening strength at image edges, 0.0 (none) to 1.0 (full).
+    pub vignette_strength: f32,
 }
 
 impl Default for ThumbnailConfig {
@@ -37,11 +39,12 @@ impl Default for ThumbnailConfig {
 impl ThumbnailConfig {
     /// The one canonical config.  Update `version` whenever any value changes.
     pub const CANONICAL: Self = Self {
-        version: 1,
-        max_width: 256,
-        max_height: 204,
+        version: 2,
+        exact_width: 250,
+        exact_height: 200,
         jpeg_quality: 46,
         pixel_art_quality: 18,
         background_rgb: [255, 255, 255],
+        vignette_strength: 0.25,
     };
 }

@@ -68,7 +68,67 @@ pub fn canonical_url(raw: &str) -> Option<String> {
 }
 
 // ── Etag helpers ─────────────────────────────────────────────────────────────
+/// Extract a server-provided content hash from HTTP response headers.
+///
+/// Many storage services advertise a stable content hash that is a better
+/// cache key than the URL (which may contain signing tokens or be content-
+/// addressed but with different paths).  The returned `(value, source)` pair
+/// gives the raw hash string and a short label naming which header it came
+/// from.  Combined with a customer id before hashing, this produces a stable
+/// storage key that is independent of URL shape.
+///
+/// Priority (highest to lowest):
+/// 1. `x-amz-checksum-sha256` — AWS S3 / CloudFront SHA-256 (already a hash)
+/// 2. `content-md5`           — RFC 1864 base64-encoded MD5
+/// 3. Strong `etag`           — no `W/` prefix; S3/GCS use MD5 hex or SHA-256
+/// 4. `x-goog-hash`           — GCS `md5=<base64>` or `crc32c=<base64>` directive
+///
+/// Returns `None` when none of these headers are present or usable.
+pub fn content_hash_from_headers(
+    headers: &std::collections::HashMap<String, String>,
+) -> Option<(String, &'static str)> {
+    // 1. AWS SHA-256 checksum
+    if let Some(v) = headers.get("x-amz-checksum-sha256") {
+        let v = v.trim();
+        if !v.is_empty() { return Some((v.to_string(), "x-amz-checksum-sha256")); }
+    }
 
+    // 2. RFC Content-MD5
+    if let Some(v) = headers.get("content-md5") {
+        let v = v.trim();
+        if !v.is_empty() { return Some((v.to_string(), "content-md5")); }
+    }
+
+    // 3. Strong ETag (S3, GCS, and most CDNs emit MD5 or SHA-256 here)
+    if let Some(v) = headers.get("etag") {
+        let v = v.trim().trim_matches('"');
+        if !v.is_empty() && !v.starts_with("W/") {
+            return Some((v.to_string(), "etag"));
+        }
+    }
+
+    // 4. Google Cloud Storage x-goog-hash (may have multiple directives)
+    if let Some(v) = headers.get("x-goog-hash") {
+        // Value is comma-separated: "crc32c=n03x6A==, md5=rL0Y20zC+Fzt72VPzMSk2A=="
+        for part in v.split(',') {
+            let part = part.trim();
+            if let Some(hash) = part.strip_prefix("md5=") {
+                let hash = hash.trim();
+                if !hash.is_empty() { return Some((hash.to_string(), "x-goog-hash/md5")); }
+            }
+        }
+        // Fall through to crc32c only if no md5
+        for part in v.split(',') {
+            let part = part.trim();
+            if let Some(hash) = part.strip_prefix("crc32c=") {
+                let hash = hash.trim();
+                if !hash.is_empty() { return Some((hash.to_string(), "x-goog-hash/crc32c")); }
+            }
+        }
+    }
+
+    None
+}
 /// Extract a freshness token from HTTP response headers.
 ///
 /// Prefers `ETag` over `Last-Modified`.  The returned string is opaque — its

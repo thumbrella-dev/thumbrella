@@ -52,6 +52,10 @@
 
 mod connect;
 mod inspect;
+pub mod deliver;
+mod shortcut;
 
 pub use connect::connect;
+pub use deliver::deliver;
 pub use inspect::inspect;
+pub use shortcut::shortcut;
