@@ -8,11 +8,12 @@ use axum::{
     Json,
     http::StatusCode,
 };
+use futures::stream::{FuturesUnordered, StreamExt};
 use serde_json::{json, Value};
 
-use crate::request::{BatchRequest, ItemRequest};
-use crate::result::ItemResponse;
-use crate::pipeline;
+use crate::cook::{ThumbCook, ThumbSpec};
+use crate::http_buf::PlatformStream;
+use crate::request::CallRequest;
 
 // ── GET /health ───────────────────────────────────────────────────────────────
 
@@ -25,17 +26,22 @@ pub async fn health() -> Json<Value> {
 
 /// Batch thumbnail / describe endpoint.
 ///
-/// Accepts a `BatchRequest` JSON body and returns a JSON array of `ItemResult`
+/// Accepts a `CallRequest` JSON body and returns a JSON array of `ThumbResponse`
 /// values.  Results arrive in completion order; streaming (NDJSON/SSE) will
 /// deliver the same shape, just with earlier items arriving sooner.
 pub async fn batch(
-    Json(req): Json<BatchRequest>,
+    Json(req): Json<CallRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let mut items: Vec<ItemResponse> = Vec::with_capacity(req.items.len());
-
+    let mut pool = FuturesUnordered::new();
     for input in req.items {
-        let item = ItemRequest::from_input(input);
-        items.push(pipeline::process_item(item).await);
+        let (url, etag) = input.into_parts();
+        let spec = ThumbSpec { url, etag };
+        pool.push(ThumbCook::<PlatformStream>::new(spec).cook());
+    }
+
+    let mut items = Vec::with_capacity(pool.len());
+    while let Some(result) = pool.next().await {
+        items.push(result);
     }
 
     Ok(Json(json!({ "items": items })))

@@ -28,7 +28,7 @@ pub enum FileKind {
     Document,
     /// 3-D model or scene (USD, GLTF, OBJ, …).
     Geometry,
-    /// Archive or container (ZIP, TAR, RAR, …).
+    /// Collection of files and directories (ZIP, TAR, RAR, …).
     Archive,
     /// Plain or marked up text.
     Text,
@@ -42,4 +42,26 @@ impl Default for FileKind {
     fn default() -> Self {
         Self::Unknown
     }
+}
+
+// ── Strategy ──────────────────────────────────────────────────────────────────
+
+/// How the thumbnail was (or will be) produced.
+///
+/// Determines which pipeline branch runs and what the result looks like.
+/// Returned in [`ThumbResult`](crate::result::ThumbResult) so clients can
+/// reason about quality and provenance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Strategy {
+    /// Full decode → resize → encode.  Highest quality; requires pixel work.
+    Render,
+    /// Progressive/streaming decode that can emit a thumbnail before the full
+    /// file is received (e.g. progressive JPEG, interlaced PNG).
+    Progressive,
+    /// Extract an existing thumbnail already embedded in the file
+    /// (EXIF JPEG, HEIC cover image, DOCX/ODT preview, …).  No pixel work.
+    Embedded,
+    /// Source cannot be rendered; a pre-generated placeholder icon is used.
+    Fallback,
 }

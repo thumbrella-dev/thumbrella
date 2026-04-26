@@ -1,25 +1,25 @@
-//! Result types — the public per-item response contract.
+//! Call and thumb response types — the public outbound contract.
 //!
 //! # Key types
 //!
 //! - [`JobStatus`] — high-level per-item outcome.
-//! - [`ItemResponse`] — the public per-item response.  This is the cache
-//!   object: stored on success and returned verbatim on a cache hit (with
-//!   `status` overridden to `cached`).  All fields always serialise so
-//!   clients get a stable JSON shape.  A thumbnail is always present —
-//!   fallback placeholder images are used for error/throttle/not-modified.
-//! - [`ServerInfo`] — internal per-item telemetry filled by the pipeline.
-//!   Never sent to clients; used for logging.
-//! - [`BatchResponse`] — top-level batch response wrapping a
-//!   [`RequestRecord`] and a `Vec<ItemResponse>`.
+//! - [`ThumbResult`] — the per-item result.  Public API, cache object, and
+//!   cook output are all this same struct.  All fields always serialise so
+//!   clients get a stable JSON shape.  A thumbnail is always present except
+//!   when `status` is `not_modified` — the only case where `thumbnail` is empty.
+//! - [`CallRecord`] — per-HTTP-request envelope record (id, host, path, …).
+//! - [`CallResponse`] — top-level response wrapping one `CallRecord` and
+//!   a `Vec<ThumbResult>`.
+//!
+//! Internal pipeline telemetry lives in `cook::ThumbTrace` — not here.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use crate::media::FileKind;
+use crate::media::{FileKind, Strategy};
 
 // ── Job status ────────────────────────────────────────────────────────────────
 
-/// High-level outcome of processing a single batch item.
+/// High-level outcome of processing a single item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {
@@ -37,14 +37,14 @@ pub enum JobStatus {
     DeferServer,
 }
 
-// ── Request record ────────────────────────────────────────────────────────────
+// ── Call record ───────────────────────────────────────────────────────────────
 
-/// Per-HTTP-request tracking record.
+/// Per-HTTP-request tracking record — the envelope for a batch call.
 ///
-/// One record per inbound HTTP request, linking all per-item `ServerInfo`
-/// records produced during that request.
+/// One record per inbound HTTP request, correlating all `ThumbResult`
+/// items produced during that call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RequestRecord {
+pub struct CallRecord {
     pub id: String,
     pub host: String,
     pub path: String,
@@ -56,64 +56,20 @@ pub struct RequestRecord {
     pub duration_secs: Option<f64>,
 }
 
-// ── Server info ───────────────────────────────────────────────────────────────
+// ── Thumb result ─────────────────────────────────────────────────────────────
 
-/// Per-item server-side telemetry.
-///
-/// Included in the response when developer mode is enabled.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServerInfo {
-    /// ID of the enclosing HTTP request.
-    pub request_id: String,
-    /// Canonical fetch URL (query params / auth tokens stripped).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fetch_url: Option<String>,
-    /// Source byte length from `Content-Length`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fetch_size: Option<u64>,
-    /// MIME type (magic-sniffed preferred over `Content-Type`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fetch_mime: Option<String>,
-    /// Validator token as returned by upstream (ETag or Last-Modified).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fetch_validator: Option<String>,
-    /// Whether the upstream server supports byte-range requests.
-    pub fetch_ranges: bool,
-    /// Total bytes received from the upstream source.
-    pub download_bytes: u64,
-    /// Extra bytes fetched in a tail Range read (e.g. TIFF IFD).
-    pub download_tail: u64,
-    /// Seconds spent waiting for upstream download(s).
-    pub download_duration: f64,
-    /// Seconds spent on decode / pre-processing (excluding final encode).
-    pub render_duration: f64,
-    /// Seconds spent on the crop / resize / mozjpeg encode step.
-    pub encode_duration: f64,
-    /// Pixel dimensions of the image entering the encode step.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub encode_width: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub encode_height: Option<u32>,
-    /// Byte length of the encoded JPEG thumbnail.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thumbnail_bytes: Option<u64>,
-    pub server_tier: u8,
-}
-
-// ── Item result ───────────────────────────────────────────────────────────────
-
-/// Fully resolved result for one batch item.
-///
-/// Per-item response — the public API and cache object.
+/// Per-item result — the public API, cache object, and cook output.
 ///
 /// All fields are always present in the serialised JSON.  A thumbnail is
 /// always provided — a pregenerated placeholder is used for error, throttle,
-/// and not-modified outcomes so clients never need a nil check.
+/// and defer outcomes so clients never need a nil check.  The one exception
+/// is `status: not_modified`: when the caller supplied an `etag` and the
+/// source is unchanged, `thumbnail` is empty and no rendering was done.
 ///
 /// This struct is stored in the cache on `success` and returned verbatim
 /// on a `cached` hit (with `status` overridden to `cached`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ItemResponse {
+pub struct ThumbResult {
     /// Source URL — the client's correlation key.
     pub url: String,
     /// High-level processing outcome.
@@ -124,8 +80,8 @@ pub struct ItemResponse {
     pub download_size: u64,
     /// Status message; empty on success, human-readable on failure/defer.
     pub message: String,
-    /// Processing strategy: `render`, `progressive`, `embedded`, `fallback`.
-    pub strategy: Option<String>,
+    /// Processing strategy used to produce the thumbnail.
+    pub strategy: Option<Strategy>,
     /// Freshness token for conditional re-requests; `null` if unavailable.
     pub etag: Option<String>,
     /// JPEG thumbnail bytes, base64-encoded.  Always present.
@@ -135,8 +91,7 @@ pub struct ItemResponse {
     /// generic icon rather than a real render.  `null` for real thumbnails.
     ///
     /// Clients can use this as a cache key to share one image buffer across
-    /// all items that map to the same placeholder instead of decoding the
-    /// embedded bytes repeatedly.  Stable token examples:
+    /// all items that map to the same placeholder.  Example tokens:
     /// `"archive"`, `"error_404"`, `"error_auth"`, `"unsupported"`.
     pub placeholder: Option<String>,
     /// MIME type of the source (magic-sniffed preferred over Content-Type).
@@ -152,7 +107,7 @@ pub struct ItemResponse {
     pub properties: Option<Value>,
 }
 
-impl Default for ItemResponse {
+impl Default for ThumbResult {
     fn default() -> Self {
         Self {
             url: String::new(),
@@ -173,13 +128,13 @@ impl Default for ItemResponse {
     }
 }
 
-// ── Batch response ────────────────────────────────────────────────────────────
+// ── Call response ─────────────────────────────────────────────────────────────
 
-/// Top-level response body for the synchronous batch endpoint.
+/// Top-level response body for a batch call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BatchResponse {
-    pub request: RequestRecord,
-    pub items: Vec<ItemResponse>,
+pub struct CallResponse {
+    pub request: CallRecord,
+    pub items: Vec<ThumbResult>,
 }
 
 // ── base64 serde helper ───────────────────────────────────────────────────────

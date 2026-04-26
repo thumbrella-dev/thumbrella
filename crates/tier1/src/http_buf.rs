@@ -530,3 +530,13 @@ fn flatten_headers(headers: &reqwest::header::HeaderMap) -> HashMap<String, Stri
     }
     out
 }
+
+// ── Platform stream alias ─────────────────────────────────────────────────────
+
+/// The HTTP backend used by native server builds.
+///
+/// Use this alias instead of spelling out `HttpBuffer::<ReqwestStream>` at
+/// call sites.  The Workers build provides its own `FetchStream` in a
+/// downstream crate and uses `HttpBuffer::<FetchStream>` there.
+#[cfg(feature = "native")]
+pub type PlatformStream = ReqwestStream;

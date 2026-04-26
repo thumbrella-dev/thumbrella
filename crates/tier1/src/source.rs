@@ -1,10 +1,12 @@
-//! Source reference and transport metadata.
+//! Source reference and URL utilities.
 //!
 //! A `SourceRef` is the caller's pointer to a piece of media.  Currently that
 //! is always a URL; uploads and object-store references will be added later.
 //!
-//! `SourceMetadata` is what we learn about the source from HTTP headers and
-//! magic-byte sniffing — before any heavy decode work begins.
+//! HTTP-level metadata (content type, content length, accept-ranges, …) is
+//! read directly from `HttpBuffer` during the connect step.  The fields that
+//! need to persist after the connection closes (`final_url`, the upstream etag)
+//! are stored in `ThumbTrace`.
 
 use serde::{Deserialize, Serialize};
 
@@ -65,64 +67,38 @@ pub fn canonical_url(raw: &str) -> Option<String> {
     Some(format!("{scheme}://{}{path}", host.to_ascii_lowercase()))
 }
 
-// ── Source validator ──────────────────────────────────────────────────────────
+// ── Etag helpers ─────────────────────────────────────────────────────────────
 
-/// An upstream freshness token that the caller can send back on subsequent
-/// requests to get a `not_modified` response instead of a full regeneration.
+/// Extract a freshness token from HTTP response headers.
 ///
-/// Encoding is opaque to callers; the leading character encodes the kind:
-/// - `E…` → ETag value
-/// - `M…` → Last-Modified value
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct SourceValidator(pub String);
-
-impl SourceValidator {
-    pub fn from_etag(value: &str) -> Self {
-        Self(format!("E{value}"))
+/// Prefers `ETag` over `Last-Modified`.  The returned string is opaque — its
+/// leading character encodes the kind so [`conditional_headers`] can reconstruct
+/// the right request header without the caller needing to track that separately:
+/// - `E…` → was an ETag
+/// - `M…` → was a Last-Modified value
+///
+/// Returns `None` if neither header is present.
+pub fn etag_from_headers(headers: &std::collections::HashMap<String, String>) -> Option<String> {
+    if let Some(v) = headers.get("etag") {
+        return Some(format!("E{v}"));
     }
-
-    pub fn from_last_modified(value: &str) -> Self {
-        Self(format!("M{value}"))
+    if let Some(v) = headers.get("last-modified") {
+        return Some(format!("M{v}"));
     }
-
-    /// Return the raw validator string in the form expected by the corresponding
-    /// HTTP conditional request header.
-    pub fn header_value(&self) -> &str {
-        self.0.get(1..).unwrap_or("")
-    }
-
-    /// `true` if this is an ETag-based validator.
-    pub fn is_etag(&self) -> bool {
-        self.0.starts_with('E')
-    }
+    None
 }
 
-// ── HTTP-level source metadata ────────────────────────────────────────────────
-
-/// Everything we learn about a source from headers and magic-byte sniffing,
-/// before any heavy decode begins.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SourceMetadata {
-    /// MIME type from the `Content-Type` response header.
-    pub content_type: Option<String>,
-    /// MIME type from libmagic / `infer` byte sniffing.
-    pub magic_mime: Option<String>,
-    /// Byte length from `Content-Length` (may be absent for chunked responses).
-    pub content_length: Option<u64>,
-    /// Freshness token from `ETag` or `Last-Modified`, preferring ETag.
-    pub validator: Option<SourceValidator>,
-    /// `true` if the upstream server sent `Accept-Ranges: bytes`.
-    pub accept_ranges: bool,
-    /// Final URL after following any HTTP redirects.
-    pub final_url: Option<String>,
-}
-
-impl SourceMetadata {
-    /// Best-effort MIME: magic sniff wins over `Content-Type` header.
-    pub fn best_mime(&self) -> Option<&str> {
-        self.magic_mime
-            .as_deref()
-            .or(self.content_type.as_deref())
+/// Return the HTTP conditional-request headers for a stored etag string.
+///
+/// The inverse of [`etag_from_headers`]: given the opaque token produced
+/// earlier, returns the `(header-name, value)` pair to include in a
+/// subsequent fetch so the server can respond with `304 Not Modified`.
+///
+/// Returns `None` if the string is empty or has an unrecognised prefix.
+pub fn conditional_headers(etag: &str) -> Option<(&'static str, &str)> {
+    match etag.as_bytes().first() {
+        Some(b'E') => Some(("if-none-match", &etag[1..])),
+        Some(b'M') => Some(("if-modified-since", &etag[1..])),
+        _ => None,
     }
 }
