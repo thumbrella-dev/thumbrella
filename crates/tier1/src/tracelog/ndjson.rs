@@ -41,6 +41,14 @@ impl NdjsonTraceBackend {
 
     /// Path this backend is writing to.
     pub fn path(&self) -> &str { &self.path }
+
+    /// Diagnostic check for a configured NDJSON trace path.
+    ///
+    /// Checks write access and free disk space without opening or creating
+    /// the file.  Safe to call at any time.
+    pub fn diag(path: &str) -> crate::diag::FileCheck {
+        crate::diag::check_file_path(path)
+    }
 }
 
 impl TraceBackend for NdjsonTraceBackend {

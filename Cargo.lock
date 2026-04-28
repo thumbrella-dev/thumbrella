@@ -2467,6 +2467,7 @@ dependencies = [
  "image",
  "infer",
  "jpeg-decoder",
+ "libc",
  "mozjpeg-rs",
  "reqwest",
  "rusqlite",

@@ -30,6 +30,7 @@ native = [
     "dep:tracing-subscriber",
     "dep:time",
     "dep:clap",
+    "dep:libc",
 ]
 
 [dependencies]
@@ -74,3 +75,4 @@ reqwest         = { version = "0.12", default-features = false,
 tracing-subscriber = { version = "0.3", features = ["env-filter"],          optional = true }
 time            = { version = "0.3", features = ["formatting"],              optional = true }
 clap            = { version = "4", features = ["derive"],                    optional = true }
+libc            = { version = "0.2",                                         optional = true }

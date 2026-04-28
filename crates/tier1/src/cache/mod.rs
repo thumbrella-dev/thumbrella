@@ -135,3 +135,23 @@ pub fn open_from_dsn(dsn: &str) -> Result<Vec<Arc<dyn CacheBackend>>, String> {
     Err(format!("unsupported cache DSN scheme: {dsn}"))
 }
 
+/// Validate a `TBR_CACHE` DSN and produce a diagnostic report.
+///
+/// Returns `(validation, file_check)` where:
+/// - `validation` is `Error` for unknown schemes, `Skipped` for known ones
+///   (deeper per-file checks live in `file_check`)
+/// - `file_check` is `Some` for file-backed schemes, `None` otherwise
+#[cfg(feature = "native")]
+pub fn validate_dsn(dsn: &str) -> (crate::diag::Validation, Option<crate::diag::FileCheck>) {
+    if let Some(path) = dsn.strip_prefix("sqlite:") {
+        return (crate::diag::Validation::skipped(), Some(sqlite::SqliteCacheBackend::diag(path)));
+    }
+    let scheme = dsn.split(':').next().unwrap_or(dsn);
+    (
+        crate::diag::Validation::error(format!(
+            "unknown cache DSN scheme '{scheme}' — supported: sqlite:<path>"
+        )),
+        None,
+    )
+}
+

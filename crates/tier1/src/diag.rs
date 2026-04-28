@@ -94,6 +94,32 @@ impl Validation {
     }
 }
 
+// ── File-backed backend check ────────────────────────────────────────────────
+
+/// Write-access and disk-space snapshot for a file-backed backend path.
+///
+/// Produced by [`check_file_path`] during [`collect`].  Never sent to clients.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileCheck {
+    /// The path as written in the DSN (may be relative).
+    pub path: String,
+    /// Whether the process can write to this path.
+    ///
+    /// When the file does not yet exist the parent directory is tested instead;
+    /// see `note` for which path was actually checked.
+    pub writable: bool,
+    /// Descriptive note when a fallback was used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Free bytes available to an unprivileged user on the filesystem that
+    /// hosts this path.  `None` when the query fails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub free_bytes: Option<u64>,
+    /// SQLite-specific schema validation.  `None` for non-SQLite paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sqlite_validation: Option<Validation>,
+}
+
 // ── Concurrent-limit snapshot ─────────────────────────────────────────────────
 
 /// Configured concurrency limits for a tier.
@@ -132,8 +158,8 @@ pub struct DiagReport {
 
     // ── Server config ─────────────────────────────────────────────────────────
     /// HTTP port the server binds on.
-    pub server_port: u16,
-    /// Server identifier (colo code or operator label).
+    pub server_port: u16,    /// Whether the configured port is available and bindable by this process.
+    pub port_available: bool,    /// Server identifier (colo code or operator label).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_id: Option<String>,
     /// Developer / debug mode enabled.
@@ -141,6 +167,12 @@ pub struct DiagReport {
     /// Trace sink DSN if configured, or `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_url: Option<String>,
+    /// Validation result for the trace sink DSN.
+    pub trace_validation: Validation,
+    /// Write-access and disk-space check for the trace file (when `TBR_TRACE`
+    /// uses a file-backed scheme such as `ndjson:`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_file_check: Option<FileCheck>,
     /// Whether a customer token is configured.  The token value is never
     /// included in the report — only its presence is recorded.
     pub customer_token_set: bool,
@@ -178,6 +210,10 @@ pub struct DiagReport {
     pub cache_config: Option<String>,
     /// Validation result for cache backend(s).
     pub cache_validation: Validation,
+    /// Write-access and disk-space check for the cache file (when `TBR_CACHE`
+    /// uses a file-backed scheme such as `sqlite:`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_file_check: Option<FileCheck>,
 
     // ── Account ───────────────────────────────────────────────────────────────
     /// Customer account identifier this deployment is running under.
@@ -240,15 +276,16 @@ pub fn collect(cfg: &crate::config::AppConfig) -> DiagReport {
     });
 
     // Cache
-    let (cache_config, cache_validation) = match cfg.cache_url.as_ref() {
+    let (cache_config, cache_validation, cache_file_check) = match cfg.cache_url.as_ref() {
         Some(dsn) => {
             let mut desc = dsn.clone();
             if let Some(max) = cfg.cache_max_items {
                 desc = format!("{desc}  (max_items={max})");
             }
-            (Some(desc), Validation::skipped()) // TODO: connect + ping
+            let (validation, file_check) = crate::cache::validate_dsn(dsn);
+            (Some(desc), validation, file_check)
         }
-        None => (None, Validation::not_configured()),
+        None => (None, Validation::not_configured(), None),
     };
 
     // Account / token
@@ -267,6 +304,16 @@ pub fn collect(cfg: &crate::config::AppConfig) -> DiagReport {
 
     // Trace sink
     let trace_url = cfg.trace_url.clone();
+    let (trace_validation, trace_file_check) = match cfg.trace_url.as_deref() {
+        None      => (Validation::not_configured(), None),
+        Some(dsn) => crate::tracelog::validate_dsn(dsn),
+    };
+
+    // Cache file check
+    // (produced by cache::validate_dsn above)
+
+    // Port availability
+    let port_available = check_port_available(cfg.port);
 
     // Container / Docker image detection
     let container_image = detect_container_image();
@@ -274,16 +321,25 @@ pub fn collect(cfg: &crate::config::AppConfig) -> DiagReport {
     let healthy = !matches!(tier2, TierStatus::Error)
         && !matches!(tier3, TierStatus::Error)
         && !matches!(cache_validation.status, ValidationStatus::Error)
-        && !matches!(account_validation.status, ValidationStatus::Error);
+        && !matches!(trace_validation.status, ValidationStatus::Error)
+        && !matches!(account_validation.status, ValidationStatus::Error)
+        && port_available
+        && cache_file_check.as_ref()
+            .and_then(|fc| fc.sqlite_validation.as_ref())
+            .map(|v| v.status != ValidationStatus::Error)
+            .unwrap_or(true);
 
     DiagReport {
         runtime: RuntimeMode::Cli,
         version: env!("CARGO_PKG_VERSION").to_string(),
         build_timestamp,
         server_port: cfg.port,
+        port_available,
         server_id: cfg.server.clone(),
         developer_mode: cfg.developer_mode,
         trace_url,
+        trace_validation,
+        trace_file_check,
         customer_token_set: cfg.customer_token.is_some(),
         tier1: TierStatus::Builtin,
         tier1_concurrency,
@@ -297,11 +353,90 @@ pub fn collect(cfg: &crate::config::AppConfig) -> DiagReport {
         tier3_concurrency,
         cache_config,
         cache_validation,
+        cache_file_check,
         account,
         account_validation,
         healthy,
         container_image,
     }
+}
+
+/// Check write access and free disk space for a file-backed backend path.
+///
+/// Uses `access(2)` to test write permission without opening or creating
+/// anything.  When the target file does not yet exist the parent directory
+/// is tested instead — that is where the file will ultimately be created.
+/// Free space is queried via `statvfs(2)` on the deepest existing ancestor.
+///
+/// Called by backend `diag()` implementations in [`crate::cache`] and
+/// [`crate::tracelog`].
+#[cfg(feature = "native")]
+pub(crate) fn check_file_path(path: &str) -> FileCheck {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
+
+    let target = Path::new(path);
+
+    let (check_path, note) = if target.exists() {
+        (target.to_path_buf(), None)
+    } else {
+        let parent = target.parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        (
+            parent.to_path_buf(),
+            Some("file does not exist; parent directory checked".to_string()),
+        )
+    };
+
+    // access(2): tests with real UID/GID, never modifies the filesystem.
+    let writable = CString::new(check_path.as_os_str().as_bytes())
+        .map(|c| unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 })
+        .unwrap_or(false);
+
+    let free_bytes = free_bytes_at(&check_path);
+
+    FileCheck { path: path.to_string(), writable, note, free_bytes, sqlite_validation: None }
+}
+
+/// Query free bytes on the filesystem hosting `path` via `statvfs(2)`.
+///
+/// Walks up to the nearest existing ancestor when the path itself does not
+/// exist yet, so a configured-but-not-yet-created file path still works.
+#[cfg(feature = "native")]
+pub(crate) fn free_bytes_at(path: &std::path::Path) -> Option<u64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut p = path.to_path_buf();
+    loop {
+        if p.exists() { break; }
+        let parent = p.parent().map(|q| q.to_path_buf());
+        match parent {
+            Some(q) if !q.as_os_str().is_empty() => p = q,
+            _ => p = std::path::PathBuf::from("."),
+        }
+        if p.exists() { break; }
+    }
+
+    let c = CString::new(p.as_os_str().as_bytes()).ok()?;
+    let mut buf: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c.as_ptr(), &mut buf) } != 0 { return None; }
+    // f_bavail: blocks available to unprivileged users; f_bsize: block size.
+    Some(buf.f_bavail as u64 * buf.f_bsize as u64)
+}
+
+/// Check whether the process can bind the given TCP port on `0.0.0.0`.
+///
+/// Uses `SO_REUSEADDR` so a brief probe bind succeeds even when the port was
+/// recently held; the socket is dropped immediately after.  Returns `false`
+/// when the bind fails for any reason (permission denied for ports <1024,
+/// already in use, etc.).
+#[cfg(feature = "native")]
+fn check_port_available(port: u16) -> bool {
+    use std::net::TcpListener;
+    TcpListener::bind(("0.0.0.0", port)).is_ok()
 }
 
 /// Detect whether the current process is running inside a container and
@@ -390,9 +525,15 @@ impl DiagReport {
 
         println!("Server");
         println!("  port            : {}", self.server_port);
+        let port_ok = if self.port_available { "available" } else { "UNAVAILABLE (already in use or permission denied)" };
+        println!("  port_available  : {port_ok}");
         println!("  server_id       : {}", self.server_id.as_deref().unwrap_or("—"));
         println!("  developer_mode  : {}", self.developer_mode);
         println!("  trace_url       : {}", self.trace_url.as_deref().unwrap_or("none"));
+        print_validation("  trace_validation", &self.trace_validation);
+        if let Some(ref fc) = self.trace_file_check {
+            print_file_check("trace_file", fc);
+        }
         println!("  customer_token  : {}", if self.customer_token_set { "set" } else { "—" });
         println!();
 
@@ -405,6 +546,12 @@ impl DiagReport {
         println!("Cache");
         println!("  config          : {}", self.cache_config.as_deref().unwrap_or("—"));
         print_validation("  validation", &self.cache_validation);
+        if let Some(ref fc) = self.cache_file_check {
+            print_file_check("file", fc);
+            if let Some(ref sv) = fc.sqlite_validation {
+                print_validation("    schema      ", sv);
+            }
+        }
         println!();
 
         println!("Account");
@@ -448,4 +595,25 @@ fn print_validation(label: &str, v: &Validation) {
     } else {
         println!("{label}: {s}");
     }
+}
+fn print_file_check(label: &str, fc: &FileCheck) {
+    let writable_str = if fc.writable { "yes" } else { "NO (permission denied)" };
+    let note_suffix = fc.note.as_deref()
+        .map(|n| format!("  ({n})"))
+        .unwrap_or_default();
+    println!("  {label:<16}: {}", fc.path);
+    println!("    writable      : {writable_str}{note_suffix}");
+    if let Some(free) = fc.free_bytes {
+        println!("    free          : {}", fmt_diag_bytes(free));
+    }
+}
+
+fn fmt_diag_bytes(b: u64) -> String {
+    const GIB: u64 = 1 << 30;
+    const MIB: u64 = 1 << 20;
+    const KIB: u64 = 1 << 10;
+    if      b >= GIB { format!("{:.1} GiB", b as f64 / GIB as f64) }
+    else if b >= MIB { format!("{:.1} MiB", b as f64 / MIB as f64) }
+    else if b >= KIB { format!("{:.1} KiB", b as f64 / KIB as f64) }
+    else             { format!("{b} B") }
 }

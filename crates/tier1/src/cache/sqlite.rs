@@ -63,6 +63,17 @@ impl SqliteCacheBackend {
         migrate(&conn)?;
         Ok(Self { conn: Arc::new(Mutex::new(conn)) })
     }
+
+    /// Diagnostic check for a configured SQLite cache path.
+    ///
+    /// Checks write access, free disk space, and — when the file already
+    /// exists — schema compatibility.  Never opens the database in write mode
+    /// or runs migrations; safe to call at any time.
+    pub fn diag(path: &str) -> crate::diag::FileCheck {
+        let mut fc = crate::diag::check_file_path(path);
+        fc.sqlite_validation = Some(check_schema(path));
+        fc
+    }
 }
 
 impl CacheBackend for SqliteCacheBackend {
@@ -116,6 +127,67 @@ impl CacheBackend for SqliteCacheBackend {
 }
 
 // ── Schema migrations ─────────────────────────────────────────────────────────
+
+/// Read-only schema validation — called from [`SqliteCacheBackend::diag`].
+///
+/// Opens the file with `SQLITE_OPEN_READ_ONLY` so no writes or migrations
+/// are performed.  Returns [`Validation::not_configured`] when the file does
+/// not yet exist (nothing to validate; `open` will create it correctly).
+fn check_schema(path: &str) -> crate::diag::Validation {
+    if !std::path::Path::new(path).exists() {
+        return crate::diag::Validation::not_configured();
+    }
+
+    let conn = match Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) {
+        Ok(c)  => c,
+        Err(e) => return crate::diag::Validation::error(format!("cannot open: {e}")),
+    };
+
+    // Quick integrity check — catches truncated / non-SQLite files.
+    let integrity: String = match conn.query_row(
+        "PRAGMA integrity_check(1);", [], |r| r.get(0),
+    ) {
+        Ok(s)  => s,
+        Err(e) => return crate::diag::Validation::error(format!("integrity_check failed: {e}")),
+    };
+    if integrity != "ok" {
+        return crate::diag::Validation::error(format!("integrity_check: {integrity}"));
+    }
+
+    // Confirm the thumbrella table exists with all expected columns.
+    let mut stmt = match conn.prepare("PRAGMA table_info(thumbrella);") {
+        Ok(s)  => s,
+        Err(e) => return crate::diag::Validation::error(format!("PRAGMA table_info failed: {e}")),
+    };
+    let cols: Vec<String> = match stmt.query_map([], |r| r.get::<_, String>(1)) {
+        Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+        Err(e)   => return crate::diag::Validation::error(format!("reading columns failed: {e}")),
+    };
+
+    if cols.is_empty() {
+        return crate::diag::Validation::error(
+            "table 'thumbrella' not found — may be a different database"
+        );
+    }
+
+    let required = ["cache_key", "value", "size_bytes", "last_accessed_at", "access_count"];
+    let missing: Vec<&str> = required.iter()
+        .copied()
+        .filter(|c| !cols.iter().any(|col| col == c))
+        .collect();
+
+    if !missing.is_empty() {
+        return crate::diag::Validation::error(format!(
+            "schema mismatch — missing column(s): {}",
+            missing.join(", ")
+        ));
+    }
+
+    crate::diag::Validation::ok()
+}
 
 fn apply_pragmas(conn: &Connection) -> rusqlite::Result<()> {
     // WAL mode: concurrent readers don't block a writer.
