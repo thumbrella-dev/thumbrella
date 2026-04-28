@@ -138,8 +138,9 @@ pub struct DiagReport {
     pub server_id: Option<String>,
     /// Developer / debug mode enabled.
     pub developer_mode: bool,
-    /// Where trace records are emitted (human-readable config string).
-    pub trace_sink: String,
+    /// Trace sink DSN if configured, or `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_url: Option<String>,
     /// Whether a customer token is configured.  The token value is never
     /// included in the report — only its presence is recorded.
     pub customer_token_set: bool,
@@ -215,8 +216,6 @@ pub struct DiagReport {
 /// are wired up.
 #[cfg(feature = "native")]
 pub fn collect(cfg: &crate::config::AppConfig) -> DiagReport {
-    use crate::config::TraceSink;
-
     // Tier 2
     let (tier2, tier2_handoff, tier2_validation) = match cfg.tier2_url.as_ref() {
         Some(url) => (TierStatus::Handoff, Some(url.clone()), Validation::skipped()),
@@ -266,8 +265,8 @@ pub fn collect(cfg: &crate::config::AppConfig) -> DiagReport {
 
     let build_timestamp = option_env!("TBR_BUILD_TIMESTAMP").map(str::to_owned);
 
-    // Trace sink display
-    let trace_sink_display = cfg.trace_sink.display();
+    // Trace sink
+    let trace_url = cfg.trace_url.clone();
 
     // Container / Docker image detection
     let container_image = detect_container_image();
@@ -284,7 +283,7 @@ pub fn collect(cfg: &crate::config::AppConfig) -> DiagReport {
         server_port: cfg.port,
         server_id: cfg.server.clone(),
         developer_mode: cfg.developer_mode,
-        trace_sink: trace_sink_display,
+        trace_url,
         customer_token_set: cfg.customer_token.is_some(),
         tier1: TierStatus::Builtin,
         tier1_concurrency,
@@ -393,7 +392,7 @@ impl DiagReport {
         println!("  port            : {}", self.server_port);
         println!("  server_id       : {}", self.server_id.as_deref().unwrap_or("—"));
         println!("  developer_mode  : {}", self.developer_mode);
-        println!("  trace_sink      : {}", self.trace_sink);
+        println!("  trace_url       : {}", self.trace_url.as_deref().unwrap_or("none"));
         println!("  customer_token  : {}", if self.customer_token_set { "set" } else { "—" });
         println!();
 

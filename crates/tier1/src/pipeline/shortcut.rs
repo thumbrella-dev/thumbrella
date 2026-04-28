@@ -9,7 +9,7 @@
 //! 2. **Targeted fetch** — calls `read_at(thumb_offset, thumb_len)` to pull
 //!    exactly the thumbnail bytes, then closes the connection immediately.
 //!
-//! When no embedded thumbnail is found, `cook.http` is left open and
+//! When no embedded thumbnail is found, the HTTP connection is left open and
 //! [`super::deliver`] runs next.
 //!
 //! Supported paths:
@@ -28,7 +28,7 @@ use image::DynamicImage;
 use crate::cook::ThumbCook;
 use crate::http_buf::HttpStream;
 use crate::media::FileKind;
-use crate::result::{JobStatus, RenderHandler};
+use crate::result::RenderHandler;
 use crate::spec::ThumbnailConfig;
 
 /// Header bytes needed to locate the embedded thumbnail span.
@@ -52,6 +52,16 @@ const HEADER_SCAN: usize = 4 * 1024;
 ///   content).  DOCX thumbnails (JPEG) are much smaller — typically under 50 KB.
 const ZIP_TAIL_SIZE: usize = 128 * 1024;
 
+/// Header bytes for the camera-raw shortcut.
+///
+/// TIFF-based raw formats (DNG, CR2, NEF, …) embed a full JPEG preview inside
+/// a SubIFD.  The SubIFD record offsets are referenced from IFD0, but the
+/// SubIFD DATA itself can lie well past the 4 KiB standard `HEADER_SCAN`
+/// window.  32 KiB covers the IFD metadata of all common camera models; the
+/// preview JPEG is fetched separately via a targeted Range request (same as
+/// the EXIF path).
+const RAW_HEADER_SCAN: usize = 32 * 1024;
+
 /// Known thumbnail paths inside ZIP-based container formats, checked in order.
 const ZIP_THUMB_NAMES: &[&str] = &[
     "Thumbnails/thumbnail.png",   // ODT / ODS / ODP (ODF family)
@@ -59,97 +69,6 @@ const ZIP_THUMB_NAMES: &[&str] = &[
     "docProps/thumbnail.jpg",     // OOXML variant
     "docProps/thumbnail.png",     // OOXML variant
 ];
-
-// ── Public pipeline step ──────────────────────────────────────────────────────
-
-/// Try to serve the thumbnail from an embedded preview, bypassing full decode.
-#[allow(dead_code)]
-pub async fn shortcut_old<S: HttpStream>(cook: &mut ThumbCook<S>) {
-    // Phase 1: parse the header to find the thumbnail's file-byte span.
-    // Served from the inspect page cache — no additional network I/O.
-    let header = {
-        let Some(http) = cook.http.as_mut() else { return };
-        match http.read_at(0, HEADER_SCAN).await {
-            Ok(b) => b,
-            Err(_) => return, // non-fatal — deliver will handle
-        }
-    };
-
-    // ── JPEG / TIFF: embedded thumbnail at a known file-byte offset ────────
-    let span = find_jpeg_exif_shortcut(&header)
-        .map(|i| (i.thumb_file_offset, i.thumb_len, i.source_dims))
-        .or_else(|| find_tiff_embedded_jpeg_file_span(&header).map(|(o, l)| (o, l, None)));
-
-    if let Some((thumb_file_offset, thumb_len, source_dims)) = span {
-        // Phase 2: fetch exactly the thumbnail bytes — no more, no less.
-        let embedded = {
-            let Some(http) = cook.http.as_mut() else { return };
-            match http.read_at(thumb_file_offset, thumb_len).await {
-                Ok(b) => b,
-                Err(_) => return, // non-fatal — deliver will handle
-            }
-        };
-
-        // Basic sanity check before passing to the decoder.
-        if embedded.len() >= 4 && embedded[0] == 0xFF && embedded[1] == 0xD8 {
-            let config = &ThumbnailConfig::CANONICAL;
-            if let Ok(img) = image::load_from_memory(&embedded) {
-                let (src_w, src_h) = (img.width(), img.height());
-                let t_render = Instant::now();
-                let img = pre_scale_to_target(img, config.exact_width, config.exact_height);
-                if let Ok((jpeg, strategy, _, _, deliver_secs)) =
-                    super::deliver::process_img_to_thumb(img, src_w, src_h, config)
-                {
-                    let render_secs = t_render.elapsed().as_secs_f64();
-                    cook.trace.render_resolution = Some([src_w, src_h]);
-                    cook.trace.thumbnail_bytes   = Some(jpeg.len() as u64);
-                    cook.trace.job_renderer      = Some("shortcut".into());
-                    cook.trace.render_handler    = RenderHandler::Builtin;
-                    cook.trace.job_tier          = 1;
-                    cook.trace.render_secs       = render_secs;
-                    cook.trace.deliver_secs      = deliver_secs;
-                    cook.trace.download_bytes    = cook.http.as_ref()
-                        .map(|h| h.bytes_fetched())
-                        .unwrap_or(0);
-
-                    cook.response.download_size = cook.trace.download_bytes;
-                    cook.response.thumbnail     = jpeg;
-                    cook.response.status        = JobStatus::Success;
-                    cook.response.strategy      = Some(strategy);
-
-                    if matches!(cook.response.kind, Some(crate::media::FileKind::Image)) {
-                        if let Some((w, h)) = source_dims {
-                            cook.response.properties =
-                                Some(serde_json::json!({ "width": w, "height": h }));
-                        }
-                    }
-
-                    if let Some(h) = cook.http.as_mut() { h.close().await; }
-                    cook.http = None;
-                    return;
-                }
-            }
-        }
-        // Embedded decode failed — fall through to progressive or ZIP.
-    }
-
-    // ── Progressive JPEG (no embedded thumbnail) ──────────────────────────────
-    // For plain JPEG/JFIF files: read a budget-limited prefix, decode with
-    // DCT-level power-of-two downscaling, and produce a full-quality thumbnail.
-    // This fires whether or not an EXIF span was found (covers both "no EXIF"
-    // and "corrupt embedded thumbnail" cases).
-    if header.starts_with(b"\xFF\xD8") {
-        try_progressive_jpeg_shortcut(cook).await;
-        if cook.http.is_none() { return; }
-    }
-
-    // ── ZIP containers (ODT, DOCX, …) ─────────────────────────────────────
-    // Check the local-file-header magic in the already-cached first 4 bytes.
-    if header.starts_with(b"PK\x03\x04") {
-        try_zip_shortcut(cook).await;
-    }
-    // On failure cook.http remains open for deliver.
-}
 
 // ── Progressive JPEG shortcut ─────────────────────────────────────────────────
 
@@ -203,8 +122,7 @@ async fn try_progressive_jpeg_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     // We need the source dimensions to size the window, so peek at the header
     // bytes already in the page cache (zero network cost).
     let (src_w, src_h, fetch_target) = {
-        let http = cook.http.as_mut().unwrap();
-        let header = match http.read_at(0, HEADER_SCAN).await {
+        let header = match cook.http_read_at(0, HEADER_SCAN).await {
             Ok(b) => b,
             Err(_) => return,
         };
@@ -213,21 +131,15 @@ async fn try_progressive_jpeg_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
         (w.unwrap_or(0), h.unwrap_or(0), target)
     };
 
-    // Rewind to byte 0, cap at our fetch target, enter streaming mode so bytes
-    // beyond the cached header window are pulled from the live connection.
-    {
-        let http = cook.http.as_mut().unwrap();
-        http.rewind();
-        http.set_eof(fetch_target as u64);
-        http.enter_streaming_mode();
-    }
+    cook.http_rewind();
+    cook.http_set_eof(fetch_target as u64);
+    cook.http_enter_streaming_mode();
 
     let mut data = Vec::with_capacity(fetch_target);
     {
         let mut tmp = vec![0u8; 32 * 1024];
         loop {
-            let http = cook.http.as_mut().unwrap();
-            match http.read(&mut tmp).await {
+            match cook.http_read(&mut tmp).await {
                 Ok(0) => break,
                 Ok(n) => data.extend_from_slice(&tmp[..n]),
                 Err(_) => return,
@@ -235,10 +147,7 @@ async fn try_progressive_jpeg_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
         }
     }
 
-    // Lift the artificial EOF so the connection remains usable if we fall through.
-    if let Some(http) = cook.http.as_mut() {
-        http.clear_eof();
-    }
+    cook.http_clear_eof();
 
     if data.len() < 16 {
         return;
@@ -253,25 +162,145 @@ async fn try_progressive_jpeg_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
         Err(_) => return,
     };
     let decode_secs = t_render.elapsed().as_secs_f64();
+    let color_type  = img.color();
 
     let img = pre_scale_to_target(img, config.exact_width, config.exact_height);
-    let dl_bytes = cook.http.as_ref().map(|h| h.bytes_fetched()).unwrap_or(0);
+    let dl_bytes = cook.http_bytes_fetched();
 
-    cook.trace.render_resolution = Some([src_w, src_h]);
-    cook.trace.job_renderer      = Some("shortcut/progressive".into());
-    cook.trace.render_handler    = RenderHandler::Builtin;
-    cook.trace.job_tier          = 1;
-    cook.trace.render_secs       = decode_secs;
-    cook.trace.download_bytes    = dl_bytes;
-    cook.response.download_size  = dl_bytes;
+    cook.render_resolution  = Some([src_w, src_h]);
+    cook.render_renderer    = Some("shortcut/progressive".into());
+    cook.render_handler     = RenderHandler::Builtin;
+    cook.tel_render_secs    = decode_secs;
+    cook.out_download_bytes = dl_bytes;
     if src_w > 0 && src_h > 0 {
-        cook.response.properties =
-            Some(serde_json::json!({ "width": src_w, "height": src_h }));
+        cook.media.properties = Some(image_properties(src_w, src_h, color_type));
     }
 
-    if let Some(h) = cook.http.as_mut() { h.close().await; }
-    cook.http = None;
-    cook.render = Some(img);
+    cook.http_close().await;
+    cook.render_image = Some(img);
+}
+
+// ── EXIF embedded thumbnail shortcut ────────────────────────────────────────
+
+/// Attempt to serve a thumbnail from an embedded JPEG preview.
+///
+/// Covers two source formats:
+/// - **JPEG**: EXIF APP1 IFD1 `JPEGInterchangeFormat` thumbnail.
+/// - **TIFF**: embedded JPEG found via IFD chain traversal.
+///
+/// Reads the header from the page cache (zero extra network I/O), issues one
+/// targeted Range request for the embedded thumbnail bytes, then closes the
+/// connection.  Returns without touching `cook.render_image` when no embedded thumbnail
+/// is found or decoding fails, allowing the caller to fall through.
+async fn try_exif_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
+    let config = &ThumbnailConfig::CANONICAL;
+
+    let header = match cook.http_read_at(0, HEADER_SCAN).await {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+
+    let span = find_jpeg_exif_shortcut(&header)
+        .map(|i| (i.thumb_file_offset, i.thumb_len, i.source_dims))
+        .or_else(|| find_tiff_embedded_jpeg_file_span(&header).map(|(o, l)| (o, l, None)));
+    let Some((thumb_offset, thumb_len, source_dims)) = span else { return };
+
+    let embedded = match cook.http_read_at(thumb_offset, thumb_len).await {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+
+    if embedded.len() < 4 || embedded[0] != 0xFF || embedded[1] != 0xD8 { return; }
+
+    let Ok(img) = image::load_from_memory(&embedded) else { return };
+    let (thumb_w, thumb_h) = (img.width(), img.height());
+    let color_type = img.color();
+    let dl_bytes = cook.http_bytes_fetched();
+
+    let img = pre_scale_to_target(img, config.exact_width, config.exact_height);
+    cook.http_close().await;
+
+    let (prop_w, prop_h) = source_dims.unwrap_or((thumb_w, thumb_h));
+    cook.render_resolution  = Some([thumb_w, thumb_h]);
+    cook.render_renderer    = Some("shortcut/exif".into());
+    cook.render_handler     = RenderHandler::Builtin;
+    cook.out_download_bytes = dl_bytes;
+    if prop_w > 0 && prop_h > 0 {
+        cook.media.properties = Some(image_properties(prop_w, prop_h, color_type));
+    }
+    cook.render_image = Some(img);
+}
+
+// ── Camera-raw JPEG preview shortcut ─────────────────────────────────────────
+
+/// Bytes fetched for a fallback IFD1 range request when IFD1 lies beyond
+/// the initial `RAW_HEADER_SCAN` window (e.g. Sony/Adobe DNG with a large
+/// XMP block between IFD0 and IFD1).  Covers any realistic thumbnail IFD.
+const IFD1_FETCH: usize = 512;
+
+/// Attempt to serve a thumbnail from the embedded JPEG preview in a
+/// camera-raw file.
+///
+/// Covers all TIFF-container raw formats: DNG, CR2, NEF, ARW, ORF, RW2, PEF,
+/// SRW, 3FR, MEF, RWL.
+///
+/// Strategy:
+/// - Read the first `RAW_HEADER_SCAN` bytes (32 KiB) — larger than the
+///   standard 4 KiB EXIF scan because SubIFD entries can be deeper in raw
+///   files.
+/// - Traverse the full IFD chain (including SubIFDs) via
+///   `find_tiff_embedded_jpeg_file_span`, which picks the **largest** embedded
+///   JPEG — typically the full-resolution preview, not the small IFD1 thumbnail.
+/// - Issue one Range request for those exact bytes, then close the connection.
+///
+/// `properties.width/height` reports the sensor resolution from IFD0
+/// `ImageWidth`/`ImageLength` when available (native pixel count), falling
+/// back to the embedded-preview dimensions for cameras that omit those tags.
+async fn try_raw_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
+    let config = &ThumbnailConfig::CANONICAL;
+
+    let header = match cook.http_read_at(0, RAW_HEADER_SCAN).await {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+
+    let span = find_tiff_embedded_jpeg_file_span(&header);
+    let (thumb_offset, thumb_len) = if let Some(s) = span {
+        s
+    } else {
+        let Some((little, ifd1_off)) = tiff_endian_and_ifd1_offset(&header) else { return };
+        if ifd1_off <= header.len() as u64 { return; }
+        let Ok(ifd1_data) = cook.http_fetch_range(ifd1_off, IFD1_FETCH).await else { return };
+        let Some((_, _, jpeg_off, jpeg_len)) = parse_tiff_ifd(&ifd1_data, 0, little) else { return };
+        match (jpeg_off, jpeg_len) {
+            (Some(o), Some(l)) if l >= 4 => (o as u64, l),
+            _ => return,
+        }
+    };
+
+    let embedded = match cook.http_fetch_range(thumb_offset, thumb_len).await {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+
+    if embedded.len() < 4 || embedded[0] != 0xFF || embedded[1] != 0xD8 { return; }
+
+    let Ok(img) = image::load_from_memory(&embedded) else { return };
+    let (thumb_w, thumb_h) = (img.width(), img.height());
+    let color_type = img.color();
+    let dl_bytes = cook.http_bytes_fetched();
+
+    let img = pre_scale_to_target(img, config.exact_width, config.exact_height);
+    cook.http_close().await;
+
+    cook.render_resolution  = Some([thumb_w, thumb_h]);
+    cook.render_renderer    = Some("shortcut/tiff".into());
+    cook.render_handler     = RenderHandler::Builtin;
+    cook.out_download_bytes = dl_bytes;
+    if thumb_w > 0 && thumb_h > 0 {
+        cook.media.properties = Some(image_properties(thumb_w, thumb_h, color_type));
+    }
+    cook.render_image = Some(img);
 }
 
 // ── ZIP container shortcut ────────────────────────────────────────────────────
@@ -281,7 +310,7 @@ async fn try_progressive_jpeg_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
 /// Issues **one** Range request (the file tail) that is sized to capture both
 /// the Central Directory and the embedded thumbnail data.  If the thumbnail
 /// turns out to reside outside the fetched tail the function returns without
-/// rendering and `cook.http` stays open for `deliver`.
+/// rendering and the HTTP connection stays open for `deliver`.
 async fn try_zip_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     let Some((image_bytes, dl_bytes, tail_bytes)) = zip_extract(cook).await else {
         return;
@@ -290,30 +319,23 @@ async fn try_zip_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     let config = &ThumbnailConfig::CANONICAL;
     let Ok(img) = image::load_from_memory(&image_bytes) else { return };
     let (src_w, src_h) = (img.width(), img.height());
-    let t_render = Instant::now();
-    let img = pre_scale_to_target(img, config.exact_width, config.exact_height);
-    if let Ok((jpeg, strategy, _, _, deliver_secs)) =
-        super::deliver::process_img_to_thumb(img, src_w, src_h, config)
-    {
-        let render_secs = t_render.elapsed().as_secs_f64();
-        cook.trace.render_resolution   = Some([src_w, src_h]);
-        cook.trace.thumbnail_bytes     = Some(jpeg.len() as u64);
-        cook.trace.job_renderer        = Some("shortcut".into());
-        cook.trace.render_handler      = RenderHandler::Builtin;
-        cook.trace.job_tier            = 1;
-        cook.trace.render_secs         = render_secs;
-        cook.trace.deliver_secs        = deliver_secs;
-        cook.trace.download_bytes      = dl_bytes;
-        cook.trace.download_tail_bytes = tail_bytes;
-        cook.response.download_size    = dl_bytes;
-        cook.response.thumbnail        = jpeg;
-        cook.response.status           = JobStatus::Success;
-        cook.response.strategy         = Some(strategy);
-        // Properties (width/height) were already set by inspect — keep them.
+    let color_type  = img.color();
+    let t_render    = Instant::now();
+    let img         = pre_scale_to_target(img, config.exact_width, config.exact_height);
+    let render_secs = t_render.elapsed().as_secs_f64();
 
-        if let Some(h) = cook.http.as_mut() { h.close().await; }
-        cook.http = None;
+    cook.http_close().await;
+
+    cook.render_resolution       = Some([src_w, src_h]);
+    cook.render_renderer         = Some("shortcut/zip".into());
+    cook.render_handler          = RenderHandler::Builtin;
+    cook.tel_render_secs         = render_secs;
+    cook.out_download_bytes      = dl_bytes;
+    cook.tel_download_tail_bytes = tail_bytes;
+    if src_w > 0 && src_h > 0 {
+        cook.media.properties = Some(image_properties(src_w, src_h, color_type));
     }
+    cook.render_image = Some(img);
 }
 
 /// Core ZIP extraction logic.  Returns `(image_bytes, total_dl, tail_size)` or
@@ -321,26 +343,16 @@ async fn try_zip_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
 async fn zip_extract<S: HttpStream>(
     cook: &mut ThumbCook<S>,
 ) -> Option<(Vec<u8>, u64, u64)> {
-    // Need known file size and server-side range support.
-    let (file_size, accepts_ranges) = {
-        let http = cook.http.as_ref()?;
-        (http.content_length?, http.accepts_ranges)
-    };
-    if !accepts_ranges || file_size < 22 {
-        return None;
-    }
+    let file_size    = cook.http_stream_len()?;
+    let accepts_ranges = cook.http_accepts_ranges;
+    if !accepts_ranges || file_size < 22 { return None; }
 
     let tail_size  = (ZIP_TAIL_SIZE as u64).min(file_size) as usize;
     let tail_start = file_size - tail_size as u64;
 
-    // Single Range request — intended to capture both the Central Directory
-    // and the embedded thumbnail.  If the thumbnail sits outside this window
-    // we give up rather than issuing a third request.
-    let tail = cook.http.as_mut()?.fetch_range(tail_start, tail_size).await.ok()?;
-
+    let tail = cook.http_fetch_range(tail_start, tail_size).await.ok()?;
     let image_bytes = zip_parse_and_extract(&tail, tail_start)?;
-    let dl_bytes    = cook.http.as_ref().map(|h| h.bytes_fetched()).unwrap_or(0);
-
+    let dl_bytes    = cook.http_bytes_fetched();
     Some((image_bytes, dl_bytes, tail_size as u64))
 }
 
@@ -664,6 +676,25 @@ fn find_tiff_embedded_jpeg_file_span(bytes: &[u8]) -> Option<(u64, usize)> {
     Some((off as u64, len))
 }
 
+/// Return `(little_endian, ifd1_file_offset)` by reading IFD0's next-IFD
+/// pointer from the TIFF header.
+///
+/// Used as a fallback when `find_tiff_embedded_jpeg_file_span` returns `None`
+/// because IFD1 lies beyond the initial scan window.
+fn tiff_endian_and_ifd1_offset(bytes: &[u8]) -> Option<(bool, u64)> {
+    if bytes.len() < 8 { return None; }
+    let little = match &bytes[0..2] { b"II" => true, b"MM" => false, _ => return None };
+    if read_u16(bytes, 2, little)? != 42 { return None; }
+    let ifd0_off = read_u32(bytes, 4, little)? as usize;
+    if ifd0_off + 2 > bytes.len() { return None; }
+    let count = read_u16(bytes, ifd0_off, little)? as usize;
+    let next_ptr_off = ifd0_off.checked_add(2)?.checked_add(count.checked_mul(12)?)?;
+    if next_ptr_off + 4 > bytes.len() { return None; }
+    let ifd1_off = read_u32(bytes, next_ptr_off, little)?;
+    if ifd1_off == 0 { return None; }
+    Some((little, ifd1_off as u64))
+}
+
 fn find_tiff_embedded_jpeg_span(bytes: &[u8]) -> Option<(usize, usize)> {
     if bytes.len() < 8 { return None; }
     let little = match &bytes[0..2] {
@@ -785,7 +816,7 @@ fn tiff_u32_values(bytes: &[u8], ft: u16, fc: usize, v: usize, little: bool, max
 /// inside `ProcessBuffer::fill_crop`.
 ///
 /// Callers that may receive large images (small-file read, progressive JPEG)
-/// call this before `process_img_to_thumb`.  The encode pipeline itself
+/// call this before handing the image to `ProcessBuffer`.  The encode pipeline itself
 /// (`ProcessBuffer`) does not pre-scale — it assumes the input is already
 /// close to the target size.
 fn pre_scale_to_target(img: DynamicImage, target_w: u32, target_h: u32) -> DynamicImage {
@@ -798,6 +829,21 @@ fn pre_scale_to_target(img: DynamicImage, target_w: u32, target_h: u32) -> Dynam
     }
     if divisor <= 1 { return img; }
     img.resize_exact(w / divisor, h / divisor, FilterType::Nearest)
+}
+
+/// Build the `properties` JSON object for a decoded image.
+///
+/// Uses the *source* dimensions (`src_w`/`src_h`) so the reported size reflects
+/// the original file, not any intermediate scaling done before this call.
+/// `color_type` should be captured from `img.color()` before any pre-scaling.
+fn image_properties(src_w: u32, src_h: u32, color_type: image::ColorType) -> serde_json::Value {
+    let ch = color_type.channel_count() as u32;
+    let color_depth = if ch > 0 { color_type.bits_per_pixel() as u32 / ch } else { color_type.bits_per_pixel() as u32 };
+    serde_json::json!({
+        "width":       src_w,
+        "height":      src_h,
+        "color_depth": color_depth,
+    })
 }
 
 // ── Byte readers ─────────────────────────────────────────────────────────────
@@ -823,19 +869,21 @@ const SMALL_FILE_THRESHOLD: u64 = 80 * 1024;
 
 /// Try to produce a thumbnail without a full upstream decode.
 ///
-/// Three active paths, in priority order:
+/// Five active paths, in priority order:
 ///
 /// 1. **Small image** (any `image`-supported format ≤ `SMALL_FILE_THRESHOLD`) —
-///    read all bytes, full decode, resize/encode via `process_img_to_thumb`.
-/// 2. **Progressive JPEG** — read a heuristic byte budget, decode the first
-///    progressive scan, resize/encode via `process_img_to_thumb`.
+///    read all bytes, full decode, pre-scale, set `cook.render_image`.
+/// 2. **EXIF embedded thumbnail** (JPEG EXIF IFD1 / TIFF IFD chain) —
+///    two-phase read: header scan then targeted Range for the embedded JPEG.
+/// 3. **Progressive JPEG** — read a heuristic byte budget, decode the first
+///    progressive scan, set `cook.render_image`.
+/// 4. **Camera-raw preview** (DNG, CR2, NEF, ARW, …) — 32 KiB header scan,
+///    full IFD traversal, targeted Range for the largest embedded JPEG.
+/// 5. **ZIP container** (ODT, DOCX, …) — single tail Range fetch.
 ///
-/// Disabled paths (pending implementation):
-/// - JPEG / TIFF EXIF embedded thumbnail
-/// - ZIP container (ODT / DOCX) embedded preview
-///
-/// Sets `cook.response.status = JobStatus::Success` and `cook.http = None`
-/// on success.  Leaves both untouched on any failure so the caller can defer.
+/// Sets `cook.render_image = Some(img)` and closes the HTTP connection on success.
+/// Leaves both untouched on any failure so the caller can fall through to
+/// the handoff path.
 pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     let config = &ThumbnailConfig::CANONICAL;
 
@@ -843,34 +891,25 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     //
     // `inspect` has already classified the file; trust its verdict.
     // Covers JPEG, PNG, GIF, BMP, WebP, TIFF, ICO, … without any byte sniffing.
-    let is_small_image = cook.response.kind == Some(FileKind::Image)
-        && cook.http.as_ref()
-            .and_then(|h| h.content_length)
+    let is_small_image = cook.media.kind == Some(FileKind::Image)
+        && cook.http_stream_len()
             .map(|n| n <= SMALL_FILE_THRESHOLD)
             .unwrap_or(false);
 
     if is_small_image {
-        let file_size = cook.http.as_ref().unwrap().content_length.unwrap();
+        let file_size = cook.http_stream_len().unwrap_or(0);
 
-        {
-            let http = cook.http.as_mut().unwrap();
-            http.rewind();
-            http.enter_streaming_mode();
-        }
+        cook.http_rewind();
+        cook.http_enter_streaming_mode();
 
         let mut data = Vec::with_capacity(file_size as usize);
         {
             let mut tmp = vec![0u8; 8 * 1024];
             loop {
-                let http = cook.http.as_mut().unwrap();
-                match http.read(&mut tmp).await {
+                match cook.http_read(&mut tmp).await {
                     Ok(0) => break,
                     Ok(n) => data.extend_from_slice(&tmp[..n]),
-                    Err(_) => {
-                        // Non-fatal: fall through to progressive path.
-                        data.clear();
-                        break;
-                    }
+                    Err(_) => { data.clear(); break; }
                 }
             }
         }
@@ -878,50 +917,55 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
         if !data.is_empty() {
             if let Ok(img) = image::load_from_memory(&data) {
                 let (src_w, src_h) = (img.width(), img.height());
-                let dl_bytes = cook.http.as_ref().map(|h| h.bytes_fetched()).unwrap_or(0);
+                let color_type     = img.color();
+                let dl_bytes = cook.http_bytes_fetched();
 
-                if let Some(h) = cook.http.as_mut() { h.close().await; }
-                cook.http = None;
+                cook.http_close().await;
 
                 let img = pre_scale_to_target(img, config.exact_width, config.exact_height);
 
-                cook.trace.render_resolution = Some([src_w, src_h]);
-                cook.trace.job_renderer      = Some("shortcut/small".into());
-                cook.trace.render_handler    = RenderHandler::Builtin;
-                cook.trace.job_tier          = 1;
-                cook.trace.download_bytes    = dl_bytes;
-                cook.response.download_size  = dl_bytes;
+                cook.render_resolution = Some([src_w, src_h]);
+                cook.render_renderer   = Some("shortcut/small".into());
+                cook.render_handler    = RenderHandler::Builtin;
+                cook.out_download_bytes = dl_bytes;
                 if src_w > 0 && src_h > 0 {
-                    cook.response.properties =
-                        Some(serde_json::json!({ "width": src_w, "height": src_h }));
+                    cook.media.properties = Some(image_properties(src_w, src_h, color_type));
                 }
-                cook.render = Some(img);
+                cook.render_image = Some(img);
                 return;
             }
             // load_from_memory failed — close and fall through to defer.
-            if let Some(h) = cook.http.as_mut() { h.close().await; }
-            cook.http = None;
+            cook.http_close().await;
         }
     }
 
-    // ── JPEG / TIFF EXIF embedded thumbnail ───────────────────────────────
-    // DISABLED: pending implementation.
-    //
-    // let span = find_jpeg_exif_shortcut(&header) …  (see shortcut_old)
+    // ── EXIF embedded thumbnail (JPEG EXIF IFD1 / TIFF IFD chain) ────────
+    let is_jpeg = matches!(cook.media.extension.as_deref(), Some("jpeg"));
+    let is_tiff = matches!(cook.media.extension.as_deref(), Some("tiff"));
+    if is_jpeg || is_tiff {
+        try_exif_shortcut(cook).await;
+        if !cook.http_is_open() { return; }
+    }
 
-    // ── Progressive JPEG ──────────────────────────────────────────────────
-    // `inspect` normalises "jpg" → "jpeg", so matching "jpeg" is sufficient.
-    let is_jpeg = matches!(cook.response.extension.as_deref(), Some("jpeg"));
+    // ── Progressive JPEG (falls through from EXIF when no thumbnail found) ─
     if is_jpeg {
         try_progressive_jpeg_shortcut(cook).await;
-        if cook.http.is_none() { return; }
+        if !cook.http_is_open() { return; }
+    }
+
+    // ── Camera-raw embedded JPEG preview ─────────────────────────────────
+    let is_raw = cook.media.kind == Some(FileKind::Image)
+        && matches!(cook.media.extension.as_deref(),
+            Some("dng" | "cr2" | "nef" | "arw" | "orf" | "rw2"
+               | "pef" | "srw" | "3fr" | "mef" | "rwl"));
+    if is_raw {
+        try_raw_shortcut(cook).await;
+        if !cook.http_is_open() { return; }
     }
 
     // ── ZIP containers (ODT, DOCX, …) ────────────────────────────────────
-    // DISABLED: pending implementation.
-    //
-    // let is_zip_doc = cook.response.kind == Some(FileKind::Document)
-    //     && matches!(cook.response.extension.as_deref(),
-    //         Some("docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp"));
-    // if is_zip_doc { try_zip_shortcut(cook).await; }
+    let is_zip_doc = cook.media.kind == Some(FileKind::Document)
+        && matches!(cook.media.extension.as_deref(),
+            Some("docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp"));
+    if is_zip_doc { try_zip_shortcut(cook).await; }
 }

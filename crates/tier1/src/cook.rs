@@ -1,58 +1,108 @@
-//! Cook execution context — `ThumbSpec`, `ThumbCook`, `ThumbTrace`.
+//! Cook execution context — the central processing state for one thumbnail.
 //!
-//! # Concepts
+//! # Design
 //!
-//! - [`ThumbSpec`] — a lightweight, portable description of work to do.
-//!   No runtime state; cheap to clone; source-agnostic.  Can be constructed
-//!   from an HTTP request, a tier handoff payload, a dev tool call, or a test.
+//! [`ThumbCook`] is a flat buffer of all state needed to process one thumbnail,
+//! from initial inputs through to final output.  Pipeline steps read and write
+//! fields directly — there are no intermediate aggregation types or synchronisation
+//! bridges.
 //!
-//! - [`ThumbCook`] — the execution context for one thumbnail.  Owns the spec,
-//!   the accumulating [`ThumbResult`], internal telemetry ([`ThumbTrace`]),
-//!   and the live resources that are allocated and dropped as pipeline steps
-//!   run.  Consumed by [`ThumbCook::cook`], which returns a [`ThumbResult`].
+//! Fields are grouped by prefix:
 //!
-//! - [`ThumbTrace`] — internal per-item telemetry.  Never sent to clients.
-//!   Populated incrementally as steps complete; written to the log sink when
-//!   `cook()` finishes.
+//! | Prefix   | Contents |
+//! |----------|----------|
+//! | `in_`    | Caller inputs (set at construction, never mutated by pipeline) |
+//! | `http_`  | HTTP connection metadata captured during `connect` |
+//! | `media_` | Sniffed type info populated during `inspect` |
+//! | `src_`   | Source identity — cache key, canonical URL, etag |
+//! | `render_`| Pixel work state — decoded buffer, resolution, codec info |
+//! | `out_`   | Client-facing output fields written as steps complete |
+//! | `tel_`   | Per-step timing telemetry |
+//! | `ctx_`   | Attribution / request context (caller, session, customer) |
 //!
-//! - [`ThumbResult`] — the per-item result type.  Defined in `result`, used
-//!   here as the cook output so there is no translation step at completion.
+//! # Output views
 //!
-//! # Cancellation
+//! Neither [`ThumbResult`] nor [`ThumbTrace`] exist during processing.  They
+//! are materialised only at two points:
+//! - [`ThumbCook::to_result`] — called once to cache and return to the client.
+//! - [`ThumbCook::to_trace`] — called once to emit to the configured log sink.
 //!
-//! `ThumbCook` holds a cancel flag (`Arc<AtomicBool>`) checked between pipeline
-//! steps.  It is not yet exposed publicly — the primary cancellation mechanism
-//! today is drop-based (dropping the future mid-await stops execution cleanly).
-//! The flag is reserved for cooperative teardown: closing the upstream HTTP
-//! connection gracefully when a client disconnects.  A public `ThumbCancelHandle`
-//! will be added when we wire up the Cloudflare Workers `request.signal` callback
-//! and the Axum disconnect path.
+//! # Tier handoff
+//!
+//! [`ThumbCook::to_handoff`] projects the three portable sub-structs
+//! ([`InputSpec`], [`MediaInfo`], [`SourceIdentity`]) into a [`ThumbHandoff`]
+//! for serialisation and forwarding to a higher-tier renderer.
+//! [`ThumbCook::from_handoff`] reconstructs the cook on the receiving tier,
+//! populating those same fields and setting `status = Processing` so the
+//! pipeline enters at the render step.
+//!
+//! # Pipeline gate
+//!
+//! Steps check `cook.status == CookStatus::Processing` to decide whether to
+//! continue.  Any step that encounters a terminal condition sets `cook.status`
+//! to the appropriate [`CookStatus`] variant and returns — no other sentinel
+//! checking is needed.
 //!
 //! # Build note
 //!
 //! This module must compile on `wasm32-unknown-unknown`.  No `std`-only types
 //! except those already in scope via the `alloc` feature.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use image::DynamicImage;
+use serde_json::Value;
 
+use crate::after::AfterResponse;
+use crate::cache::CacheStore;
 use crate::http_buf::{HttpBuffer, HttpStream};
-use crate::result::{JobStatus, RenderHandler, ThumbResult};
+use crate::media::{FileKind, Strategy};
+use crate::result::{CacheOutcome, JobStatus, RenderHandler, ThumbResult, ThumbTrace};
+use crate::tracelog::TraceStore;
 use crate::pipeline;
+
+// ── CookStatus ────────────────────────────────────────────────────────────────
+
+/// Internal pipeline gate.  Steps check `cook.status == CookStatus::Processing`
+/// to decide whether to continue.  Any step that hits a terminal condition sets
+/// this and returns immediately; no other sentinel is needed.
+///
+/// Maps to [`JobStatus`] via [`ThumbCook::to_result`] for the client view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CookStatus {
+    /// Pipeline is running — the only "keep going" state.
+    #[default]
+    Processing,
+    /// Thumbnail produced successfully.
+    Complete,
+    /// Conditional request; source unchanged since caller's supplied validator.
+    NotModified,
+    /// Terminal failure — message is in `out_message`.
+    Failed,
+    /// Request deferred — caller is rate-limited or over quota.
+    DeferUser,
+    /// Request deferred — server is at capacity or no higher tier configured.
+    DeferServer,
+    /// Handed off to a higher-tier renderer; streaming result pending.
+    Rendering,
+}
+
+impl CookStatus {
+    /// Whether the pipeline should continue.
+    pub fn is_processing(self) -> bool {
+        self == Self::Processing
+    }
+}
 
 // ── CallerContext ─────────────────────────────────────────────────────────────
 
-/// How this cook was invoked — stored in [`ThumbTrace`], never sent to clients.
+/// How this cook was invoked — written to [`ThumbTrace`], never sent to clients.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum CallerContext {
     /// HTTP client identified by IP address.
-    ///
-    /// The IP is taken from the connection or from a trusted proxy header
-    /// (configured via `AppConfig`).  When proxy trust is disabled the
-    /// forwarded header is ignored and the raw connection IP is used.
     Ip { addr: String },
     /// Invoked from the `tier1 thumb` CLI subcommand.
     Cli,
@@ -60,183 +110,240 @@ pub enum CallerContext {
     Library,
 }
 
+// ── Runtime ───────────────────────────────────────────────────────────────────
 
-// ── ThumbSpec ─────────────────────────────────────────────────────────────────
-
-/// Portable, lightweight description of one thumbnail to produce.
+/// Shared server-wide configuration.  One instance per process, referenced by
+/// every concurrent cook via `Arc<Runtime>`.
 ///
-/// Plain data with no runtime state; cheap to clone.  Can be built from any
-/// entry point — HTTP request, tier handoff, developer tool — without coupling
-/// the execution context to any particular transport.
-#[derive(Debug, Clone, Default)]
-pub struct ThumbSpec {
+/// On `wasm32-unknown-unknown` (Cloudflare Workers) `Arc` is zero-cost — the
+/// atomic refcount compiles to plain loads/stores on a single-threaded isolate.
+pub struct Runtime {
+    /// Active cache backends.  Empty when no cache is configured.
+    pub cache: CacheStore,
+    /// Active trace/log backends.  Empty when no sink is configured.
+    pub trace: TraceStore,
+    /// Short server identifier included in trace records.
+    /// Cloudflare colo code (e.g. `"SJC"`) or operator label (e.g. `"prod-1"`).
+    pub server: Option<String>,
+    /// Thumbrella build version string.
+    pub version: String,
+    // TODO: handoff config (tier2_url, tier3_url, concurrency limits)
+}
+
+impl Runtime {
+    pub fn new(cache: CacheStore, trace: TraceStore, server: Option<String>) -> Arc<Self> {
+        Arc::new(Self {
+            cache,
+            trace,
+            server,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        })
+    }
+}
+
+// ── Portable handoff sub-structs ──────────────────────────────────────────────
+//
+// These three structs are the only parts of ThumbCook that cross tier
+// boundaries.  ThumbHandoff (in handoff.rs) is composed entirely of them, so
+// to_handoff() is three clones and from_handoff() is three field assignments.
+
+/// Caller-supplied inputs.  Set at construction; never mutated by the pipeline.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct InputSpec {
     /// Source URL to fetch and thumbnail.
     pub url: String,
-    /// Previously returned `etag` from a `ThumbResult`.
-    ///
-    /// When supplied, the service issues a conditional fetch.  If the source
-    /// is unchanged the result has `status: not_modified` and an empty
-    /// `thumbnail` — the only case where thumbnail bytes are absent.
-    ///
-    /// Opaque prefix determines the upstream request header:
-    /// - `E…` → `If-None-Match`
-    /// - `M…` → `If-Modified-Since`
+    /// Caller's prior etag for conditional fetch.
     pub etag: Option<String>,
-    /// Allow `file://` URLs to be fetched from the local filesystem.
-    ///
-    /// **Security**: defaults to `false`.  Only the CLI entry point sets this
-    /// to `true`; HTTP route handlers must never set it.  The pipeline
-    /// `connect` step enforces this as a second line of defence.
+    /// Allow `file://` URLs.  Only the CLI sets this to `true`.
     pub allow_local: bool,
 }
 
-impl ThumbSpec {
-    /// Convenience constructor: spec for the given URL with all else defaulted.
+impl InputSpec {
     pub fn new(url: impl Into<String>) -> Self {
         Self { url: url.into(), ..Self::default() }
     }
 }
 
-// ── Live resource placeholders ────────────────────────────────────────────────
+/// Type information discovered during `inspect`.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct MediaInfo {
+    /// Sniffed MIME type string, e.g. `"image/jpeg"`.
+    pub mime: Option<String>,
+    /// Coarse media category.
+    pub kind: Option<FileKind>,
+    /// Canonical file extension, no dot (e.g. `"jpeg"`, `"png"`, `"pdf"`).
+    pub extension: Option<String>,
+    /// Format-specific properties (dimensions, color depth, …).
+    pub properties: Option<Value>,
+    /// `Content-Length` from the server, if provided.
+    pub file_size: Option<u64>,
+}
 
-// ── ThumbTrace ────────────────────────────────────────────────────────────────
-
-/// Internal per-item telemetry — the server's private record of work done.
-///
-/// Never sent to clients.  Populated incrementally as pipeline steps run;
-/// emitted to the log sink when the cook finishes.
-#[derive(Debug, Default, serde::Serialize)]
-pub struct ThumbTrace {
-    // ── Source identity ───────────────────────────────────────────────────────
-    /// Canonical URL (query params / signing tokens stripped).
-    pub canonical_url: Option<String>,
-    /// Final URL after following HTTP redirects (if different from canonical).
+/// Source identity used for cache keying and conditional requests.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SourceIdentity {
+    /// URL after following redirects.
     pub final_url: Option<String>,
-    /// SHA-256(customer_id ":" content_identity) — used as the storage key.
-    ///
-    /// `content_identity` is the best available stable identifier for the
-    /// content: a server-provided hash header when present, otherwise the
-    /// canonical URL.  Always base64url-encoded (no padding) for brevity.
-    pub cache_hash: Option<String>,
-    /// Which header (or fallback) was used as the identity input for `cache_hash`.
-    /// Examples: `"x-amz-checksum-sha256"`, `"etag"`, `"url"`.
-    pub cache_hash_source: Option<String>,
-    /// Upstream freshness token (ETag or Last-Modified) in the opaque format
-    /// produced by `etag_from_headers`.  Returned to the client as `etag` in
-    /// the `ThumbResult` so they can send it back on future requests.
-    pub source_etag: Option<String>,
-
-    // ── Download metrics ──────────────────────────────────────────────────────
-    /// Bytes received from the primary forward stream.
-    pub download_bytes: u64,
-    /// Extra bytes from a tail Range request (e.g. TIFF IFD ZIP).
-    pub download_tail_bytes: u64,
-    /// Seconds to establish the HTTP connection (TCP + response headers).
-    pub connect_secs: f64,
-
-    // ── Render metrics ────────────────────────────────────────────────────────
-    /// Seconds spent in the inspect step (sniff + type detection).
-    pub inspect_secs: f64,
-    /// Seconds spent in the shortcut step (EXIF scan, progressive read, ZIP tail).
-    pub shortcut_secs: f64,
-    /// Seconds spent in the render step (decode + colour convert).
-    pub render_secs: f64,
-    /// Seconds spent in the deliver step (resize + mozjpeg encode).
-    pub deliver_secs: f64,
-    /// Pixel dimensions of the image buffer that entered the render/encode step.
-    /// Stored as `[width, height]`.  For the full-decode path this equals the
-    /// original media dimensions; for shortcut paths it is the embedded
-    /// thumbnail's decoded size.
-    pub render_resolution: Option<[u32; 2]>,
-    /// Byte length of the encoded JPEG.
-    pub thumbnail_bytes: Option<u64>,
-
-    // ── Job provenance ────────────────────────────────────────────────────────
-    /// Processing tier that produced the thumbnail (1 = tier1, 2 = tier2, …).
-    pub job_tier: u8,
-    /// Low-level renderer used (e.g. `"image_crate"`, `"libav"`, `"resvg"`).
-    pub job_renderer: Option<String>,
-    /// Codec or container detail (e.g. `"h264"`, `"deflate"`).
-    pub job_codec: Option<String>,
-    /// Seek offset used for video frame selection, in seconds.
-    pub video_seek_secs: Option<f64>,
-
-    // ── Tracing / attribution ───────────────────────────────────────────────────
-    /// Groups multiple `ThumbTrace` records from the same inbound batch.
-    /// Set by the entry point; absent for single-item or programmatic calls.
-    pub session_id: Option<String>,
-    /// Customer identifier for billing and quota attribution.
-    /// Set by the entry point; absent for open/unauthenticated deployments.
-    pub customer_id: Option<String>,
-    // ── Cache ─────────────────────────────────────────────────────────────────────
-    /// Which cache backend produced this result, if any.
-    /// `None` until the cache layer is wired up.
-    pub cache_hit: Option<crate::result::CacheOutcome>,
-
-    // ── Render path ───────────────────────────────────────────────────────────────
-    /// How the thumbnail was ultimately produced.
-    pub render_handler: RenderHandler,
-
-    // ── Request context ───────────────────────────────────────────────────────────
-    /// How (and from where) this cook was invoked.
-    /// Set by the entry point; absent for programmatic calls that don’t specify.
-    pub caller: Option<CallerContext>,
-    /// True if the client connection dropped before this item completed.
-    /// Items that finished before the drop keep `cancelled = false`.
-    pub cancelled: bool,
-    /// Server identifier — a 3-letter Cloudflare colo code (e.g. `"SJC"`),
-    /// or an operator-configured name for self-hosted deployments.
-    /// Set by the entry point from the `TBR_SERVER` environment variable.
-    pub server: Option<String>,
-    /// Thumbrella build version that processed this item.
-    pub version: String,}
+    /// Query-stripped stable cache key URL.
+    pub canonical_url: Option<String>,
+    /// Upstream ETag or Last-Modified in opaque `E…`/`M…` prefixed form.
+    pub etag: Option<String>,
+    /// SHA-256(customer_id ":" content_identity) — the cache storage key.
+    pub cache_key: Option<String>,
+    /// Which header (or fallback) was used as the identity input for `cache_key`.
+    pub cache_key_source: Option<String>,
+}
 
 // ── ThumbCook ─────────────────────────────────────────────────────────────────
 
-/// Execution context for one thumbnail.
+/// Flat processing buffer for one thumbnail.
 ///
-/// `ThumbCook` is generic over the HTTP backend `S` so the same pipeline code
-/// runs on native (reqwest) and Cloudflare Workers (workers-rs fetch) without
-/// modification.  On the native side, use the `PlatformStream` type alias from
-/// `http_buf` to avoid spelling out the generic everywhere.
+/// All state needed to drive a thumbnail from input URL to encoded JPEG lives
+/// here as directly accessible public fields.  Pipeline steps read and write
+/// them without going through accessors.
 ///
-/// Construct with [`ThumbCook::new`], then call [`ThumbCook::cook`] to run the
-/// pipeline and get back a [`ThumbResult`].
+/// Generic over `S: HttpStream` so the same code runs on native (reqwest) and
+/// Cloudflare Workers (workers-rs fetch).  Use the `ThumbCook` type alias
+/// defined in `lib.rs` for native-only code.
 pub struct ThumbCook<S: HttpStream> {
-    /// The work description this cook was built from.
-    pub spec: ThumbSpec,
-    /// Accumulating result — mutated by each pipeline step.
-    /// This is what gets cached and sent to the client when cooking finishes.
-    pub response: ThumbResult,
-    /// Internal telemetry — mutated by each step, never sent to clients.
-    pub trace: ThumbTrace,
 
-    // Cancel flag — checked between steps for cooperative teardown.
-    // Not yet public; see module-level docs on cancellation.
+    // ── Pipeline gate ─────────────────────────────────────────────────────────
+    /// Current pipeline state.  Steps check `status.is_processing()` before
+    /// doing work.  Set to a terminal variant to stop the pipeline.
+    pub status: CookStatus,
+
+    // ── Shared runtime ────────────────────────────────────────────────────────
+    pub runtime: Arc<Runtime>,
+
+    // ── Handoff-portable groups ───────────────────────────────────────────────
+    /// Caller-supplied inputs.  Never mutated after construction.
+    pub input: InputSpec,
+    /// Sniffed type information populated during `inspect`.
+    pub media: MediaInfo,
+    /// Source identity and cache key populated during `connect`.
+    pub src: SourceIdentity,
+
+    // ── HTTP connection metadata ──────────────────────────────────────────────
+    /// Response headers captured on `connect`.
+    pub http_headers: HashMap<String, String>,
+    /// HTTP status code of the response.
+    pub http_status: u16,
+    /// Whether the server supports byte-range requests.
+    pub http_accepts_ranges: bool,
+    // Live connection — access via the http_* methods below.
+    http_buf: Option<HttpBuffer<S>>,
+
+    // ── Render state ──────────────────────────────────────────────────────────
+    /// Decoded pixel buffer.  Populated by shortcut or render; consumed and
+    /// cleared to `None` by `deliver`.
+    pub render_image: Option<DynamicImage>,
+    /// Pixel dimensions `[width, height]` of the decoded buffer.
+    pub render_resolution: Option<[u32; 2]>,
+    /// Which renderer handled this item.
+    pub render_handler: RenderHandler,
+    /// Low-level renderer label (e.g. `"shortcut/exif"`, `"image_crate"`).
+    pub render_renderer: Option<String>,
+    /// Codec or container detail (e.g. `"h264"`, `"deflate"`).
+    pub render_codec: Option<String>,
+    /// Video seek offset in seconds (video only).
+    pub render_video_seek_secs: Option<f64>,
+
+    // ── Output fields — written as steps complete ────────────────────────────
+    /// The encoded JPEG thumbnail bytes.
+    pub out_thumbnail: Vec<u8>,
+    /// Processing strategy that produced the thumbnail.
+    pub out_strategy: Option<Strategy>,
+    /// Human-readable error/status message; empty on success.
+    pub out_message: String,
+    /// Stable token identifying the placeholder image, when applicable.
+    pub out_placeholder: Option<String>,
+    /// Cache outcome — `None` until the cache check runs.
+    pub out_cache: Option<CacheOutcome>,
+    /// Wall-clock seconds to generate this result.
+    pub out_duration: f64,
+    /// Bytes read from the source to generate this result.
+    pub out_download_bytes: u64,
+
+    // ── Telemetry — per-step timing ───────────────────────────────────────────
+    pub tel_connect_secs: f64,
+    pub tel_inspect_secs: f64,
+    pub tel_shortcut_secs: f64,
+    pub tel_render_secs: f64,
+    pub tel_deliver_secs: f64,
+    /// Bytes from any tail Range request (e.g. ZIP Central Directory fetch).
+    pub tel_download_tail_bytes: u64,
+    /// Byte length of the encoded JPEG.
+    pub tel_thumbnail_bytes: Option<u64>,
+
+    // ── Attribution / context ─────────────────────────────────────────────────
+    /// How this cook was invoked.
+    pub ctx_caller: Option<CallerContext>,
+    /// Groups multiple trace records from the same inbound batch call.
+    pub ctx_session_id: Option<String>,
+    /// Customer identifier for billing and quota attribution.
+    pub ctx_customer_id: Option<String>,
+    /// True if the client connection dropped before this item completed.
+    pub ctx_cancelled: bool,
+
+    // Cancel flag — set via request_cancel(), read via cancelled().
     cancel: Arc<AtomicBool>,
-
-    // Live resources — allocated and dropped as steps complete.
-    /// Open HTTP connection; present from connect through render, then closed.
-    pub http: Option<HttpBuffer<S>>,
-    /// Decoded pixel buffer; populated by shortcut, consumed and cleared by deliver.
-    pub render: Option<DynamicImage>,
 }
 
 impl<S: HttpStream> ThumbCook<S> {
-    /// Create a new cook from a spec.
-    pub fn new(spec: ThumbSpec) -> Self {
-        let url = spec.url.clone();
+
+    // ── Construction ──────────────────────────────────────────────────────────
+
+    /// Create a new cook for a URL with a shared runtime.
+    pub fn new(url: impl Into<String>, runtime: Arc<Runtime>) -> Self {
+        Self::from_input(InputSpec::new(url), runtime)
+    }
+
+    /// Create a new cook from a fully-specified [`InputSpec`].
+    pub fn from_input(input: InputSpec, runtime: Arc<Runtime>) -> Self {
         Self {
-            spec,
-            response: ThumbResult { url, ..ThumbResult::default() },
-            trace: ThumbTrace {
-                version: env!("CARGO_PKG_VERSION").to_string(),
-                ..ThumbTrace::default()
-            },
+            status:  CookStatus::Processing,
+            runtime,
+            input,
+            media:   MediaInfo::default(),
+            src:     SourceIdentity::default(),
+            http_headers:        HashMap::new(),
+            http_status:         0,
+            http_accepts_ranges: false,
+            http_buf:            None,
+            render_image:             None,
+            render_resolution:        None,
+            render_handler:           RenderHandler::default(),
+            render_renderer:          None,
+            render_codec:             None,
+            render_video_seek_secs:   None,
+            out_thumbnail:       Vec::new(),
+            out_strategy:        None,
+            out_message:         String::new(),
+            out_placeholder:     None,
+            out_cache:           None,
+            out_duration:        0.0,
+            out_download_bytes:  0,
+            tel_connect_secs:    0.0,
+            tel_inspect_secs:    0.0,
+            tel_shortcut_secs:   0.0,
+            tel_render_secs:     0.0,
+            tel_deliver_secs:    0.0,
+            tel_download_tail_bytes: 0,
+            tel_thumbnail_bytes: None,
+            ctx_caller:      None,
+            ctx_session_id:  None,
+            ctx_customer_id: None,
+            ctx_cancelled:   false,
             cancel: Arc::new(AtomicBool::new(false)),
-            http: None,
-            render: None,
         }
+    }
+
+    // ── Pipeline gate ─────────────────────────────────────────────────────────
+
+    /// Mark the cook as failed with a message and stop the pipeline.
+    pub fn fail(&mut self, message: impl Into<String>) {
+        self.status = CookStatus::Failed;
+        self.out_message = message.into();
     }
 
     /// Returns `true` if cancellation has been requested.
@@ -244,111 +351,321 @@ impl<S: HttpStream> ThumbCook<S> {
         self.cancel.load(Ordering::Relaxed)
     }
 
-    /// Mark the response as failed with a message.
-    pub fn fail(&mut self, message: impl Into<String>) {
-        self.response.status = JobStatus::Failed;
-        self.response.message = message.into();
+    /// Signal cooperative cancellation.
+    pub fn request_cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
     }
 
-    /// Snapshot `http.bytes_fetched()` into `trace.download_bytes` and
-    /// `response.download_size`, unless those fields have already been set by
-    /// a pipeline step (shortcut success paths set them directly).
-    ///
-    /// Call this at every pipeline exit point so the trace always reflects the
-    /// real bytes pulled from the network, even on defer or failure paths.
+    // ── HTTP buffer delegates ─────────────────────────────────────────────────
+    //
+    // HttpBuffer's internal page cache, cursor, and stream machinery stay
+    // encapsulated.  These are the only ways pipeline steps touch the live
+    // connection.
+
+    /// `true` if an open HTTP connection is currently held.
+    pub fn http_is_open(&self) -> bool {
+        self.http_buf.is_some()
+    }
+
+    /// Install a newly opened `HttpBuffer`.  Called only by `pipeline::connect`.
+    pub(crate) fn http_install(&mut self, buf: HttpBuffer<S>) {
+        self.http_buf = Some(buf);
+    }
+
+    /// Read `len` bytes starting at `offset` without moving the cursor.
+    pub async fn http_read_at(&mut self, offset: u64, len: usize) -> Result<Vec<u8>, crate::http_buf::HttpError> {
+        let buf = self.http_buf.as_mut().ok_or_else(|| crate::http_buf::HttpError::Network("no open connection".into()))?;
+        buf.read_at(offset, len).await
+    }
+
+    /// Read up to `out.len()` bytes from the current cursor position.
+    pub async fn http_read(&mut self, out: &mut [u8]) -> Result<usize, crate::http_buf::HttpError> {
+        let buf = self.http_buf.as_mut().ok_or_else(|| crate::http_buf::HttpError::Network("no open connection".into()))?;
+        buf.read(out).await
+    }
+
+    /// Issue a direct Range GET for `len` bytes starting at `start`.
+    pub async fn http_fetch_range(&mut self, start: u64, len: usize) -> Result<Vec<u8>, crate::http_buf::HttpError> {
+        let buf = self.http_buf.as_mut().ok_or_else(|| crate::http_buf::HttpError::Network("no open connection".into()))?;
+        buf.fetch_range(start, len).await
+    }
+
+    /// Rewind the read cursor to byte 0.
+    pub fn http_rewind(&mut self) {
+        if let Some(b) = self.http_buf.as_mut() { b.rewind(); }
+    }
+
+    /// Set an artificial EOF limit.
+    pub fn http_set_eof(&mut self, len: u64) {
+        if let Some(b) = self.http_buf.as_mut() { b.set_eof(len); }
+    }
+
+    /// Remove the artificial EOF limit.
+    pub fn http_clear_eof(&mut self) {
+        if let Some(b) = self.http_buf.as_mut() { b.clear_eof(); }
+    }
+
+    /// Enter streaming mode (one-way; new chunks bypass the page cache).
+    pub fn http_enter_streaming_mode(&mut self) {
+        if let Some(b) = self.http_buf.as_mut() { b.enter_streaming_mode(); }
+    }
+
+    /// Effective file length (artificial EOF if set, else Content-Length).
+    pub fn http_stream_len(&self) -> Option<u64> {
+        self.http_buf.as_ref().and_then(|b| b.stream_len())
+    }
+
+    /// Total bytes received from the network so far.
+    pub fn http_bytes_fetched(&self) -> u64 {
+        self.http_buf.as_ref().map(|b| b.bytes_fetched()).unwrap_or(0)
+    }
+
+    /// Close the connection and return the first cached page (bytes 0..PAGE_SIZE)
+    /// if one was read, for forwarding as a handoff head-start.
+    /// Sets `http_buf` to `None`.
+    pub async fn http_close(&mut self) -> Option<Vec<u8>> {
+        let first_page = if let Some(b) = self.http_buf.as_mut() {
+            b.close().await
+        } else {
+            None
+        };
+        self.http_buf = None;
+        first_page
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /// Snapshot `http_bytes_fetched()` into `out_download_bytes` unless a step
+    /// has already set a more precise value.
     pub fn stamp_download_bytes(&mut self) {
-        let fetched = self.http.as_ref().map(|h| h.bytes_fetched()).unwrap_or(0);
-        // Only overwrite if the step hasn't set a more precise value already.
-        if self.trace.download_bytes == 0 && fetched > 0 {
-            self.trace.download_bytes = fetched;
-        }
-        if self.response.download_size == 0 && fetched > 0 {
-            self.response.download_size = fetched;
+        let fetched = self.http_bytes_fetched();
+        if self.out_download_bytes == 0 && fetched > 0 {
+            self.out_download_bytes = fetched;
         }
     }
 
-    /// Consume the cook and return the finished response and trace.
-    pub fn into_result(self) -> (ThumbResult, ThumbTrace) {
-        (self.response, self.trace)
+    // ── Output views ──────────────────────────────────────────────────────────
+
+    /// Materialise the client-facing [`ThumbResult`].  Called once at end of `run()`.
+    pub fn to_result(&self) -> ThumbResult {
+        let status = match self.status {
+            CookStatus::Processing | CookStatus::Complete => JobStatus::Success,
+            CookStatus::NotModified => JobStatus::NotModified,
+            CookStatus::Failed      => JobStatus::Failed,
+            CookStatus::DeferUser   => JobStatus::DeferUser,
+            CookStatus::DeferServer => JobStatus::DeferServer,
+            CookStatus::Rendering   => JobStatus::Rendering,
+        };
+        ThumbResult {
+            url:           self.input.url.clone(),
+            status,
+            duration:      self.out_duration,
+            download_size: self.out_download_bytes,
+            message:       if self.out_message.is_empty() { None } else { Some(self.out_message.clone()) },
+            strategy:      self.out_strategy,
+            etag:          self.src.etag.clone(),
+            thumbnail:     self.out_thumbnail.clone(),
+            placeholder:   self.out_placeholder.clone(),
+            mime:          self.media.mime.clone(),
+            file_size:     self.media.file_size,
+            kind:          self.media.kind,
+            extension:     self.media.extension.clone(),
+            properties:    self.media.properties.clone().unwrap_or_else(|| Value::Object(Default::default())),
+            cache:         self.out_cache.map(|c| c.public_label().to_string()),
+        }
     }
 
-    /// Run the full pipeline and return `(result, trace)`.
+    /// Materialise the internal [`ThumbTrace`] for the log sink.  Called once
+    /// at end of `run()`, after `to_result()`.
+    pub fn to_trace(&self) -> ThumbTrace {
+        #[cfg(feature = "native")]
+        let timestamp = {
+            use time::OffsetDateTime;
+            use time::format_description::well_known::Rfc3339;
+            OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_default()
+        };
+        #[cfg(not(feature = "native"))]
+        let timestamp = String::new();
+
+        let status = match self.status {
+            CookStatus::Processing | CookStatus::Complete => JobStatus::Success,
+            CookStatus::NotModified => JobStatus::NotModified,
+            CookStatus::Failed      => JobStatus::Failed,
+            CookStatus::DeferUser   => JobStatus::DeferUser,
+            CookStatus::DeferServer => JobStatus::DeferServer,
+            CookStatus::Rendering   => JobStatus::Rendering,
+        };
+
+        ThumbTrace {
+            timestamp,
+            status,
+            strategy:            self.out_strategy,
+            kind:                self.media.kind,
+            extension:           self.media.extension.clone(),
+            canonical_url:       self.src.canonical_url.clone(),
+            final_url:           self.src.final_url.clone(),
+            cache_key:           self.src.cache_key.clone(),
+            cache_key_source:    self.src.cache_key_source.clone(),
+            source_etag:         self.src.etag.clone(),
+            download_bytes:      self.out_download_bytes,
+            download_tail_bytes: self.tel_download_tail_bytes,
+            connect_secs:        self.tel_connect_secs,
+            inspect_secs:        self.tel_inspect_secs,
+            shortcut_secs:       self.tel_shortcut_secs,
+            render_secs:         self.tel_render_secs,
+            deliver_secs:        self.tel_deliver_secs,
+            render_resolution:   self.render_resolution,
+            thumbnail_bytes:     self.tel_thumbnail_bytes,
+            job_tier:            1,
+            job_renderer:        self.render_renderer.clone(),
+            job_codec:           self.render_codec.clone(),
+            video_seek_secs:     self.render_video_seek_secs,
+            session_id:          self.ctx_session_id.clone(),
+            customer_id:         self.ctx_customer_id.clone(),
+            cache_hit:           self.out_cache,
+            render_handler:      self.render_handler,
+            caller:              self.ctx_caller.clone(),
+            cancelled:           self.ctx_cancelled,
+            server:              self.runtime.server.clone(),
+            version:             self.runtime.version.clone(),
+        }
+    }
+
+    /// Project into a [`ThumbHandoff`] for forwarding to a higher-tier renderer.
     ///
-    /// Sequences: connect → inspect → shortcut → [tier-gate] → deliver.
-    /// Each step is called only if the previous one left `cook.http` open
-    /// (`Some`).  Steps signal completion by setting `cook.http = None`.
-    pub async fn run(mut self) -> (ThumbResult, ThumbTrace) {
+    /// `first_page` is the return value of [`http_close`] — the first cached
+    /// page, forwarded so the receiver can start parsing without a new request.
+    pub fn to_handoff(&self, first_page: Option<Vec<u8>>) -> crate::handoff::ThumbHandoff {
+        crate::handoff::ThumbHandoff {
+            input:      self.input.clone(),
+            media:      self.media.clone(),
+            src:        self.src.clone(),
+            first_page,
+        }
+    }
+
+    // ── Pipeline entry ────────────────────────────────────────────────────────
+
+    /// Run the full pipeline and return `(result, trace, after)`.
+    ///
+    /// `after` holds deferred cache-write futures.  Callers must drain it
+    /// after the HTTP response is sent:
+    /// - Native: `after.drain_spawn()` fires all tasks on the tokio thread pool.
+    /// - Workers: iterate `after.drain()` and pass each to `ctx.wait_until()`.
+    pub async fn run(mut self) -> (ThumbResult, ThumbTrace, AfterResponse) {
+        let mut after = AfterResponse::new();
         let t0 = std::time::Instant::now();
 
-        let t_dl = std::time::Instant::now();
+        // ── connect ───────────────────────────────────────────────────────────
+        let t_step = std::time::Instant::now();
         pipeline::connect(&mut self).await;
-        self.trace.connect_secs = t_dl.elapsed().as_secs_f64();
-        if self.http.is_none() { self.stamp_download_bytes(); self.response.duration = t0.elapsed().as_secs_f64(); return self.into_result(); }
+        self.tel_connect_secs = t_step.elapsed().as_secs_f64();
+        if !self.status.is_processing() {
+            self.stamp_download_bytes();
+            self.out_duration = t0.elapsed().as_secs_f64();
+            return self.finish(after);
+        }
 
-        // Derive the cache storage key: SHA-256( customer_id ":" content_identity ).
-        // Prefer a server-supplied content hash (ETag, Content-MD5, AWS/GCS checksum
-        // headers) — these are stable even when URLs contain signing tokens.
-        // Falls back to the canonical URL when no usable hash header is present.
-        // Always base64url-encoded (no padding) for compact, URL-safe keys.
+        // ── cache key derivation ──────────────────────────────────────────────
         {
             use sha2::{Sha256, Digest};
             use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
             use crate::source::content_hash_from_headers;
 
-            let (identity, source) = self.http
-                .as_ref()
-                .and_then(|h| content_hash_from_headers(&h.headers))
+            let (identity, source) = content_hash_from_headers(&self.http_headers)
                 .map(|(hash, src)| (hash, src.to_string()))
                 .unwrap_or_else(|| {
-                    let url = self.trace.final_url.as_deref()
-                        .or(self.trace.canonical_url.as_deref())
-                        .unwrap_or(self.spec.url.as_str());
+                    let url = self.src.final_url.as_deref()
+                        .or(self.src.canonical_url.as_deref())
+                        .unwrap_or(self.input.url.as_str());
                     (url.to_string(), "url".to_string())
                 });
 
-            let input = format!(
-                "{}:{identity}",
-                self.trace.customer_id.as_deref().unwrap_or("")
+            let key_input = format!(
+                "v{}:{}:{identity}",
+                crate::TBR_CACHE_VERSION,
+                self.ctx_customer_id.as_deref().unwrap_or("")
             );
-            self.trace.cache_hash = Some(URL_SAFE_NO_PAD.encode(Sha256::digest(input.as_bytes())));
-            self.trace.cache_hash_source = Some(source);
+            self.src.cache_key        = Some(URL_SAFE_NO_PAD.encode(Sha256::digest(key_input.as_bytes())));
+            self.src.cache_key_source = Some(source);
         }
 
-        let t_inspect = std::time::Instant::now();
-        pipeline::inspect(&mut self).await;
-        self.trace.inspect_secs = t_inspect.elapsed().as_secs_f64();
-        if self.http.is_none() { self.stamp_download_bytes(); self.response.duration = t0.elapsed().as_secs_f64(); return self.into_result(); }
+        // ── cache check ───────────────────────────────────────────────────────
+        if let Some(ref key) = self.src.cache_key.clone() {
+            if let Some(cached) = self.runtime.cache.check(key).await {
+                self.http_close().await;
+                self.out_thumbnail     = cached.thumbnail;
+                self.out_strategy      = cached.strategy;
+                self.out_message       = cached.message.unwrap_or_default();
+                self.out_placeholder   = cached.placeholder;
+                self.out_download_bytes = cached.download_size;
+                self.media.mime        = cached.mime;
+                self.media.file_size   = cached.file_size;
+                self.media.kind        = cached.kind;
+                self.media.extension   = cached.extension;
+                self.media.properties  = Some(cached.properties);
+                self.out_cache         = Some(CacheOutcome::File);
+                self.status            = CookStatus::Complete;
+                self.out_duration      = t0.elapsed().as_secs_f64();
+                return self.finish(after);
+            }
+        }
 
-        // Shortcut: try to populate cook.render cheaply (small file read, EXIF
-        // thumbnail, ZIP preview, …).  Closes cook.http when done either way.
-        let t_shortcut = std::time::Instant::now();
+        // ── inspect ───────────────────────────────────────────────────────────
+        let t_step = std::time::Instant::now();
+        pipeline::inspect(&mut self).await;
+        self.tel_inspect_secs = t_step.elapsed().as_secs_f64();
+        if !self.status.is_processing() {
+            self.stamp_download_bytes();
+            self.out_duration = t0.elapsed().as_secs_f64();
+            return self.finish(after);
+        }
+
+        // ── shortcut ──────────────────────────────────────────────────────────
+        let t_step = std::time::Instant::now();
         pipeline::shortcut(&mut self).await;
-        self.trace.shortcut_secs = t_shortcut.elapsed().as_secs_f64();
+        self.tel_shortcut_secs = t_step.elapsed().as_secs_f64();
         self.stamp_download_bytes();
 
-        if self.response.status == JobStatus::Success {
-            // Shortcut fully produced the thumbnail — return without going through deliver.
-            self.response.duration = t0.elapsed().as_secs_f64();
-            return self.into_result();
+        if self.status == CookStatus::Complete {
+            self.out_duration = t0.elapsed().as_secs_f64();
+            if let Some(ref key) = self.src.cache_key.clone() {
+                let result = self.to_result();
+                self.runtime.cache.store(key, &result, &mut after);
+            }
+            return self.finish(after);
         }
 
-        if self.render.is_some() {
-            // Shortcut populated the render buffer — deliver encodes the final JPEG.
+        // ── deliver (when shortcut decoded an image) ──────────────────────────
+        if self.render_image.is_some() {
+            let t_step = std::time::Instant::now();
             pipeline::deliver(&mut self).await;
-            self.response.duration = t0.elapsed().as_secs_f64();
-            return self.into_result();
+            self.tel_deliver_secs = t_step.elapsed().as_secs_f64();
+            self.out_duration = t0.elapsed().as_secs_f64();
+            if self.status == CookStatus::Complete {
+                if let Some(ref key) = self.src.cache_key.clone() {
+                    let result = self.to_result();
+                    self.runtime.cache.store(key, &result, &mut after);
+                }
+            }
+            return self.finish(after);
         }
 
-        // Shortcut found nothing — ensure the connection is closed.
-        if let Some(h) = self.http.as_mut() { h.close().await; }
-        self.http = None;
+        // ── handoff to higher tier ────────────────────────────────────────────
+        let first_page = self.http_close().await;
+        let _handoff = self.to_handoff(first_page);
+        // TODO: dispatch _handoff to configured tier-2 endpoint.
+        // TODO: fall back to placeholder icon when no tier-2 is configured.
+        self.status = CookStatus::DeferServer;
+        self.out_message = "deferred to higher-tier renderer (not yet connected)".to_string();
+        self.out_duration = t0.elapsed().as_secs_f64();
+        self.finish(after)
+    }
 
-        // TODO: check kind/tier and handoff to tier 2/3.
-        // TODO: fall back to placeholder icon.
-        self.response.status = JobStatus::DeferServer;
-        self.response.message =
-            "deferred to higher-tier renderer (not yet connected)".to_string();
-        self.response.duration = t0.elapsed().as_secs_f64();
-        self.into_result()
+    fn finish(self, mut after: AfterResponse) -> (ThumbResult, ThumbTrace, AfterResponse) {
+        let result = self.to_result();
+        let trace  = self.to_trace();
+        self.runtime.trace.record(trace.clone(), &mut after);
+        (result, trace, after)
     }
 }

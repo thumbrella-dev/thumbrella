@@ -75,23 +75,23 @@ async fn main() {
 
     let cli = Cli::parse();
 
-    // Run startup for all commands that may make outbound HTTP requests.
-    // Diag is the only command that doesn't need it.
-    if !matches!(cli.command, Command::Diag { .. }) {
+    let runtime = if !matches!(cli.command, Command::Diag { .. }) {
         let cfg = tier1::config::AppConfig::from_env();
-        tier1::startup::startup(&cfg).await;
-    }
+        Some(tier1::startup::startup(&cfg).await)
+    } else {
+        None
+    };
 
     match cli.command {
-        Command::Serve => run_server().await,
-        Command::Thumb { urls, etag, json, trace } => run_cli(urls, etag, json, trace).await,
+        Command::Serve => run_server(runtime.unwrap()).await,
+        Command::Thumb { urls, etag, json, trace } => run_cli(urls, etag, json, trace, runtime.unwrap()).await,
         Command::Diag { json } => run_diag(json),
     }
 }
 
 // ── serve ─────────────────────────────────────────────────────────────────────
 
-async fn run_server() {
+async fn run_server(runtime: std::sync::Arc<tier1::cook::Runtime>) {
     use axum::{Router, routing::{get, post}};
     use std::net::SocketAddr;
     use tier1::{config::AppConfig, routes};
@@ -102,7 +102,8 @@ async fn run_server() {
     let app = Router::new()
         .route("/health", get(routes::health))
         .route("/thumb.jpeg", get(routes::thumb))
-        .route("/batch", post(routes::batch));
+        .route("/batch", post(routes::batch))
+        .with_state(runtime);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
     tracing::info!(%addr, "listening");
@@ -136,23 +137,22 @@ fn promote_url(raw: &str) -> String {
     format!("file://{}", abs.display())
 }
 
-async fn run_cli(urls: Vec<String>, etag: Option<String>, json: bool, show_trace: bool) {
+async fn run_cli(urls: Vec<String>, etag: Option<String>, json: bool, show_trace: bool, runtime: std::sync::Arc<tier1::cook::Runtime>) {
     use futures::stream::{FuturesUnordered, StreamExt};
-    use tier1::{ThumbCook, ThumbSpec};
+    use tier1::{ThumbCook, cook::InputSpec};
 
     let mut pool = FuturesUnordered::new();
     for raw in urls {
-        // allow_local = true for bare paths (promoted to file://) and for
-        // explicit file:// URLs.  http/https are not local.
         let is_local = !raw.contains("://") || raw.starts_with("file://");
         let url = promote_url(&raw);
-        let spec = ThumbSpec { url, etag: etag.clone(), allow_local: is_local };
-        pool.push(ThumbCook::new(spec).run());
+        let input = InputSpec { url, etag: etag.clone(), allow_local: is_local };
+        pool.push(ThumbCook::from_input(input, std::sync::Arc::clone(&runtime)).run());
     }
 
     let mut items: Vec<(tier1::ThumbResult, tier1::ThumbTrace)> = Vec::with_capacity(pool.len());
-    while let Some(pair) = pool.next().await {
-        items.push(pair);
+    while let Some((result, trace, mut after)) = pool.next().await {
+        after.drain_spawn();
+        items.push((result, trace));
     }
 
     if json {
@@ -197,8 +197,8 @@ fn print_thumb_items(items: &[(tier1::ThumbResult, tier1::ThumbTrace)], show_tra
 
         // Status (+ message if non-empty)
         let status = get_str(&result_json, "status");
-        let status_str = if !result.message.is_empty() {
-            format!("{status}  ({})", result.message)
+        let status_str = if let Some(ref msg) = result.message {
+            format!("{status}  ({msg})")
         } else {
             status
         };
@@ -218,8 +218,7 @@ fn print_thumb_items(items: &[(tier1::ThumbResult, tier1::ThumbTrace)], show_tra
         }
 
         // Properties — plain key=value pairs
-        if let Some(ref props) = result.properties {
-            if let Some(obj) = props.as_object() {
+        if let Some(obj) = result.properties.as_object() {
                 let pairs: Vec<String> = obj.iter()
                     .map(|(k, v)| {
                         // Strip JSON quotes from string values
@@ -230,7 +229,6 @@ fn print_thumb_items(items: &[(tier1::ThumbResult, tier1::ThumbTrace)], show_tra
                 if !pairs.is_empty() {
                     println!("  properties: {}", pairs.join("  "));
                 }
-            }
         }
 
         // Thumbnail output (size from actual bytes in result)
@@ -285,9 +283,9 @@ fn print_thumb_items(items: &[(tier1::ThumbResult, tier1::ThumbTrace)], show_tra
                     println!("    final_url         : {u}");
                 }
             }
-            if let Some(ref h) = trace.cache_hash {
-                let src = trace.cache_hash_source.as_deref().unwrap_or("url");
-                println!("    cache_hash        : {h}  (from {src})");
+            if let Some(ref h) = trace.cache_key {
+                let src = trace.cache_key_source.as_deref().unwrap_or("url");
+                println!("    cache_key         : {h}  (from {src})");
             }
 
             // Download detail

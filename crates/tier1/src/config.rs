@@ -13,52 +13,14 @@
 //! | `TBR_DEVELOPER_MODE`       | false   | Verbose debug output in API responses            |
 //! | `TBR_TIER2_URL`            | —       | Handoff URL for tier-2 rendering                 |
 //! | `TBR_TIER3_URL`            | —       | Handoff URL for tier-3 rendering                 |
-//! | `TBR_CACHE_URL`            | —       | Cache backend DSN (redis://, kv://, file://, …)  |
+//! | `TBR_CACHE`                | —       | Cache backend DSN — `sqlite:<path>`, …          |
 //! | `TBR_CACHE_MAX_ITEMS`      | —       | Max cache entries (backend-specific meaning)     |
-//! | `TBR_TRACE_SINK`           | stdout  | Where traces are emitted; see [`TraceSink`]      |
+//! | `TBR_TRACE`                | —       | Trace sink DSN — `ndjson:<path>`, …             |
 //! | `TBR_CUSTOMER_TOKEN`       | —       | Customer API token for paid/hosted builds        |
 //! | `TBR_ACCOUNT_ID`           | —       | Customer account identifier (billing/quota)      |
 //! | `TBR_DOWNLOAD_CONCURRENCY` | —       | Max simultaneous upstream downloads              |
 //! | `TBR_TIER2_CONCURRENCY`    | —       | Max simultaneous tier-2 handoff requests         |
 //! | `TBR_TIER3_CONCURRENCY`    | —       | Max simultaneous tier-3 handoff requests         |
-
-// ── TraceSink ────────────────────────────────────────────────────────────────
-
-/// Where per-item trace records are emitted.
-///
-/// Parsed from `TBR_TRACE_SINK`.  Unrecognised values are treated as `Stdout`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TraceSink {
-    /// Write JSON trace records to stdout (default; works everywhere).
-    Stdout,
-    /// Append JSON trace records to a local file path.
-    File(String),
-    /// Push to a Grafana / Loki push endpoint (future).
-    Grafana(String),
-    /// Use Cloudflare's native analytics pipeline (Workers only; no-op on native).
-    Cloudflare,
-}
-
-impl TraceSink {
-    fn from_env() -> Self {
-        match std::env::var("TBR_TRACE_SINK").as_deref() {
-            Ok("stdout") | Err(_) => Self::Stdout,
-            Ok("cloudflare")      => Self::Cloudflare,
-            Ok(v) if v.starts_with("grafana://") => Self::Grafana(v.to_owned()),
-            Ok(v)                 => Self::File(v.to_owned()),
-        }
-    }
-
-    /// Human-readable config string for diagnostics.
-    pub fn display(&self) -> String {
-        match self {
-            Self::Stdout       => "stdout".to_string(),
-            Self::Cloudflare   => "cloudflare".to_string(),
-            Self::File(p)      => format!("file:{p}"),
-            Self::Grafana(url) => format!("grafana:{url}"),
-        }
-    }
-}
 
 // ── AppConfig ─────────────────────────────────────────────────────────────────
 
@@ -86,15 +48,16 @@ pub struct AppConfig {
     pub tier3_url: Option<String>,
 
     // ── Cache ────────────────────────────────────────────────────────────────
-    /// Cache backend DSN (`TBR_CACHE_URL`).  Scheme determines backend type:
-    /// `redis://`, `kv://` (Cloudflare KV), `file://`, etc.
+    /// Cache backend DSN (`TBR_CACHE`).  Scheme determines backend type:
+    /// `sqlite:`, etc.
     pub cache_url: Option<String>,
     /// Maximum number of cache entries (`TBR_CACHE_MAX_ITEMS`).
     pub cache_max_items: Option<u32>,
 
     // ── Trace sink ────────────────────────────────────────────────────────────
-    /// Where per-item trace records are emitted.
-    pub trace_sink: TraceSink,
+    /// Trace sink DSN (`TBR_TRACE`).  Scheme determines backend type:
+    /// `ndjson:<path>`, etc.  `None` disables trace logging.
+    pub trace_url: Option<String>,
 
     // ── Account / auth ────────────────────────────────────────────────────────
     /// Customer API token for paid/hosted builds (`TBR_CUSTOMER_TOKEN`).
@@ -122,7 +85,7 @@ impl Default for AppConfig {
             tier3_url: None,
             cache_url: None,
             cache_max_items: None,
-            trace_sink: TraceSink::Stdout,
+            trace_url: None,
             customer_token: None,
             account_id: None,
             download_concurrency: None,
@@ -141,9 +104,9 @@ impl AppConfig {
             developer_mode:       env_bool("TBR_DEVELOPER_MODE", false),
             tier2_url:            std::env::var("TBR_TIER2_URL").ok(),
             tier3_url:            std::env::var("TBR_TIER3_URL").ok(),
-            cache_url:            std::env::var("TBR_CACHE_URL").ok(),
+            cache_url:            std::env::var("TBR_CACHE").ok(),
             cache_max_items:      env_opt_u32("TBR_CACHE_MAX_ITEMS"),
-            trace_sink:           TraceSink::from_env(),
+            trace_url:            std::env::var("TBR_TRACE").ok(),
             customer_token:       std::env::var("TBR_CUSTOMER_TOKEN").ok(),
             account_id:           std::env::var("TBR_ACCOUNT_ID").ok(),
             download_concurrency: env_opt_u32("TBR_DOWNLOAD_CONCURRENCY"),

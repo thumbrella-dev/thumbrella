@@ -6,9 +6,11 @@
 //! - `GET  /thumb?url=<url>`       — same handler; alias without extension
 //! - `POST /batch`                 — batch thumbnail + describe; waits for all items, returns one JSON object
 
+use std::sync::Arc;
+
 use axum::{
     Json,
-    extract::Query,
+    extract::{Query, State},
     http::{HeaderMap, StatusCode, header},
     response::IntoResponse,
 };
@@ -16,9 +18,9 @@ use bytes::Bytes;
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde_json::{json, Value};
 
-use crate::cook::{ThumbCook, ThumbSpec};
+use crate::cook::{InputSpec, Runtime, ThumbCook};
 use crate::http_buf::PlatformStream;
-use crate::request::{CallRequest, ThumbInput};
+use crate::request::CallRequest;
 use crate::result::JobStatus;
 
 // ── GET /health ───────────────────────────────────────────────────────────────
@@ -63,6 +65,7 @@ pub struct ThumbQuery {
 }
 
 pub async fn thumb(
+    State(runtime): State<Arc<Runtime>>,
     Query(q): Query<ThumbQuery>,
     headers: HeaderMap,
 ) -> axum::response::Response {
@@ -80,15 +83,16 @@ pub async fn thumb(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_owned());
 
-    let spec = ThumbSpec { url: q.url, etag, allow_local: false };
-    let (result, _trace) = ThumbCook::<PlatformStream>::new(spec).run().await;
+    let input = InputSpec { url: q.url, etag, allow_local: false };
+    let (result, _trace, mut after) = ThumbCook::<PlatformStream>::from_input(input, runtime).run().await;
+    after.drain_spawn();
 
     if result.status == JobStatus::NotModified {
         return StatusCode::NOT_MODIFIED.into_response();
     }
 
     if result.thumbnail.is_empty() {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": result.message })))
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": result.message.unwrap_or_default() })))
             .into_response();
     }
 
@@ -111,33 +115,29 @@ pub async fn thumb(
 
 /// Batch thumbnail / describe endpoint.
 ///
-/// Accepts a `CallRequest` JSON body and returns a JSON array of `ThumbResponse`
+/// Accepts a `CallRequest` JSON body and returns a JSON array of `ThumbResult`
 /// values.  Results arrive in completion order; streaming (NDJSON/SSE) will
 /// deliver the same shape, just with earlier items arriving sooner.
 pub async fn batch(
+    State(runtime): State<Arc<Runtime>>,
     Json(req): Json<CallRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let mut pool = FuturesUnordered::new();
     for input in req.items {
         let (url, etag) = input.into_parts();
-        // Reject file:// at the HTTP boundary — never expose the server
-        // filesystem to remote callers.  allow_local is intentionally absent
-        // here; the pipeline::connect step enforces this independently too.
         if url.starts_with("file://") {
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(json!({ "error": "file:// URLs are not permitted" })),
             ));
         }
-        let spec = ThumbSpec { url, etag, allow_local: false };
-        pool.push(ThumbCook::<PlatformStream>::new(spec).run());
+        let spec = InputSpec { url, etag, allow_local: false };
+        pool.push(ThumbCook::<PlatformStream>::from_input(spec, Arc::clone(&runtime)).run());
     }
 
     let mut items = Vec::with_capacity(pool.len());
-    while let Some((result, _trace)) = pool.next().await {
-        // trace is intentionally discarded here; the HTTP response only
-        // returns the public ThumbResult.  Emit to a log sink when telemetry
-        // is wired up.
+    while let Some((result, _trace, mut after)) = pool.next().await {
+        after.drain_spawn();
         items.push(result);
     }
 

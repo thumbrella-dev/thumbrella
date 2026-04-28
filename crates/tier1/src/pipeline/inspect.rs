@@ -16,43 +16,41 @@ const SNIFF_LEN: usize = 4 * 1024;
 /// Pull the first bytes of the body, sniff the file type, and determine
 /// the processing tier.
 ///
-/// Must only be called after `connect` has populated `cook.http`.
+/// Must only be called after `connect` has opened the HTTP connection.
 ///
 /// Populates:
-/// - `cook.response.mime`       — sniffed MIME type string
-/// - `cook.response.kind`       — coarse `FileKind` category
-/// - `cook.response.extension`  — canonical extension (no dot)
-/// - `cook.response.properties` — `{width, height}` for `Image` kind (best-effort)
-/// - `cook.trace.job_tier`      — from `dispatch::route()`
+/// - `cook.media.mime`         — sniffed MIME type string
+/// - `cook.media.kind`         — coarse `FileKind` category
+/// - `cook.media.extension`    — canonical extension (no dot)
+/// - `cook.media.properties`   — `{width, height}` for `Image` kind (best-effort)
 pub async fn inspect<S: HttpStream>(cook: &mut ThumbCook<S>) {
-    let Some(http) = cook.http.as_mut() else { return };
+    if !cook.http_is_open() { return; }
 
     // read_at preserves the cursor — subsequent steps (shortcut, render)
     // continue from byte 0.
-    let prefix = match http.read_at(0, SNIFF_LEN).await {
+    let prefix = match cook.http_read_at(0, SNIFF_LEN).await {
         Ok(b) => b,
         Err(e) => {
             cook.fail(format!("inspect read error: {e}"));
-            cook.http = None;
             return;
         }
     };
 
-    let content_type = cook.http.as_ref()
-        .and_then(|h| h.headers.get("content-type").cloned());
-    let (kind, mime, extension) = sniff(&prefix, &cook.spec.url, content_type.as_deref());
-    cook.response.mime = Some(mime);
-    cook.response.kind = Some(kind);
-    cook.response.extension = Some(extension);
-    cook.response.properties = Some(serde_json::json!({}));
+    let content_type = cook.http_headers.get("content-type").cloned();
+    let (kind, mime, extension) = sniff(&prefix, &cook.input.url, content_type.as_deref());
+    cook.media.mime       = Some(mime);
+    cook.media.kind       = Some(kind);
+    cook.media.extension  = Some(extension);
+    cook.media.properties = Some(serde_json::json!({}));
 
     // For image formats, dimension headers are always within the first few KB.
     if kind == FileKind::Image {
-        inspect_image_properties(&prefix, cook.response.properties.as_mut().unwrap());
+        inspect_image_properties(&prefix, cook.media.properties.as_mut().unwrap());
     }
 
-    let route = dispatch::route(kind, cook.response.extension.as_deref());
-    cook.trace.job_tier = route.tier;
+    // Route determines which tier should process this — informational only at
+    // this point; the cook will escalate if needed during shortcut/render.
+    let _route = dispatch::route(kind, cook.media.extension.as_deref());
 }
 
 // ── Sniffing ──────────────────────────────────────────────────────────────────
@@ -79,6 +77,18 @@ fn sniff(bytes: &[u8], url: &str, content_type: Option<&str>) -> (FileKind, Stri
                 if !matches!(url_kind, FileKind::Archive | FileKind::Binary | FileKind::Unknown) {
                     let mime = ext_to_mime(ext).to_string();
                     return (url_kind, mime, ext.clone());
+                }
+            }
+        }
+
+        // When magic bytes identify plain TIFF but the URL names a known
+        // camera-raw format, prefer the raw extension.  This lets the
+        // shortcut step choose the wider RAW_HEADER_SCAN and report the
+        // correct format in traces ("shortcut/raw" vs "shortcut/exif").
+        if infer_ext == "tiff" {
+            if let Some(ext) = &url_ext {
+                if is_raw_tiff_extension(ext) {
+                    return (FileKind::Image, ext_to_mime(ext).to_string(), ext.clone());
                 }
             }
         }
@@ -120,14 +130,26 @@ fn sniff(bytes: &[u8], url: &str, content_type: Option<&str>) -> (FileKind, Stri
 pub(super) fn inspect_image_properties(bytes: &[u8], props: &mut serde_json::Value) {
     let cursor = Cursor::new(bytes);
     let Ok(reader) = ImageReader::new(cursor).with_guessed_format() else { return };
-    let Ok(mut decoder) = reader.into_decoder() else { return };
+    let Ok(decoder) = reader.into_decoder() else { return };
     let (w, h) = decoder.dimensions();
+    let ct = decoder.color_type();
+    let ch = ct.channel_count() as u32;
+    let color_depth = if ch > 0 { ct.bits_per_pixel() as u32 / ch } else { ct.bits_per_pixel() as u32 };
     let obj = props.as_object_mut().expect("properties is always a JSON object");
-    obj.insert("width".into(),  w.into());
-    obj.insert("height".into(), h.into());
+    obj.insert("width".into(),       w.into());
+    obj.insert("height".into(),      h.into());
+    obj.insert("color_depth".into(), color_depth.into());
 }
 
 // ── Extension helpers ─────────────────────────────────────────────────────────
+
+/// Return `true` for TIFF-container camera-raw extensions.
+/// Used to prefer URL-derived extensions over the generic `"tiff"` label
+/// that the `infer` crate assigns to all TIFF-magic files.
+fn is_raw_tiff_extension(ext: &str) -> bool {
+    matches!(ext, "dng" | "cr2" | "nef" | "arw" | "orf" | "rw2"
+                | "pef" | "srw" | "3fr" | "mef" | "rwl")
+}
 
 /// Normalise common extension aliases to their canonical form.
 /// Unknown extensions are returned as-is.
@@ -213,8 +235,11 @@ fn mime_to_kind(mime: &str, ext: &str) -> FileKind {
 fn ext_to_kind(ext: &str) -> FileKind {
     match ext {
         "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff"
-        | "avif" | "heic" | "heif" | "exr" | "hdr" | "dng"
+        | "avif" | "heic" | "heif" | "exr" | "hdr"
         | "apng" | "ico"                                  => FileKind::Image,
+        // Camera-raw formats (TIFF-based containers).
+        "dng" | "cr2" | "nef" | "arw" | "orf" | "rw2"
+        | "pef" | "srw" | "3fr" | "mef" | "rwl"          => FileKind::Image,
         "svg"                                               => FileKind::Vector,
         "mp4" | "mov" | "mkv" | "avi" | "webm" | "mpeg"
         | "ogv"                                            => FileKind::Video,
@@ -279,7 +304,13 @@ fn ext_to_mime(ext: &str) -> &'static str {
         "bmp"  => "image/bmp",    "tiff" => "image/tiff",
         "avif" => "image/avif",   "heic" => "image/heic",
         "heif" => "image/heif",   "exr"  => "image/x-exr",
-        "hdr"  => "image/vnd.radiance", "dng" => "image/x-adobe-dng",
+        "hdr"  => "image/vnd.radiance",
+        "dng"  => "image/x-adobe-dng",
+        "cr2"  => "image/x-canon-cr2",   "nef"  => "image/x-nikon-nef",
+        "arw"  => "image/x-sony-arw",    "orf"  => "image/x-olympus-orf",
+        "rw2"  => "image/x-panasonic-rw2", "pef" => "image/x-pentax-pef",
+        "srw"  => "image/x-samsung-srw", "3fr"  => "image/x-hasselblad-3fr",
+        "mef"  => "image/x-mamiya-mef",  "rwl"  => "image/x-leica-rwl",
         "svg"  => "image/svg+xml",
         "apng" => "image/apng",   "ico"  => "image/vnd.microsoft.icon",
         "mp4"  => "video/mp4",    "mov"  => "video/quicktime",

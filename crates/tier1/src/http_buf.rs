@@ -260,8 +260,15 @@ impl<S: HttpStream> HttpBuffer<S> {
     ///
     /// Must be called on any early-exit path (type unsupported, shortcut found,
     /// error, etc.).  When the stream is fully drained this is a no-op.
-    pub async fn close(&mut self) {
+    ///
+    /// Returns the first cached page (bytes 0..PAGE_SIZE) if it was read during
+    /// this connection, so callers that need to forward a header block to a
+    /// higher-tier handoff can hold onto it.  If nothing was read yet the
+    /// page was never populated and `None` is returned.  Callers that don't
+    /// need the block can simply discard the return value.
+    pub async fn close(&mut self) -> Option<Vec<u8>> {
         self.stream.close().await;
+        self.pages.remove(&0)
     }
 
     // ── Accounting ────────────────────────────────────────────────────────────

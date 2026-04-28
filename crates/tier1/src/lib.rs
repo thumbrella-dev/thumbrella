@@ -18,11 +18,14 @@
 //! The project uses `tbr` as the short form of "thumbrella" in identifiers
 //! (e.g. `TBR_VERSION`).  Public API types follow the family naming scheme:
 //! - `Call*` — outer HTTP envelope types (`CallRequest`, `CallResponse`, …)
-//! - `Thumb*` — per-item types (`ThumbInput`, `ThumbResponse`, `ThumbSpec`, `ThumbCook`, …)
+//! - `Thumb*` — per-item types (`ThumbInput`, `ThumbResult`, `ThumbTrace`, `ThumbCook`, `ThumbHandoff`, …)
 
 // ── Core modules (always compiled) ───────────────────────────────────────────
-pub mod after;pub mod cook;
+pub mod after;
+pub mod cache;
+pub mod cook;
 pub mod dispatch;
+pub mod handoff;
 pub mod http_buf;
 pub mod media;
 pub mod pipeline;
@@ -30,6 +33,7 @@ pub mod spec;
 pub mod request;
 pub mod result;
 pub mod source;
+pub mod tracelog;
 
 // ── Native-only modules ───────────────────────────────────────────────────────
 
@@ -47,19 +51,15 @@ pub mod startup;
 
 // ── Convenience re-exports ────────────────────────────────────────────────────
 
-pub use after::{AfterResponse, DeferredFuture};
-pub use cook::{CallerContext, ThumbCook as ThumbCookGeneric, ThumbSpec, ThumbTrace};
+pub use cook::{CallerContext, CookStatus, InputSpec, MediaInfo, Runtime, SourceIdentity, ThumbCook as ThumbCookGeneric};
 pub use dispatch::{ThumbRoute, route};
+pub use handoff::ThumbHandoff;
 pub use media::{FileKind, Strategy};
-pub use spec::ThumbnailConfig;
 pub use request::{CallRequest, ThumbInput, ThumbObject};
-pub use result::{CacheOutcome, CallRecord, CallResponse, JobStatus, RenderHandler, ThumbResult};
+pub use result::{CacheOutcome, CallRecord, CallResponse, JobStatus, RenderHandler, ThumbResult, ThumbTrace};
 pub use source::{SourceRef, canonical_url, conditional_headers, etag_from_headers};
 
 /// Concrete `ThumbCook` type for native server builds.
-///
-/// Use this alias instead of `cook::ThumbCook<http_buf::PlatformStream>` at
-/// call sites within native-only code.
 #[cfg(feature = "native")]
 pub type ThumbCook = cook::ThumbCook<http_buf::PlatformStream>;
 
@@ -67,3 +67,11 @@ pub type ThumbCook = cook::ThumbCook<http_buf::PlatformStream>;
 
 /// Semantic version of this crate.
 pub const TBR_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Cache format version.  Increment this to invalidate all cached results
+/// globally — e.g. after a breaking change to `ThumbResult`, thumbnail
+/// dimensions, or image quality settings.
+///
+/// Baked into the SHA-256 key input so old entries become unreachable without
+/// any schema migration or explicit flush.
+pub const TBR_CACHE_VERSION: u32 = 1;

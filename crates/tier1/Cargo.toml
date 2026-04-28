@@ -21,6 +21,7 @@ default = ["native"]
 # when targeting wasm32 (the workers build lives in a downstream crate that
 # provides its own runtime and HTTP bindings via workers-rs).
 native = [
+    "dep:rusqlite",
     "dep:tokio",
     "dep:axum",
     "dep:axum-extra",
@@ -63,6 +64,7 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 bytes = "1"
 
 # ── Native-only ───────────────────────────────────────────────────────────────
+rusqlite        = { version = "0.32", features = ["bundled"],                optional = true }
 tokio           = { version = "1", features = ["full"],                      optional = true }
 axum            = { version = "0.8",                                         optional = true }
 axum-extra      = { version = "0.10", features = ["query"],                  optional = true }
