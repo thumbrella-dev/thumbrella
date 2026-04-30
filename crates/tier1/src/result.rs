@@ -78,7 +78,7 @@ pub enum JobStatus {
     #[default]
     Failed,
     DeferUser,
-    DeferServer,
+    Unavailable,
     Rendering,
 }
 
@@ -179,11 +179,12 @@ pub struct ThumbTrace {
     pub download_bytes:      u64,
     pub download_tail_bytes: u64,
     pub connect_secs:        f64,
+    pub io_secs:             f64,
 
     // ── Step timing ───────────────────────────────────────────────────────────
     pub inspect_secs:   f64,
     pub shortcut_secs:  f64,
-    pub render_secs:    f64,
+    pub decode_secs:    f64,
     pub deliver_secs:   f64,
 
     // ── Render details ────────────────────────────────────────────────────────

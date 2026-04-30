@@ -52,7 +52,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use image::DynamicImage;
+use image::{DynamicImage, RgbImage};
 use serde_json::Value;
 
 use crate::after::AfterResponse;
@@ -60,8 +60,11 @@ use crate::cache::CacheStore;
 use crate::http_buf::{HttpBuffer, HttpStream};
 use crate::media::{FileKind, Strategy};
 use crate::result::{CacheOutcome, JobStatus, RenderHandler, ThumbResult, ThumbTrace};
+use crate::spec::ShortcutLimits;
 use crate::tracelog::TraceStore;
 use crate::pipeline;
+#[cfg(feature = "native")]
+use crate::renderer::{RenderCook, SharedRenderer};
 
 // ── CookStatus ────────────────────────────────────────────────────────────────
 
@@ -83,8 +86,8 @@ pub enum CookStatus {
     Failed,
     /// Request deferred — caller is rate-limited or over quota.
     DeferUser,
-    /// Request deferred — server is at capacity or no higher tier configured.
-    DeferServer,
+    /// No higher-tier renderer is configured or available.
+    Unavailable,
     /// Handed off to a higher-tier renderer; streaming result pending.
     Rendering,
 }
@@ -117,6 +120,7 @@ pub enum CallerContext {
 ///
 /// On `wasm32-unknown-unknown` (Cloudflare Workers) `Arc` is zero-cost — the
 /// atomic refcount compiles to plain loads/stores on a single-threaded isolate.
+#[derive(Clone)]
 pub struct Runtime {
     /// Active cache backends.  Empty when no cache is configured.
     pub cache: CacheStore,
@@ -127,16 +131,46 @@ pub struct Runtime {
     pub server: Option<String>,
     /// Thumbrella build version string.
     pub version: String,
-    // TODO: handoff config (tier2_url, tier3_url, concurrency limits)
+    /// Pre-decoded background image for RGBA compositing (always 250×200 RGB).
+    /// Loaded once at startup; `None` falls back to the solid `background_rgb` colour.
+    pub background_image: Option<RgbImage>,
+    /// Pre-encoded placeholder JPEG returned when no thumbnail can be produced
+    /// (unavailable renderer, unsupported format, etc.).
+    pub placeholder_general: Vec<u8>,
+    /// Pre-encoded placeholder JPEG returned when the request itself fails
+    /// (network error, bad URL, HTTP error, etc.).
+    pub placeholder_error: Vec<u8>,
+    /// Optional in-process renderer registered by a higher tier at startup.
+    /// When `Some`, tier-2-routed items are dispatched directly without an
+    /// out-of-process HTTP round-trip.
+    #[cfg(feature = "native")]
+    pub renderer: Option<SharedRenderer>,
+    /// I/O and decode budget limits for the shortcut pipeline.
+    /// Defaults to [`ShortcutLimits::TIER1`]; override with
+    /// [`crate::with_shortcut_limits`] in the tier 2 startup hook.
+    pub shortcut_limits: ShortcutLimits,
 }
 
 impl Runtime {
-    pub fn new(cache: CacheStore, trace: TraceStore, server: Option<String>) -> Arc<Self> {
+    pub fn new(
+        cache: CacheStore,
+        trace: TraceStore,
+        server: Option<String>,
+        background_image: Option<RgbImage>,
+        placeholder_general: Vec<u8>,
+        placeholder_error: Vec<u8>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             cache,
             trace,
             server,
             version: env!("CARGO_PKG_VERSION").to_string(),
+            background_image,
+            placeholder_general,
+            placeholder_error,
+            #[cfg(feature = "native")]
+            renderer: None,
+            shortcut_limits: ShortcutLimits::TIER1,
         })
     }
 }
@@ -268,8 +302,9 @@ pub struct ThumbCook<S: HttpStream> {
     pub tel_connect_secs: f64,
     pub tel_inspect_secs: f64,
     pub tel_shortcut_secs: f64,
-    pub tel_render_secs: f64,
+    pub tel_decode_secs: f64,
     pub tel_deliver_secs: f64,
+    pub tel_io_secs: f64,
     /// Bytes from any tail Range request (e.g. ZIP Central Directory fetch).
     pub tel_download_tail_bytes: u64,
     /// Byte length of the encoded JPEG.
@@ -326,8 +361,9 @@ impl<S: HttpStream> ThumbCook<S> {
             tel_connect_secs:    0.0,
             tel_inspect_secs:    0.0,
             tel_shortcut_secs:   0.0,
-            tel_render_secs:     0.0,
+            tel_decode_secs:     0.0,
             tel_deliver_secs:    0.0,
+            tel_io_secs:         0.0,
             tel_download_tail_bytes: 0,
             tel_thumbnail_bytes: None,
             ctx_caller:      None,
@@ -415,9 +451,35 @@ impl<S: HttpStream> ThumbCook<S> {
         self.http_buf.as_ref().and_then(|b| b.stream_len())
     }
 
+    /// Alias for `http_stream_len` — the `Content-Length` or effective file size.
+    pub fn http_len(&self) -> Option<u64> {
+        self.http_stream_len()
+    }
+
+    /// Enter streaming mode on the buffer, snapshot I/O time, take the buffer
+    /// out of the cook, and wrap it as a `Box<dyn ReadSeek + Send>`.
+    ///
+    /// Returns `None` when no connection is open.
+    #[cfg(feature = "native")]
+    pub fn http_take_reader(&mut self) -> Option<Box<dyn crate::http_buf::ReadSeek + Send>>
+    where
+        S: Send + 'static,
+    {
+        let buf = self.http_buf.as_mut()?;
+        buf.enter_streaming_mode();
+        self.tel_io_secs = buf.io_secs();
+        let buf = self.http_buf.take()?;
+        Some(Box::new(crate::http_buf::SyncHttpReader::new(buf)))
+    }
+
     /// Total bytes received from the network so far.
     pub fn http_bytes_fetched(&self) -> u64 {
         self.http_buf.as_ref().map(|b| b.bytes_fetched()).unwrap_or(0)
+    }
+
+    /// Cumulative time spent blocked on network I/O since the buffer was opened (excludes connect).
+    pub fn http_io_secs(&self) -> f64 {
+        self.http_buf.as_ref().map(|b| b.io_secs()).unwrap_or(0.0)
     }
 
     /// Close the connection and return the first cached page (bytes 0..PAGE_SIZE)
@@ -425,6 +487,8 @@ impl<S: HttpStream> ThumbCook<S> {
     /// Sets `http_buf` to `None`.
     pub async fn http_close(&mut self) -> Option<Vec<u8>> {
         let first_page = if let Some(b) = self.http_buf.as_mut() {
+            // Snapshot I/O time before the buffer is dropped.
+            self.tel_io_secs = b.io_secs();
             b.close().await
         } else {
             None
@@ -442,6 +506,7 @@ impl<S: HttpStream> ThumbCook<S> {
         if self.out_download_bytes == 0 && fetched > 0 {
             self.out_download_bytes = fetched;
         }
+        self.tel_io_secs = self.http_io_secs();
     }
 
     // ── Output views ──────────────────────────────────────────────────────────
@@ -453,7 +518,7 @@ impl<S: HttpStream> ThumbCook<S> {
             CookStatus::NotModified => JobStatus::NotModified,
             CookStatus::Failed      => JobStatus::Failed,
             CookStatus::DeferUser   => JobStatus::DeferUser,
-            CookStatus::DeferServer => JobStatus::DeferServer,
+            CookStatus::Unavailable => JobStatus::Unavailable,
             CookStatus::Rendering   => JobStatus::Rendering,
         };
         ThumbResult {
@@ -492,7 +557,7 @@ impl<S: HttpStream> ThumbCook<S> {
             CookStatus::NotModified => JobStatus::NotModified,
             CookStatus::Failed      => JobStatus::Failed,
             CookStatus::DeferUser   => JobStatus::DeferUser,
-            CookStatus::DeferServer => JobStatus::DeferServer,
+            CookStatus::Unavailable => JobStatus::Unavailable,
             CookStatus::Rendering   => JobStatus::Rendering,
         };
 
@@ -510,9 +575,10 @@ impl<S: HttpStream> ThumbCook<S> {
             download_bytes:      self.out_download_bytes,
             download_tail_bytes: self.tel_download_tail_bytes,
             connect_secs:        self.tel_connect_secs,
+            io_secs:             self.tel_io_secs,
             inspect_secs:        self.tel_inspect_secs,
             shortcut_secs:       self.tel_shortcut_secs,
-            render_secs:         self.tel_render_secs,
+            decode_secs:         self.tel_decode_secs,
             deliver_secs:        self.tel_deliver_secs,
             render_resolution:   self.render_resolution,
             thumbnail_bytes:     self.tel_thumbnail_bytes,
@@ -552,7 +618,10 @@ impl<S: HttpStream> ThumbCook<S> {
     /// after the HTTP response is sent:
     /// - Native: `after.drain_spawn()` fires all tasks on the tokio thread pool.
     /// - Workers: iterate `after.drain()` and pass each to `ctx.wait_until()`.
-    pub async fn run(mut self) -> (ThumbResult, ThumbTrace, AfterResponse) {
+    pub async fn run(mut self) -> (ThumbResult, ThumbTrace, AfterResponse)
+    where
+        S: Send + 'static,
+    {
         let mut after = AfterResponse::new();
         let t0 = std::time::Instant::now();
 
@@ -652,20 +721,134 @@ impl<S: HttpStream> ThumbCook<S> {
         }
 
         // ── handoff to higher tier ────────────────────────────────────────────
+        // Check for a registered in-process renderer *before* closing the
+        // connection so the renderer can stream from the live HttpBuffer.
+        #[cfg(feature = "native")]
+        if let Some(renderer) = self.runtime.renderer.clone() {
+            // Snapshot bytes-fetched so far (inspect/shortcut phase).
+            // The renderer takes the live buffer via RenderCook::take_reader;
+            // after that point the buffer is gone and we can't query it.
+            self.stamp_download_bytes();
+
+            // Coerce &mut ThumbCook<S> → &mut dyn RenderCook.  Valid because
+            // impl<S: HttpStream + Send + 'static> RenderCook for ThumbCook<S>
+            // and run() requires S: Send + 'static.
+            if renderer.render(&mut self as &mut dyn RenderCook).await {
+                // Renderer claimed the format.  On success render_image is set
+                // and deliver produces the thumbnail.  On failure the renderer
+                // called fail_cook() and render_image is None; status != Complete.
+
+                // Best-effort download size when the renderer consumed bytes
+                // we can no longer count via the buffer.
+                if self.out_download_bytes == 0 {
+                    if let Some(sz) = self.media.file_size {
+                        self.out_download_bytes = sz;
+                    }
+                }
+
+                if self.render_image.is_some() {
+                    let t_step = std::time::Instant::now();
+                    pipeline::deliver(&mut self).await;
+                    self.tel_deliver_secs = t_step.elapsed().as_secs_f64();
+                    self.out_duration = t0.elapsed().as_secs_f64();
+                    if self.status == CookStatus::Complete {
+                        if let Some(ref key) = self.src.cache_key.clone() {
+                            let result = self.to_result();
+                            self.runtime.cache.store(key, &result, &mut after);
+                        }
+                    }
+                }
+                return self.finish(after);
+            }
+            // Renderer returned false (format not recognised).
+            // It must not have called take_reader() in this case.
+            self.status = CookStatus::Unavailable;
+            self.out_message = "format not handled by the registered renderer".to_string();
+            self.out_duration = t0.elapsed().as_secs_f64();
+            return self.finish(after);
+        }
+
+        // No in-process renderer — close the HTTP connection and build a
+        // portable handoff bundle for an out-of-process tier-2 endpoint.
         let first_page = self.http_close().await;
         let _handoff = self.to_handoff(first_page);
-        // TODO: dispatch _handoff to configured tier-2 endpoint.
-        // TODO: fall back to placeholder icon when no tier-2 is configured.
-        self.status = CookStatus::DeferServer;
-        self.out_message = "deferred to higher-tier renderer (not yet connected)".to_string();
+        // TODO: out-of-process HTTP handoff to a tier-2 endpoint.
+        self.status = CookStatus::Unavailable;
+        self.out_message = "no higher-tier renderer is configured".to_string();
         self.out_duration = t0.elapsed().as_secs_f64();
         self.finish(after)
     }
 
-    fn finish(self, mut after: AfterResponse) -> (ThumbResult, ThumbTrace, AfterResponse) {
+    fn finish(mut self, mut after: AfterResponse) -> (ThumbResult, ThumbTrace, AfterResponse) {
+        // Final snapshot of I/O counters — safe to call multiple times since
+        // stamp_download_bytes is idempotent on the bytes field.
+        self.stamp_download_bytes();
+
+        // Always return a thumbnail.  If the pipeline didn't produce one,
+        // fill in the appropriate placeholder JPEG.
+        if self.out_thumbnail.is_empty() {
+            let (bytes, label) = match self.status {
+                CookStatus::Failed => (
+                    self.runtime.placeholder_error.clone(),
+                    "error",
+                ),
+                _ => (
+                    self.runtime.placeholder_general.clone(),
+                    "general",
+                ),
+            };
+            if !bytes.is_empty() {
+                self.out_thumbnail  = bytes;
+                self.out_placeholder = Some(label.to_string());
+            }
+        }
+
         let result = self.to_result();
         let trace  = self.to_trace();
         self.runtime.trace.record(trace.clone(), &mut after);
         (result, trace, after)
+    }
+}
+
+// ── RenderCook impl ───────────────────────────────────────────────────────────
+//
+// Lives in cook.rs (not renderer.rs) so it can access private fields.
+// `S: Send + 'static` is required for `&mut ThumbCook<S>` to coerce to
+// `&mut dyn RenderCook`.
+
+#[cfg(feature = "native")]
+impl<S: HttpStream + Send + 'static> crate::renderer::RenderCook for ThumbCook<S> {
+    fn media_kind(&self) -> Option<crate::media::FileKind> {
+        self.media.kind
+    }
+    fn media_extension(&self) -> Option<&str> {
+        self.media.extension.as_deref()
+    }
+    fn input_url(&self) -> &str {
+        &self.input.url
+    }
+    fn content_length(&self) -> Option<u64> {
+        self.http_len()
+    }
+    fn take_reader(&mut self) -> Option<Box<dyn crate::http_buf::ReadSeek + Send>> {
+        self.http_take_reader()
+    }
+    fn set_render_image(&mut self, img: image::DynamicImage) {
+        self.render_image = Some(img);
+    }
+    fn set_render_renderer(&mut self, label: String) {
+        self.render_renderer = Some(label);
+    }
+    fn set_render_codec(&mut self, codec: String) {
+        self.render_codec = Some(codec);
+    }
+    fn set_render_video_seek_secs(&mut self, secs: f64) {
+        self.render_video_seek_secs = Some(secs);
+    }
+    fn set_media_properties(&mut self, props: serde_json::Value) {
+        self.media.properties = Some(props);
+    }
+    fn fail_cook(&mut self, msg: &str) {
+        self.fail(msg);
     }
 }

@@ -3,13 +3,12 @@ resolver = "2"
 
 members = [
     "crates/tier1",
-    "crates/thumbrella-tier1",
-    "crates/thumbrella-tier2",
+    "crates/tier2",
 ]
 
 [profile.dev]
-opt-level = 1
-debug = 1
+opt-level = 0      # no optimizations — required for reliable variable inspection
+debug = 2          # full debug info (variables, types, not just line tables)
 incremental = true
 codegen-units = 256
 

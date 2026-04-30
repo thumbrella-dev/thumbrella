@@ -9,7 +9,10 @@
   ],
   "customizations": {
     "vscode": {
-      "extensions": [],
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "vadimcn.vscode-lldb"
+      ],
       "settings": {
       }
     }

@@ -145,6 +145,8 @@ pub struct HttpBuffer<S: HttpStream> {
     stream_pos: u64,
     /// Cumulative bytes received from the network (stream + Range fetches).
     bytes_fetched_count: u64,
+    /// Cumulative wall-clock time spent awaiting network I/O (excludes connect).
+    io_secs_count: f64,
 
     /// Sparse page cache keyed by page index (`byte_offset / PAGE_SIZE`).
     pages: BTreeMap<u64, Vec<u8>>,
@@ -192,6 +194,7 @@ impl<S: HttpStream> HttpBuffer<S> {
             cursor: 0,
             stream_pos: 0,
             bytes_fetched_count: 0,
+            io_secs_count: 0.0,
             pages: BTreeMap::new(),
             eof_override: None,
             streaming_mode: false,
@@ -276,6 +279,11 @@ impl<S: HttpStream> HttpBuffer<S> {
     /// Total bytes received from the network so far.
     pub fn bytes_fetched(&self) -> u64 {
         self.bytes_fetched_count
+    }
+
+    /// Cumulative time (seconds) spent blocked on network I/O, excluding connect.
+    pub fn io_secs(&self) -> f64 {
+        self.io_secs_count
     }
 
     // ── Reads ─────────────────────────────────────────────────────────────────
@@ -410,7 +418,10 @@ impl<S: HttpStream> HttpBuffer<S> {
 
         // cursor >= stream_pos: fetch the next chunk(s) until cursor lands inside.
         loop {
-            let Some(chunk) = self.stream.next_chunk().await? else {
+            let t = std::time::Instant::now();
+            let chunk = self.stream.next_chunk().await?;
+            self.io_secs_count += t.elapsed().as_secs_f64();
+            let Some(chunk) = chunk else {
                 return Ok(0);
             };
             self.streaming_chunk_start = self.stream_pos;
@@ -436,9 +447,10 @@ impl<S: HttpStream> HttpBuffer<S> {
             if self.pages.contains_key(&target_page) {
                 break;
             }
-            let Some(chunk) = self.stream.next_chunk().await? else {
-                break;
-            };
+            let t = std::time::Instant::now();
+            let chunk = self.stream.next_chunk().await?;
+            self.io_secs_count += t.elapsed().as_secs_f64();
+            let Some(chunk) = chunk else { break };
             let start = self.stream_pos;
             self.store_chunk_at(start, &chunk);
             self.stream_pos += chunk.len() as u64;
@@ -457,11 +469,13 @@ impl<S: HttpStream> HttpBuffer<S> {
                 format!("bytes={tail_start}-{}", content_length - 1),
             )],
         };
+        let t = std::time::Instant::now();
         let mut stream = S::connect(&self.url, &opts).await?;
         let mut bytes = Vec::new();
         while let Some(chunk) = stream.next_chunk().await? {
             bytes.extend_from_slice(&chunk);
         }
+        self.io_secs_count += t.elapsed().as_secs_f64();
 
         self.did_tail_fetch = true;
         self.bytes_fetched_count += bytes.len() as u64;
@@ -488,11 +502,13 @@ impl<S: HttpStream> HttpBuffer<S> {
         let opts = ConnectOptions {
             headers: vec![("range".into(), format!("bytes={start}-{end}"))],
         };
+        let t = std::time::Instant::now();
         let mut stream = S::connect(&self.url, &opts).await?;
         let mut bytes = Vec::with_capacity(len);
         while let Some(chunk) = stream.next_chunk().await? {
             bytes.extend_from_slice(&chunk);
         }
+        self.io_secs_count += t.elapsed().as_secs_f64();
         self.bytes_fetched_count += bytes.len() as u64;
         self.store_chunk_at(start, &bytes);
         Ok(bytes)
@@ -674,3 +690,120 @@ fn build_http_client() -> reqwest::Client {
 /// downstream crate and uses `HttpBuffer::<FetchStream>` there.
 #[cfg(feature = "native")]
 pub type PlatformStream = ReqwestStream;
+
+// ── ReadSeek supertrait ───────────────────────────────────────────────────────
+
+/// Combined `Read + Seek` supertrait, object-safe when used as
+/// `Box<dyn ReadSeek + Send>`.
+///
+/// Rust's trait-object rules permit at most one non-auto trait as the primary
+/// bound.  By making `ReadSeek` a single supertrait of both `Read` and `Seek`,
+/// callers can write `Box<dyn ReadSeek + Send>` where a type-erased seekable
+/// reader is needed.
+///
+/// A blanket impl covers all `T: Read + Seek`, so `Cursor<Vec<u8>>`,
+/// `std::fs::File`, [`SyncHttpReader`], etc. all implement this automatically.
+pub trait ReadSeek: std::io::Read + std::io::Seek {}
+impl<T: std::io::Read + std::io::Seek> ReadSeek for T {}
+
+// ── SyncHttpReader ────────────────────────────────────────────────────────────
+
+/// Synchronous `std::io::Read + Seek` adapter over an [`HttpBuffer`].
+///
+/// Bridges the async paged HTTP buffer to blocking callers such as libav's
+/// `AVIOContext` read/seek callbacks.  Those callbacks are C function
+/// pointers; they cannot `await`, so async I/O must be driven by calling
+/// `handle.block_on(future)` on the tokio runtime handle captured at
+/// construction time.
+///
+/// # Usage
+///
+/// Create a `SyncHttpReader` inside an `async` context so that
+/// `Handle::current()` resolves to the active tokio runtime.  Then move the
+/// reader into a `spawn_blocking` task (or any blocking thread that holds a
+/// valid tokio handle).  Inside the blocking task you can pass a
+/// `Box<SyncHttpReader<S>>` wherever `Box<dyn Read + Seek + Send>` is
+/// expected.
+///
+/// ```ignore
+/// // In an async function:
+/// let reader = SyncHttpReader::new(http_buf);
+/// let result = tokio::task::spawn_blocking(move || {
+///     decode_with_libav(Box::new(reader), Some(content_length), ext_hint)
+/// }).await?;
+/// ```
+///
+/// # Seek from end
+///
+/// `SeekFrom::End` requires a known `Content-Length`.  If the server did not
+/// send a `Content-Length` header the seek returns
+/// `ErrorKind::Unsupported` and libav will fall back to probing without
+/// seeking, which is generally fine for container formats that store their
+/// index at the start of the file.
+#[cfg(feature = "native")]
+pub struct SyncHttpReader<S: HttpStream> {
+    buf: HttpBuffer<S>,
+    handle: tokio::runtime::Handle,
+}
+
+#[cfg(feature = "native")]
+impl<S: HttpStream> SyncHttpReader<S> {
+    /// Wrap `buf` in a sync adapter.  Must be called from an async context
+    /// (i.e. while a tokio runtime is active on the current thread).
+    pub fn new(buf: HttpBuffer<S>) -> Self {
+        Self {
+            buf,
+            handle: tokio::runtime::Handle::current(),
+        }
+    }
+
+    /// Return the `Content-Length` reported by the server, if any.
+    pub fn content_length(&self) -> Option<u64> {
+        self.buf.content_length
+    }
+
+    /// Consume and return the underlying [`HttpBuffer`].
+    pub fn into_inner(self) -> HttpBuffer<S> {
+        self.buf
+    }
+}
+
+#[cfg(feature = "native")]
+impl<S: HttpStream> std::io::Read for SyncHttpReader<S> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        self.handle
+            .block_on(self.buf.read(out))
+            .map_err(|e| std::io::Error::other(e.to_string()))
+    }
+}
+
+#[cfg(feature = "native")]
+impl<S: HttpStream> std::io::Seek for SyncHttpReader<S> {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        match pos {
+            std::io::SeekFrom::Start(n) => {
+                self.buf.seek(n);
+                Ok(n)
+            }
+            std::io::SeekFrom::Current(delta) => {
+                self.buf.seek_relative(delta);
+                Ok(self.buf.stream_position())
+            }
+            std::io::SeekFrom::End(delta) => {
+                let len = self.buf.stream_len().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "content-length unknown, cannot seek from end",
+                    )
+                })?;
+                let pos = if delta < 0 {
+                    len.saturating_sub((-delta) as u64)
+                } else {
+                    len.saturating_add(delta as u64)
+                };
+                self.buf.seek(pos);
+                Ok(pos)
+            }
+        }
+    }
+}

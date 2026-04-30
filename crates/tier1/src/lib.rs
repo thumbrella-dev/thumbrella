@@ -49,9 +49,18 @@ pub mod routes;
 #[cfg(feature = "native")]
 pub mod startup;
 
+#[cfg(feature = "native")]
+pub mod cli;
+
+#[cfg(feature = "native")]
+pub mod renderer;
+
 // ── Convenience re-exports ────────────────────────────────────────────────────
 
 pub use cook::{CallerContext, CookStatus, InputSpec, MediaInfo, Runtime, SourceIdentity, ThumbCook as ThumbCookGeneric};
+#[cfg(feature = "native")]
+pub use renderer::{InProcessRenderer, RenderCook, RenderOutput, SharedRenderer, apply_render_output, with_renderer};
+pub use spec::ShortcutLimits;
 pub use dispatch::{ThumbRoute, route};
 pub use handoff::ThumbHandoff;
 pub use media::{FileKind, Strategy};
@@ -62,6 +71,19 @@ pub use source::{SourceRef, canonical_url, conditional_headers, etag_from_header
 /// Concrete `ThumbCook` type for native server builds.
 #[cfg(feature = "native")]
 pub type ThumbCook = cook::ThumbCook<http_buf::PlatformStream>;
+
+/// Combined `Read + Seek` supertrait.  Use `Box<dyn ReadSeek + Send>` where a
+/// type-erased seekable reader is needed (e.g. libav AVIOContext opaque).
+pub use http_buf::ReadSeek;
+
+/// Synchronous `Read + Seek` adapter over the live HTTP buffer.
+///
+/// Use this to pass an [`http_buf::HttpBuffer`] directly into libav's
+/// `AVIOContext` callbacks (which run on the blocking thread inside
+/// `spawn_blocking`).  Each `read` call is bridged back to the async
+/// paged cache via the tokio handle captured at construction.
+#[cfg(feature = "native")]
+pub use http_buf::SyncHttpReader;
 
 // ── Crate-level constants ─────────────────────────────────────────────────────
 
@@ -75,3 +97,23 @@ pub const TBR_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Baked into the SHA-256 key input so old entries become unreachable without
 /// any schema migration or explicit flush.
 pub const TBR_CACHE_VERSION: u32 = 1;
+
+// ── Runtime builder helpers ───────────────────────────────────────────────────
+
+/// Replace the [`ShortcutLimits`] on an existing [`Runtime`].
+///
+/// Call this in the tier 2 startup hook to relax the conservative tier 1
+/// defaults:
+///
+/// ```ignore
+/// tier1::cli::run_with_hook(|rt| async move {
+///     let rt = tier1::with_renderer(rt, tier2::Tier2Renderer::shared());
+///     tier1::with_shortcut_limits(rt, tier1::ShortcutLimits::TIER2)
+/// }).await;
+/// ```
+pub fn with_shortcut_limits(runtime: std::sync::Arc<Runtime>, limits: ShortcutLimits) -> std::sync::Arc<Runtime> {
+    let mut r = std::sync::Arc::try_unwrap(runtime)
+        .unwrap_or_else(|arc| (*arc).clone());
+    r.shortcut_limits = limits;
+    std::sync::Arc::new(r)
+}

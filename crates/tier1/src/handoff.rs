@@ -14,7 +14,9 @@
 //!
 //! What does NOT travel:
 //! - `runtime`       — each tier constructs its own.
-//! - `http_buf`      — live resource; not serialisable.
+//! - `http_buf`      — live resource; moved via [`ThumbCook::http_take_reader`]
+//!                     on the in-process path, reconnected fresh on the
+//!                     out-of-process (serialised) path.
 //! - `render_image`  — not yet populated at handoff time.
 //! - `tel_*`         — per-tier; each tier tracks its own timing.
 //! - `out_*`         — receiver populates fresh.

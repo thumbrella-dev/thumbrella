@@ -22,8 +22,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::time::Instant;
 
-use image::imageops::FilterType;
-use image::DynamicImage;
+use image::{DynamicImage, imageops::FilterType};
 
 use crate::cook::ThumbCook;
 use crate::http_buf::HttpStream;
@@ -40,9 +39,7 @@ const HEADER_SCAN: usize = 4 * 1024;
 
 /// Tail bytes to fetch for the ZIP container shortcut.
 ///
-/// A single `Range` request for the last `ZIP_TAIL_SIZE` bytes is expected to
-/// capture both the Central Directory and the embedded thumbnail, since office
-/// suites consistently place the preview at the end of the archive.
+/// Tail bytes to fetch for the ZIP container shortcut.
 ///
 /// Sizing rationale (ODT test file):
 /// - Central Directory: 649 bytes from EOF
@@ -50,7 +47,12 @@ const HEADER_SCAN: usize = 4 * 1024;
 /// - 128 KB tail gives ~40 KB margin over the observed minimum, comfortably
 ///   covering LibreOffice thumbnails up to roughly 120 KB (256×256 px, complex
 ///   content).  DOCX thumbnails (JPEG) are much smaller — typically under 50 KB.
-const ZIP_TAIL_SIZE: usize = 128 * 1024;
+///
+/// Tier 1 default is 128 KiB; tier 2 uses 2 MiB to cover larger documents.
+/// The actual value at runtime comes from `cook.runtime.shortcut_limits.zip_tail_size`.
+// ZIP_TAIL_SIZE is now runtime-configurable via
+// cook.runtime.shortcut_limits.zip_tail_size.
+// See spec::ShortcutLimits for tier-specific values.
 
 /// Header bytes for the camera-raw shortcut.
 ///
@@ -71,6 +73,10 @@ const ZIP_THUMB_NAMES: &[&str] = &[
 ];
 
 // ── Progressive JPEG shortcut ─────────────────────────────────────────────────
+
+// MAX_PROGRESSIVE_PIXELS is now runtime-configurable via
+// cook.runtime.shortcut_limits.max_progressive_pixels.
+// See spec::ShortcutLimits for tier-specific values.
 
 /// How many bytes of a progressive JPEG to fetch before attempting a decode.
 ///
@@ -127,6 +133,13 @@ async fn try_progressive_jpeg_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
             Err(_) => return,
         };
         let (w, h) = jpeg_source_dimensions(&header);
+        let pixel_count = w.unwrap_or(0) as u64 * h.unwrap_or(0) as u64;
+        // pixel_count == 0 means we couldn't read the SOF marker (e.g. large
+        // EXIF/ICC blocks push it past HEADER_SCAN).  Don't attempt a partial
+        // decode of an image whose size we cannot verify.
+        if pixel_count == 0 || pixel_count > cook.runtime.shortcut_limits.max_progressive_pixels {
+            return;
+        }
         let target = progressive_partial_read_bytes(w, h);
         (w.unwrap_or(0), h.unwrap_or(0), target)
     };
@@ -163,14 +176,12 @@ async fn try_progressive_jpeg_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     };
     let decode_secs = t_render.elapsed().as_secs_f64();
     let color_type  = img.color();
+    let img         = pre_scale_to_target(img, config.exact_width, config.exact_height);
+    let dl_bytes    = cook.http_bytes_fetched();
 
-    let img = pre_scale_to_target(img, config.exact_width, config.exact_height);
-    let dl_bytes = cook.http_bytes_fetched();
-
-    cook.render_resolution  = Some([src_w, src_h]);
     cook.render_renderer    = Some("shortcut/progressive".into());
     cook.render_handler     = RenderHandler::Builtin;
-    cook.tel_render_secs    = decode_secs;
+    cook.tel_decode_secs    = decode_secs;
     cook.out_download_bytes = dl_bytes;
     if src_w > 0 && src_h > 0 {
         cook.media.properties = Some(image_properties(src_w, src_h, color_type));
@@ -221,7 +232,6 @@ async fn try_exif_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     cook.http_close().await;
 
     let (prop_w, prop_h) = source_dims.unwrap_or((thumb_w, thumb_h));
-    cook.render_resolution  = Some([thumb_w, thumb_h]);
     cook.render_renderer    = Some("shortcut/exif".into());
     cook.render_handler     = RenderHandler::Builtin;
     cook.out_download_bytes = dl_bytes;
@@ -293,7 +303,6 @@ async fn try_raw_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     let img = pre_scale_to_target(img, config.exact_width, config.exact_height);
     cook.http_close().await;
 
-    cook.render_resolution  = Some([thumb_w, thumb_h]);
     cook.render_renderer    = Some("shortcut/tiff".into());
     cook.render_handler     = RenderHandler::Builtin;
     cook.out_download_bytes = dl_bytes;
@@ -326,10 +335,9 @@ async fn try_zip_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
 
     cook.http_close().await;
 
-    cook.render_resolution       = Some([src_w, src_h]);
     cook.render_renderer         = Some("shortcut/zip".into());
     cook.render_handler          = RenderHandler::Builtin;
-    cook.tel_render_secs         = render_secs;
+    cook.tel_decode_secs         = render_secs;
     cook.out_download_bytes      = dl_bytes;
     cook.tel_download_tail_bytes = tail_bytes;
     if src_w > 0 && src_h > 0 {
@@ -347,7 +355,7 @@ async fn zip_extract<S: HttpStream>(
     let accepts_ranges = cook.http_accepts_ranges;
     if !accepts_ranges || file_size < 22 { return None; }
 
-    let tail_size  = (ZIP_TAIL_SIZE as u64).min(file_size) as usize;
+    let tail_size  = (cook.runtime.shortcut_limits.zip_tail_size as u64).min(file_size) as usize;
     let tail_start = file_size - tail_size as u64;
 
     let tail = cook.http_fetch_range(tail_start, tail_size).await.ok()?;
@@ -806,30 +814,124 @@ fn tiff_u32_values(bytes: &[u8], ft: u16, fc: usize, v: usize, little: bool, max
 
 // ── Power-of-two pre-scale ──────────────────────────────────────────────────
 
-/// Reduce a decoded image by the largest power-of-2 factor that keeps both
-/// dimensions ≥ the thumbnail target.
+/// Reduce a decoded image to near the thumbnail target using a two-phase
+/// strategy that balances speed and quality:
 ///
-/// Nearest-neighbour at an exact integer ratio is a lossless box filter —
-/// it collapses 2×2 (or 4×4, …) pixel blocks to their top-left pixel, which
-/// is equivalent to averaging when the source was anti-aliased.  This is a
-/// cheap pre-pass that prevents allocating a multi-megapixel intermediate
-/// inside `ProcessBuffer::fill_crop`.
+/// **Phase 1** — fast 2×2 box-average halvings down to ~2× the target.
+/// Each step averages four source pixels into one, done in-place on the raw
+/// pixel buffer.  The write cursor (`oy*(w/2)+ox`) is always ≤ the first
+/// read cursor (`2*oy*w+2*ox`), so no extra allocation is needed and we
+/// never overwrite source data before it has been read.
 ///
-/// Callers that may receive large images (small-file read, progressive JPEG)
-/// call this before handing the image to `ProcessBuffer`.  The encode pipeline itself
-/// (`ProcessBuffer`) does not pre-scale — it assumes the input is already
-/// close to the target size.
+/// **Phase 2** — Triangle filter for the remaining ≤2× step.
+/// At ≤2× the Triangle kernel is small, so cost is low, but the quality
+/// improvement over a final nearest-neighbour step is substantial.
 fn pre_scale_to_target(img: DynamicImage, target_w: u32, target_h: u32) -> DynamicImage {
     let (w, h) = (img.width(), img.height());
     let (tw, th) = (target_w.max(1), target_h.max(1));
+
+    // Phase 1: in-place 2×2 box-average halvings down to ≈2× target.
     let mut divisor = 1u32;
     loop {
         let next = divisor * 2;
-        if w / next >= tw && h / next >= th { divisor = next; } else { break; }
+        if w / next >= tw * 2 && h / next >= th * 2 { divisor = next; } else { break; }
     }
-    if divisor <= 1 { return img; }
-    img.resize_exact(w / divisor, h / divisor, FilterType::Nearest)
+    let img = if divisor > 1 {
+        let steps = divisor.trailing_zeros();
+        let mut img = img;
+        for _ in 0..steps { img = box_half(img); }
+        img
+    } else {
+        img
+    };
+
+    // Phase 2: Triangle filter for the ≤2× remainder.
+    let (sw, sh) = (img.width(), img.height());
+    let scale = (tw as f32 / sw as f32).max(th as f32 / sh as f32);
+    if scale >= 1.0 {
+        return img; // already at or below target size
+    }
+    let out_w = ((sw as f32 * scale).ceil() as u32).max(tw);
+    let out_h = ((sh as f32 * scale).ceil() as u32).max(th);
+    img.resize_exact(out_w, out_h, FilterType::Triangle)
 }
+
+/// Halve an image in both dimensions by averaging each 2×2 block of pixels.
+///
+/// Operates in-place on the raw pixel buffer: the output pixel at `(ox, oy)`
+/// is always written to a buffer position ≤ the first source pixel it reads
+/// (`oy*(w/2)+ox ≤ 2*oy*w+2*ox`), so source data is never overwritten before
+/// it has been consumed.
+///
+/// Odd dimensions are truncated (last row/column dropped) — acceptable for a
+/// pre-scale pass where the final fill_crop will trim any small error.
+fn box_half(img: DynamicImage) -> DynamicImage {
+    use image::{GrayImage, RgbImage, RgbaImage};
+
+    let (w, h) = (img.width(), img.height());
+    let ow = w / 2;
+    let oh = h / 2;
+    if ow == 0 || oh == 0 { return img; }
+
+    // Luma8 — 1 byte/pixel
+    if matches!(img, DynamicImage::ImageLuma8(_)) {
+        let mut buf = img.into_luma8().into_raw();
+        let stride = w as usize;
+        for oy in 0..oh as usize {
+            let row0 = oy * 2 * stride;
+            let row1 = row0 + stride;
+            let dst  = oy * ow as usize;
+            for ox in 0..ow as usize {
+                let sx = ox * 2;
+                buf[dst + ox] = ((buf[row0+sx] as u16 + buf[row0+sx+1] as u16
+                                + buf[row1+sx] as u16 + buf[row1+sx+1] as u16 + 2) >> 2) as u8;
+            }
+        }
+        buf.truncate((ow * oh) as usize);
+        return DynamicImage::ImageLuma8(GrayImage::from_raw(ow, oh, buf).unwrap());
+    }
+
+    // RGBA8 — 4 bytes/pixel
+    if img.color().has_alpha() {
+        let mut buf = img.into_rgba8().into_raw();
+        let stride = (w * 4) as usize;
+        for oy in 0..oh as usize {
+            let row0 = oy * 2 * stride;
+            let row1 = row0 + stride;
+            let dst  = oy * ow as usize * 4;
+            for ox in 0..ow as usize {
+                let sx = ox * 8; // ox * 2 pixels * 4 channels
+                for c in 0..4usize {
+                    buf[dst + ox*4 + c] = ((buf[row0+sx+c]   as u16 + buf[row0+sx+4+c] as u16
+                                          + buf[row1+sx+c]   as u16 + buf[row1+sx+4+c] as u16
+                                          + 2) >> 2) as u8;
+                }
+            }
+        }
+        buf.truncate((ow * oh * 4) as usize);
+        return DynamicImage::ImageRgba8(RgbaImage::from_raw(ow, oh, buf).unwrap());
+    }
+
+    // RGB8 — 3 bytes/pixel (most photos land here)
+    let mut buf = img.into_rgb8().into_raw();
+    let stride = (w * 3) as usize;
+    for oy in 0..oh as usize {
+        let row0 = oy * 2 * stride;
+        let row1 = row0 + stride;
+        let dst  = oy * ow as usize * 3;
+        for ox in 0..ow as usize {
+            let sx = ox * 6; // ox * 2 pixels * 3 channels
+            for c in 0..3usize {
+                buf[dst + ox*3 + c] = ((buf[row0+sx+c]   as u16 + buf[row0+sx+3+c] as u16
+                                      + buf[row1+sx+c]   as u16 + buf[row1+sx+3+c] as u16
+                                      + 2) >> 2) as u8;
+            }
+        }
+    }
+    buf.truncate((ow * oh * 3) as usize);
+    DynamicImage::ImageRgb8(RgbImage::from_raw(ow, oh, buf).unwrap())
+}
+
 
 /// Build the `properties` JSON object for a decoded image.
 ///
@@ -864,8 +966,9 @@ fn read_u32(buf: &[u8], off: usize, little: bool) -> Option<u32> {
 
 // ── Public pipeline step (merged) ────────────────────────────────────────────
 
-/// Size gate: read the whole file when it is this small.
-const SMALL_FILE_THRESHOLD: u64 = 80 * 1024;
+// SMALL_FILE_THRESHOLD is now runtime-configurable via
+// cook.runtime.shortcut_limits.small_file_threshold.
+// See spec::ShortcutLimits for tier-specific values.
 
 /// Try to produce a thumbnail without a full upstream decode.
 ///
@@ -891,9 +994,17 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     //
     // `inspect` has already classified the file; trust its verdict.
     // Covers JPEG, PNG, GIF, BMP, WebP, TIFF, ICO, … without any byte sniffing.
+    //
+    // Exclude formats that require libav (HEIC, HEIF, AVIF, EXR, HDR) — they
+    // are classified as `FileKind::Image` but `image::load_from_memory` cannot
+    // decode them.  If we entered streaming mode and consumed the bytes here,
+    // the connection would be at EOF when tier 2 tries `take_reader()` for libav.
+    let ext = cook.media.extension.as_deref().unwrap_or("");
+    let is_image_crate_format = !matches!(ext, "heic" | "heif" | "avif" | "exr" | "hdr");
     let is_small_image = cook.media.kind == Some(FileKind::Image)
+        && is_image_crate_format
         && cook.http_stream_len()
-            .map(|n| n <= SMALL_FILE_THRESHOLD)
+            .map(|n| n <= cook.runtime.shortcut_limits.small_file_threshold)
             .unwrap_or(false);
 
     if is_small_image {
@@ -924,7 +1035,6 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
 
                 let img = pre_scale_to_target(img, config.exact_width, config.exact_height);
 
-                cook.render_resolution = Some([src_w, src_h]);
                 cook.render_renderer   = Some("shortcut/small".into());
                 cook.render_handler    = RenderHandler::Builtin;
                 cook.out_download_bytes = dl_bytes;

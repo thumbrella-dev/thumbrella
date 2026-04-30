@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use image;
 use crate::cache::{self, CacheStore};
 use crate::config::AppConfig;
 use crate::cook::Runtime;
@@ -57,5 +58,24 @@ pub async fn startup(cfg: &AppConfig) -> Arc<Runtime> {
     // and log a warning if the response is not 200.
 
     tracing::debug!("startup: complete");
-    Runtime::new(cache, trace, cfg.server.clone())
+
+    // ── 5. Background image ───────────────────────────────────────────────────
+    static BG_PNG: &[u8] = include_bytes!("../assets/background.png");
+    let background_image = image::load_from_memory(BG_PNG)
+        .ok()
+        .map(|img| img.into_rgb8());
+    if background_image.is_some() {
+        tracing::debug!("startup: background image loaded");
+    } else {
+        tracing::warn!("startup: failed to decode background.png — transparency will use solid colour");
+    }
+
+    // ── 6. Placeholder images ─────────────────────────────────────────────────
+    static PH_GENERAL_JPG: &[u8] = include_bytes!("../assets/placeholder_general.jpg");
+    static PH_ERROR_JPG:   &[u8] = include_bytes!("../assets/placeholder_error.jpg");
+
+    let placeholder_general = PH_GENERAL_JPG.to_vec();
+    let placeholder_error   = PH_ERROR_JPG.to_vec();
+
+    Runtime::new(cache, trace, cfg.server.clone(), background_image, placeholder_general, placeholder_error)
 }
