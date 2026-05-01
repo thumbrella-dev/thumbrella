@@ -570,12 +570,31 @@ impl HttpStream for ReqwestStream {
         if let Some(path) = url.strip_prefix("file://") {
             return match std::fs::read(path) {
                 Ok(data) => {
+                    // Parse a `Range: bytes=start-end` header if present so
+                    // callers like `fetch_range` receive only the requested
+                    // slice.  This makes file:// behave like a range-capable
+                    // HTTP server, letting the ZIP shortcut and tail-fetch
+                    // paths work for local files.
+                    let range_start: usize = options.headers.iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case("range"))
+                        .and_then(|(_, v)| v.strip_prefix("bytes="))
+                        .and_then(|r| r.split('-').next())
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
+                    let sliced = if range_start > 0 && range_start < data.len() {
+                        data[range_start..].to_vec()
+                    } else {
+                        data
+                    };
                     let mut headers = HashMap::new();
-                    headers.insert("content-length".to_string(), data.len().to_string());
+                    headers.insert("content-length".to_string(), sliced.len().to_string());
+                    // Advertise range support so the ZIP shortcut and other
+                    // range-fetching paths are enabled for file:// URLs.
+                    headers.insert("accept-ranges".to_string(), "bytes".to_string());
                     Ok(Self {
-                        status: 200,
+                        status: if range_start > 0 { 206 } else { 200 },
                         headers,
-                        inner: ReqwestStreamInner::File { data, pos: 0 },
+                        inner: ReqwestStreamInner::File { data: sliced, pos: 0 },
                     })
                 }
                 Err(e) => {

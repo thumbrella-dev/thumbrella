@@ -11,16 +11,12 @@
 //! | `TBR_PORT`                 | 8000    | HTTP listener port                               |
 //! | `TBR_SERVER`               | —       | Short server/colo identifier for traces          |
 //! | `TBR_DEVELOPER_MODE`       | false   | Verbose debug output in API responses            |
-//! | `TBR_TIER2_URL`            | —       | Handoff URL for tier-2 rendering                 |
-//! | `TBR_TIER3_URL`            | —       | Handoff URL for tier-3 rendering                 |
+//! | `TBR_TIER2`                | —       | Tier-2 URL with optional `#code` handoff secret  |
+//! | `TBR_TIER3`                | —       | Tier-3 URL with optional `#code` handoff secret  |
+//! | `TBR_HANDOFF`              | —       | Shared secret this server accepts on `/handoff`  |
 //! | `TBR_CACHE`                | —       | Cache backend DSN — `sqlite:<path>`, …          |
 //! | `TBR_CACHE_MAX_ITEMS`      | —       | Max cache entries (backend-specific meaning)     |
 //! | `TBR_TRACE`                | —       | Trace sink DSN — `ndjson:<path>`, …             |
-//! | `TBR_CUSTOMER_TOKEN`       | —       | Customer API token for paid/hosted builds        |
-//! | `TBR_ACCOUNT_ID`           | —       | Customer account identifier (billing/quota)      |
-//! | `TBR_DOWNLOAD_CONCURRENCY` | —       | Max simultaneous upstream downloads              |
-//! | `TBR_TIER2_CONCURRENCY`    | —       | Max simultaneous tier-2 handoff requests         |
-//! | `TBR_TIER3_CONCURRENCY`    | —       | Max simultaneous tier-3 handoff requests         |
 
 // ── AppConfig ─────────────────────────────────────────────────────────────────
 
@@ -42,10 +38,17 @@ pub struct AppConfig {
     pub developer_mode: bool,
 
     // ── Handoff tiers ─────────────────────────────────────────────────────────
-    /// URL of the tier-2 handoff server (`TBR_TIER2_URL`).
+    /// URL of the tier-2 handoff server (`TBR_TIER2`).
     pub tier2_url: Option<String>,
-    /// URL of the tier-3 handoff server (`TBR_TIER3_URL`).
+    /// Optional per-tier handoff code parsed from `TBR_TIER2` URL fragment.
+    pub tier2_code: Option<String>,
+    /// URL of the tier-3 handoff server (`TBR_TIER3`).
     pub tier3_url: Option<String>,
+    /// Optional per-tier handoff code parsed from `TBR_TIER3` URL fragment.
+    pub tier3_code: Option<String>,
+    /// Shared secret accepted in `x-tbr-handoff-code` for `/handoff` calls.
+    /// If `None`, this server does not accept handoff requests.
+    pub handoff_accept: Option<String>,
 
     // ── Cache ────────────────────────────────────────────────────────────────
     /// Cache backend DSN (`TBR_CACHE`).  Scheme determines backend type:
@@ -59,20 +62,6 @@ pub struct AppConfig {
     /// `ndjson:<path>`, etc.  `None` disables trace logging.
     pub trace_url: Option<String>,
 
-    // ── Account / auth ────────────────────────────────────────────────────────
-    /// Customer API token for paid/hosted builds (`TBR_CUSTOMER_TOKEN`).
-    /// Required when billing or quota enforcement is active; optional otherwise.
-    pub customer_token: Option<String>,
-    /// Customer account identifier for billing and quota attribution (`TBR_ACCOUNT_ID`).
-    pub account_id: Option<String>,
-
-    // ── Concurrency limits ────────────────────────────────────────────────────
-    /// Max simultaneous upstream source downloads (`TBR_DOWNLOAD_CONCURRENCY`).
-    pub download_concurrency: Option<u32>,
-    /// Max simultaneous tier-2 handoff requests in flight (`TBR_TIER2_CONCURRENCY`).
-    pub tier2_concurrency: Option<u32>,
-    /// Max simultaneous tier-3 handoff requests in flight (`TBR_TIER3_CONCURRENCY`).
-    pub tier3_concurrency: Option<u32>,
 }
 
 impl Default for AppConfig {
@@ -82,15 +71,13 @@ impl Default for AppConfig {
             server: None,
             developer_mode: false,
             tier2_url: None,
+            tier2_code: None,
             tier3_url: None,
+            tier3_code: None,
+            handoff_accept: None,
             cache_url: None,
             cache_max_items: None,
             trace_url: None,
-            customer_token: None,
-            account_id: None,
-            download_concurrency: None,
-            tier2_concurrency: None,
-            tier3_concurrency: None,
         }
     }
 }
@@ -98,20 +85,20 @@ impl Default for AppConfig {
 impl AppConfig {
     /// Build config from environment variables, falling back to defaults.
     pub fn from_env() -> Self {
+        let (tier2_url, tier2_code) = parse_handoff_target(env_opt_string("TBR_TIER2"));
+        let (tier3_url, tier3_code) = parse_handoff_target(env_opt_string("TBR_TIER3"));
         Self {
             port:                 env_u16("TBR_PORT", 8000),
             server:               std::env::var("TBR_SERVER").ok(),
             developer_mode:       env_bool("TBR_DEVELOPER_MODE", false),
-            tier2_url:            std::env::var("TBR_TIER2_URL").ok(),
-            tier3_url:            std::env::var("TBR_TIER3_URL").ok(),
+            tier2_url,
+            tier2_code,
+            tier3_url,
+            tier3_code,
+            handoff_accept:       env_opt_string("TBR_HANDOFF"),
             cache_url:            std::env::var("TBR_CACHE").ok(),
             cache_max_items:      env_opt_u32("TBR_CACHE_MAX_ITEMS"),
             trace_url:            std::env::var("TBR_TRACE").ok(),
-            customer_token:       std::env::var("TBR_CUSTOMER_TOKEN").ok(),
-            account_id:           std::env::var("TBR_ACCOUNT_ID").ok(),
-            download_concurrency: env_opt_u32("TBR_DOWNLOAD_CONCURRENCY"),
-            tier2_concurrency:    env_opt_u32("TBR_TIER2_CONCURRENCY"),
-            tier3_concurrency:    env_opt_u32("TBR_TIER3_CONCURRENCY"),
         }
     }
 }
@@ -135,4 +122,19 @@ fn env_bool(name: &str, default: bool) -> bool {
 
 fn env_opt_u32(name: &str) -> Option<u32> {
     std::env::var(name).ok().and_then(|v| v.parse().ok())
+}
+
+fn env_opt_string(name: &str) -> Option<String> {
+    std::env::var(name).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+fn parse_handoff_target(raw: Option<String>) -> (Option<String>, Option<String>) {
+    let Some(raw) = raw else { return (None, None); };
+    let (base, code) = match raw.split_once('#') {
+        Some((u, c)) => (u.trim(), Some(c.trim())),
+        None => (raw.trim(), None),
+    };
+    let url = if base.is_empty() { None } else { Some(base.to_string()) };
+    let code = code.and_then(|c| if c.is_empty() { None } else { Some(c.to_string()) });
+    (url, code)
 }

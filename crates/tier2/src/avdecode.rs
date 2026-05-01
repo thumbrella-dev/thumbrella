@@ -306,21 +306,63 @@ unsafe fn decode_inner(
     }
 
     // ── Find video / image stream ─────────────────────────────────────────────
+    // Pick the best stream using a two-level heuristic:
+    //
+    // 1. **Standalone vs. grid tile** — HEIC/HEIF grid images expose each tile
+    //    as a separate video stream (e.g. 60 streams of 512×512 for a 4K grid).
+    //    A standalone representative thumbnail has unique dimensions that appear
+    //    only once.  When ≥4 streams share the same (w,h), the "dominant" size
+    //    is almost certainly a set of grid tiles; any stream with unique dims is
+    //    a whole-image thumbnail and is strongly preferred.
+    //
+    // 2. **Largest area** — among streams in the same preference tier (both
+    //    standalone, or both tile), pick the one with the most pixels.
+    //    This selects the primary track for ordinary video / MOV files.
     let nb = (**fmt_ctx).nb_streams as usize;
     eprintln!("[avdecode] {} stream(s) found", nb);
-    let mut stream_idx: i32 = -1;
+
+    // Count how many video streams share each (w, h).
+    let mut dim_freq: std::collections::HashMap<(i32, i32), usize> =
+        std::collections::HashMap::new();
     for i in 0..nb {
         let st = *(**fmt_ctx).streams.add(i);
         if (*(*st).codecpar).codec_type == AVMediaType::AVMEDIA_TYPE_VIDEO {
-            stream_idx = i as i32;
-            break;
+            let w = (*(*st).codecpar).width;
+            let h = (*(*st).codecpar).height;
+            *dim_freq.entry((w, h)).or_insert(0) += 1;
+        }
+    }
+    let max_freq = dim_freq.values().copied().max().unwrap_or(0);
+
+    // Score: (is_standalone, area). Tuple comparison naturally prefers
+    // standalone (true > false), then largest area within the same tier.
+    let mut stream_idx: i32 = -1;
+    let mut best_score: (bool, i64) = (false, -1);
+    for i in 0..nb {
+        let st = *(**fmt_ctx).streams.add(i);
+        if (*(*st).codecpar).codec_type == AVMediaType::AVMEDIA_TYPE_VIDEO {
+            let w = (*(*st).codecpar).width;
+            let h = (*(*st).codecpar).height;
+            let freq  = *dim_freq.get(&(w, h)).unwrap_or(&1);
+            let area  = w as i64 * h as i64;
+            // Only promote as "standalone" when there is a clear dominant
+            // repeated-size group (grid tiles); otherwise all streams compete
+            // on area alone.
+            let is_standalone = max_freq >= 4 && freq == 1;
+            let score = (is_standalone, area);
+            if score > best_score {
+                best_score = score;
+                stream_idx = i as i32;
+            }
         }
     }
     if stream_idx < 0 {
         eprintln!("[avdecode] FAIL: no video/image stream found among {nb} streams");
         return None;
     }
-    eprintln!("[avdecode] using stream {stream_idx}");
+    let (standalone_flag, best_area) = best_score;
+    eprintln!("[avdecode] using stream {stream_idx} (area={best_area} standalone={standalone_flag})");
+
 
     let stream    = *(**fmt_ctx).streams.add(stream_idx as usize);
     let codecpar  = (*stream).codecpar;
@@ -429,9 +471,19 @@ unsafe fn decode_inner(
     };
     eprintln!("[avdecode] decoded frame {frame_w}x{frame_h}  rotation={rotation_degrees}°");
 
-    // ── Scale to canonical output size (RGB24) ────────────────────────────────
-    let out_w = ThumbnailConfig::CANONICAL.exact_width  as c_int;
-    let out_h = ThumbnailConfig::CANONICAL.exact_height as c_int;
+    // ── Scale to cover the canonical thumbnail size (RGB24) ─────────────────
+    // Scale so that both dimensions are ≥ the canonical target while
+    // preserving aspect ratio.  deliver's fill_crop() handles the final
+    // center-crop; scaling to exactly 250×200 here would squish the image.
+    let target_w = ThumbnailConfig::CANONICAL.exact_width  as c_int;
+    let target_h = ThumbnailConfig::CANONICAL.exact_height as c_int;
+    let (out_w, out_h) = {
+        let scale = (target_w as f64 / frame_w as f64)
+            .max(target_h as f64 / frame_h as f64);
+        let sw = ((frame_w as f64 * scale).round() as c_int).max(1);
+        let sh = ((frame_h as f64 * scale).round() as c_int).max(1);
+        (sw, sh)
+    };
 
     *sws_ctx = sws_getContext(
         frame_w, frame_h, frame_fmt,

@@ -120,22 +120,6 @@ pub struct FileCheck {
     pub sqlite_validation: Option<Validation>,
 }
 
-// ── Concurrent-limit snapshot ─────────────────────────────────────────────────
-
-/// Configured concurrency limits for a tier.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConcurrencyLimits {
-    /// Global cap across all requests on this server instance.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub global: Option<u32>,
-    /// Per-upstream-host cap.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub per_host: Option<u32>,
-    /// Per-customer-account cap (only applicable on private deployments).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub per_account: Option<u32>,
-}
-
 // ── DiagReport ────────────────────────────────────────────────────────────────
 
 /// Full server diagnostic report.
@@ -173,17 +157,13 @@ pub struct DiagReport {
     /// uses a file-backed scheme such as `ndjson:`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_file_check: Option<FileCheck>,
-    /// Whether a customer token is configured.  The token value is never
-    /// included in the report — only its presence is recorded.
-    pub customer_token_set: bool,
+    /// Whether this server accepts handoff requests (`TBR_HANDOFF`).
+    pub handoff_accept_set: bool,
+
 
     // ── Tier 1 ────────────────────────────────────────────────────────────────
     /// Tier 1 is always builtin — this field is informational only.
     pub tier1: TierStatus,
-    /// Tier 1 download concurrency limits.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tier1_concurrency: Option<ConcurrencyLimits>,
-
     // ── Tier 2 ────────────────────────────────────────────────────────────────
     pub tier2: TierStatus,
     /// Handoff URL or DSN, if configured.
@@ -191,8 +171,6 @@ pub struct DiagReport {
     pub tier2_handoff: Option<String>,
     /// Validation result for the tier 2 handoff target.
     pub tier2_validation: Validation,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tier2_concurrency: Option<ConcurrencyLimits>,
 
     // ── Tier 3 ────────────────────────────────────────────────────────────────
     pub tier3: TierStatus,
@@ -201,8 +179,6 @@ pub struct DiagReport {
     pub tier3_handoff: Option<String>,
     /// Validation result for the tier 3 handoff target.
     pub tier3_validation: Validation,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tier3_concurrency: Option<ConcurrencyLimits>,
 
     // ── Cache ─────────────────────────────────────────────────────────────────
     /// Human-readable summary of the cache configuration (backends, TTLs, …).
@@ -214,13 +190,6 @@ pub struct DiagReport {
     /// uses a file-backed scheme such as `sqlite:`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_file_check: Option<FileCheck>,
-
-    // ── Account ───────────────────────────────────────────────────────────────
-    /// Customer account identifier this deployment is running under.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub account: Option<String>,
-    /// Validation result for account credentials / API key.
-    pub account_validation: Validation,
 
     // ── Overall ───────────────────────────────────────────────────────────────
     /// `true` if every required component passed validation.
@@ -254,26 +223,15 @@ pub struct DiagReport {
 pub fn collect(cfg: &crate::config::AppConfig) -> DiagReport {
     // Tier 2
     let (tier2, tier2_handoff, tier2_validation) = match cfg.tier2_url.as_ref() {
-        Some(url) => (TierStatus::Handoff, Some(url.clone()), Validation::skipped()),
+        Some(url) => (TierStatus::Handoff, Some(url.clone()), validate_handoff_target(url, cfg.tier2_code.as_deref())),
         None      => (TierStatus::Missing, None,              Validation::not_configured()),
     };
-    let tier2_concurrency = cfg.tier2_concurrency.map(|n| ConcurrencyLimits {
-        global: Some(n), per_host: None, per_account: None,
-    });
 
     // Tier 3
     let (tier3, tier3_handoff, tier3_validation) = match cfg.tier3_url.as_ref() {
-        Some(url) => (TierStatus::Handoff, Some(url.clone()), Validation::skipped()),
+        Some(url) => (TierStatus::Handoff, Some(url.clone()), validate_handoff_target(url, cfg.tier3_code.as_deref())),
         None      => (TierStatus::Missing, None,              Validation::not_configured()),
     };
-    let tier3_concurrency = cfg.tier3_concurrency.map(|n| ConcurrencyLimits {
-        global: Some(n), per_host: None, per_account: None,
-    });
-
-    // Tier 1 download concurrency
-    let tier1_concurrency = cfg.download_concurrency.map(|n| ConcurrencyLimits {
-        global: Some(n), per_host: None, per_account: None,
-    });
 
     // Cache
     let (cache_config, cache_validation, cache_file_check) = match cfg.cache_url.as_ref() {
@@ -286,18 +244,6 @@ pub fn collect(cfg: &crate::config::AppConfig) -> DiagReport {
             (Some(desc), validation, file_check)
         }
         None => (None, Validation::not_configured(), None),
-    };
-
-    // Account / token
-    let (account, account_validation) = match cfg.account_id.as_ref() {
-        Some(id) => (Some(id.clone()), Validation::skipped()), // TODO: verify token
-        None     => (None, Validation::not_configured()),
-    };
-    // customer_token present without account_id is a misconfiguration
-    let account_validation = if cfg.customer_token.is_some() && cfg.account_id.is_none() {
-        Validation::error("TBR_CUSTOMER_TOKEN is set but TBR_ACCOUNT_ID is missing")
-    } else {
-        account_validation
     };
 
     let build_timestamp = option_env!("TBR_BUILD_TIMESTAMP").map(str::to_owned);
@@ -320,9 +266,10 @@ pub fn collect(cfg: &crate::config::AppConfig) -> DiagReport {
 
     let healthy = !matches!(tier2, TierStatus::Error)
         && !matches!(tier3, TierStatus::Error)
+        && !matches!(tier2_validation.status, ValidationStatus::Error)
+        && !matches!(tier3_validation.status, ValidationStatus::Error)
         && !matches!(cache_validation.status, ValidationStatus::Error)
         && !matches!(trace_validation.status, ValidationStatus::Error)
-        && !matches!(account_validation.status, ValidationStatus::Error)
         && port_available
         && cache_file_check.as_ref()
             .and_then(|fc| fc.sqlite_validation.as_ref())
@@ -340,22 +287,17 @@ pub fn collect(cfg: &crate::config::AppConfig) -> DiagReport {
         trace_url,
         trace_validation,
         trace_file_check,
-        customer_token_set: cfg.customer_token.is_some(),
+        handoff_accept_set: cfg.handoff_accept.is_some(),
         tier1: TierStatus::Builtin,
-        tier1_concurrency,
         tier2,
         tier2_handoff,
         tier2_validation,
-        tier2_concurrency,
         tier3,
         tier3_handoff,
         tier3_validation,
-        tier3_concurrency,
         cache_config,
         cache_validation,
         cache_file_check,
-        account,
-        account_validation,
         healthy,
         container_image,
     }
@@ -534,13 +476,13 @@ impl DiagReport {
         if let Some(ref fc) = self.trace_file_check {
             print_file_check("trace_file", fc);
         }
-        println!("  customer_token  : {}", if self.customer_token_set { "set" } else { "—" });
+        println!("  handoff_accept  : {}", if self.handoff_accept_set { "set" } else { "—" });
         println!();
 
         println!("Tiers");
-        print_tier("tier1", &self.tier1, None, &Validation::ok(), self.tier1_concurrency.as_ref());
-        print_tier("tier2", &self.tier2, self.tier2_handoff.as_deref(), &self.tier2_validation, self.tier2_concurrency.as_ref());
-        print_tier("tier3", &self.tier3, self.tier3_handoff.as_deref(), &self.tier3_validation, self.tier3_concurrency.as_ref());
+        print_tier("tier1", &self.tier1, None, &Validation::ok());
+        print_tier("tier2", &self.tier2, self.tier2_handoff.as_deref(), &self.tier2_validation);
+        print_tier("tier3", &self.tier3, self.tier3_handoff.as_deref(), &self.tier3_validation);
         println!();
 
         println!("Cache");
@@ -554,17 +496,48 @@ impl DiagReport {
         }
         println!();
 
-        println!("Account");
-        println!("  id              : {}", self.account.as_deref().unwrap_or("—"));
-        print_validation("  validation", &self.account_validation);
-        println!();
-
         let status = if self.healthy { "OK ✓" } else { "DEGRADED ✗" };
         println!("Overall: {status}");
     }
 }
 
-fn print_tier(label: &str, status: &TierStatus, handoff: Option<&str>, validation: &Validation, concurrency: Option<&ConcurrencyLimits>) {
+/// Validate an external handoff target URL and local handoff secret config.
+#[cfg(feature = "native")]
+fn validate_handoff_target(url: &str, handoff_code: Option<&str>) -> Validation {
+    use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+    use std::time::Duration;
+
+    if handoff_code.is_none() {
+        return Validation::error("missing handoff code fragment in tier URL (expected .../#code)");
+    }
+
+    let parsed = match reqwest::Url::parse(url) {
+        Ok(u) => u,
+        Err(e) => return Validation::error(format!("invalid handoff URL: {e}")),
+    };
+    let host = match parsed.host_str() {
+        Some(h) => h,
+        None => return Validation::error("handoff URL has no host"),
+    };
+    let port = match parsed.port_or_known_default() {
+        Some(p) => p,
+        None => return Validation::error("handoff URL has no usable port"),
+    };
+
+    let addr: SocketAddr = match (host, port).to_socket_addrs() {
+        Ok(mut addrs) => match addrs.next() {
+            Some(a) => a,
+            None => return Validation::error("handoff host resolved to no addresses"),
+        },
+        Err(e) => return Validation::error(format!("handoff DNS resolve failed: {e}")),
+    };
+
+    match TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
+        Ok(_) => Validation::ok(),
+        Err(e) => Validation::error(format!("handoff target unreachable ({host}:{port}): {e}")),
+    }
+}
+fn print_tier(label: &str, status: &TierStatus, handoff: Option<&str>, validation: &Validation) {
     let status_str = match status {
         TierStatus::Builtin  => "builtin",
         TierStatus::Handoff  => "handoff",
@@ -574,11 +547,6 @@ fn print_tier(label: &str, status: &TierStatus, handoff: Option<&str>, validatio
     println!("  {label:<16}: {status_str}");
     if let Some(url) = handoff {
         println!("    handoff       : {url}");
-    }
-    if let Some(c) = concurrency {
-        if let Some(n) = c.global {
-            println!("    concurrency   : {n}");
-        }
     }
     print_validation(&format!("    validation  "), validation);
 }

@@ -1967,6 +1967,7 @@ dependencies = [
  "ffmpeg-next",
  "ffmpeg-sys-next",
  "image",
+ "jpeg-decoder",
  "reqwest",
  "serde_json",
  "tier1",

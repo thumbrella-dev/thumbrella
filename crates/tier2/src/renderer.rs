@@ -155,14 +155,20 @@ fn extract_raw_preview(
     }
     eprintln!("[tier2] raw_preview: {} bytes JPEG @ offset {}", jpeg_bytes.len(), jpeg_off);
 
-    let orientation = exif_orientation(&jpeg_bytes);
     let img = match image::load_from_memory(&jpeg_bytes) {
         Ok(i) => i,
         Err(_) => return Err(reader),
     };
     let (src_w, src_h) = img.dimensions();
     let depth = img.color().bits_per_pixel();
-    let img = apply_exif_orientation(img, orientation);
+
+    // Do not apply EXIF orientation for raw-container previews.
+    //
+    // Many DNG/RAW files embed a JPEG preview that is already physically
+    // oriented for display while still carrying a copied orientation tag
+    // from the parent container. Applying EXIF here can double-rotate the
+    // preview (commonly +90°). For raw previews we treat decoded pixels as
+    // display-ready and skip orientation transforms.
     let cfg = ThumbnailConfig::CANONICAL;
     let img = pre_scale(img, cfg.exact_width, cfg.exact_height);
 
@@ -253,7 +259,7 @@ async fn render_image(
 
     let result = if is_image_crate_format(ext) {
         tokio::task::spawn_blocking(move || {
-            collect_and_decode_image_crate(reader, content_length)
+            collect_and_decode_image_crate(reader, content_length, &ext_owned)
         })
         .await
         .ok()
@@ -305,7 +311,7 @@ async fn render_image_fallback(
     let cl = Some(bytes.len() as u64);
     let result = if is_image_crate_format(ext) {
         tokio::task::spawn_blocking(move || {
-            collect_and_decode_image_crate(Box::new(Cursor::new(bytes)) as Box<dyn ReadSeek + Send>, cl)
+            collect_and_decode_image_crate(Box::new(Cursor::new(bytes)) as Box<dyn ReadSeek + Send>, cl, &ext_owned)
         })
         .await
         .ok()
@@ -325,28 +331,49 @@ async fn render_image_fallback(
 
 /// Drain `reader` via `read_to_end`, then decode with the `image` crate.
 /// Runs inside `spawn_blocking` — blocking I/O is expected.
+///
+/// For JPEG sources, [`decode_jpeg_dct`] is tried first: it uses the
+/// `jpeg-decoder` crate's DCT-level power-of-two downscaling to avoid
+/// decoding the full-resolution pixel buffer when only a small thumbnail
+/// is needed.  For a 12 MP source image this typically reduces the number
+/// of pixels decoded by 64× (1/8 scale) before any software resize.
 fn collect_and_decode_image_crate(
     mut reader: Box<dyn ReadSeek + Send>,
     content_length: Option<u64>,
+    ext: &str,
 ) -> Option<RenderOutput> {
     use image::GenericImageView;
 
     let mut bytes = Vec::with_capacity(content_length.unwrap_or(65536) as usize);
     std::io::Read::read_to_end(&mut reader, &mut bytes).ok()?;
-    eprintln!("[tier2] collect_and_decode_image_crate: {} bytes", bytes.len());
+    eprintln!("[tier2] collect_and_decode_image_crate: {} bytes  ext={}", bytes.len(), ext);
 
     // Read EXIF orientation before decoding — the `image` crate does not
     // apply it automatically.
     let orientation = exif_orientation(&bytes);
 
-    let img = image::load_from_memory(&bytes).ok()?;
-    let (src_w, src_h) = img.dimensions();
-    let depth = img.color().bits_per_pixel();
+    let cfg = ThumbnailConfig::CANONICAL;
+
+    // For JPEG, attempt a fast DCT-downscaled decode first.
+    let (img, src_w, src_h, depth) = if matches!(ext, "jpeg" | "jpg") {
+        match decode_jpeg_dct(&bytes, cfg.exact_width as u16, cfg.exact_height as u16) {
+            Some(t) => t,
+            None => {
+                let img = image::load_from_memory(&bytes).ok()?;
+                let (w, h) = img.dimensions();
+                let d = img.color().bits_per_pixel() as u32;
+                (img, w, h, d)
+            }
+        }
+    } else {
+        let img = image::load_from_memory(&bytes).ok()?;
+        let (w, h) = img.dimensions();
+        let d = img.color().bits_per_pixel() as u32;
+        (img, w, h, d)
+    };
 
     // Apply EXIF orientation correction.
     let img = apply_exif_orientation(img, orientation);
-
-    let cfg = ThumbnailConfig::CANONICAL;
     let img = pre_scale(img, cfg.exact_width, cfg.exact_height);
 
     Some(RenderOutput {
@@ -356,6 +383,80 @@ fn collect_and_decode_image_crate(
         video_seek_secs: None,
         properties: Some(serde_json::json!({ "width": src_w, "height": src_h, "depth": depth })),
     })
+}
+
+/// Decode a JPEG using DCT power-of-two downscaling.
+///
+/// Requests the smallest DCT scale factor that still produces an output
+/// at least `req_w × req_h` pixels in both dimensions, then returns a
+/// `DynamicImage` along with the *original* source dimensions and bit depth.
+///
+/// Returns `None` when the image is already close to the target size (no
+/// scaling benefit) or when `jpeg-decoder` cannot parse the data, so the
+/// caller can fall back to `image::load_from_memory`.
+fn decode_jpeg_dct(
+    bytes: &[u8],
+    req_w: u16,
+    req_h: u16,
+) -> Option<(DynamicImage, u32, u32, u32)> {
+    use jpeg_decoder::PixelFormat;
+    use std::io::Cursor;
+
+    let mut dec = jpeg_decoder::Decoder::new(Cursor::new(bytes));
+    dec.read_info().ok()?;
+    let orig_info = dec.info()?;
+    let src_w  = orig_info.width  as u32;
+    let src_h  = orig_info.height as u32;
+    let depth  = orig_info.pixel_format.pixel_bytes() as u32 * 8;
+
+    // Only apply DCT scaling when the source is meaningfully larger than the
+    // target — if we're already within 2× in both axes the decoder overhead
+    // of scale() isn't worth it; fall back to the image crate path.
+    if src_w <= req_w as u32 * 2 && src_h <= req_h as u32 * 2 {
+        return None;
+    }
+
+    // scale() picks the largest power-of-two divisor such that the output is
+    // still ≥ (req_w, req_h).  E.g. 4032×3024 → req 250×200 → picks 1/8
+    // → output 504×378, skipping 64× the pixel work.
+    let (out_w, out_h) = dec.scale(req_w, req_h).ok()?;
+    let pixels = dec.decode().ok()?;
+
+    let img = match orig_info.pixel_format {
+        PixelFormat::L8 => {
+            let buf = image::GrayImage::from_raw(out_w as u32, out_h as u32, pixels)?;
+            DynamicImage::ImageLuma8(buf)
+        }
+        PixelFormat::RGB24 => {
+            let buf = image::RgbImage::from_raw(out_w as u32, out_h as u32, pixels)?;
+            DynamicImage::ImageRgb8(buf)
+        }
+        PixelFormat::CMYK32 => {
+            // jpeg-decoder yields raw CMYK bytes; convert to RGB.
+            let rgb: Vec<u8> = pixels
+                .chunks_exact(4)
+                .flat_map(|c| {
+                    let (cc, mm, yy, kk) = (
+                        c[0] as f32 / 255.0,
+                        c[1] as f32 / 255.0,
+                        c[2] as f32 / 255.0,
+                        c[3] as f32 / 255.0,
+                    );
+                    [
+                        ((1.0 - cc) * (1.0 - kk) * 255.0) as u8,
+                        ((1.0 - mm) * (1.0 - kk) * 255.0) as u8,
+                        ((1.0 - yy) * (1.0 - kk) * 255.0) as u8,
+                    ]
+                })
+                .collect();
+            let buf = image::RgbImage::from_raw(out_w as u32, out_h as u32, rgb)?;
+            DynamicImage::ImageRgb8(buf)
+        }
+        // L16 or any future format: fall back to image crate.
+        _ => return None,
+    };
+
+    Some((img, src_w, src_h, depth))
 }
 
 /// Write a `RenderOutput` (or failure) into the cook.  Always returns `true`.

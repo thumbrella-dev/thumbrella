@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential pkg-config cmake nasm clang \
     libavutil-dev libavcodec-dev libavformat-dev libavfilter-dev \
     libavdevice-dev libswscale-dev libswresample-dev \
-    lldb \
+    lldb webfs media-types \
     && rm -rf /var/lib/apt/lists/*
 
 # Install a pinned Rust toolchain for reproducible dev containers.

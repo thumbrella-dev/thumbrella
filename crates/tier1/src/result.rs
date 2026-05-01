@@ -154,7 +154,7 @@ impl Default for ThumbResult {
 ///
 /// Materialised from [`ThumbCook`] by [`ThumbCook::to_trace`] at the end of
 /// processing.  Never sent to clients.  Written to the configured log sink.
-#[derive(Debug, Default, Clone, Serialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ThumbTrace {
     // ── Request identity ──────────────────────────────────────────────────────
     /// RFC 3339 timestamp of when the trace was materialised.

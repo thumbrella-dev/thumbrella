@@ -77,5 +77,17 @@ pub async fn startup(cfg: &AppConfig) -> Arc<Runtime> {
     let placeholder_general = PH_GENERAL_JPG.to_vec();
     let placeholder_error   = PH_ERROR_JPG.to_vec();
 
-    Runtime::new(cache, trace, cfg.server.clone(), background_image, placeholder_general, placeholder_error)
+    Runtime::new(
+        cache,
+        trace,
+        cfg.server.clone(),
+        background_image,
+        placeholder_general,
+        placeholder_error,
+        cfg.tier2_url.clone(),
+        cfg.tier2_code.clone(),
+        cfg.tier3_url.clone(),
+        cfg.tier3_code.clone(),
+        cfg.handoff_accept.clone(),
+    )
 }

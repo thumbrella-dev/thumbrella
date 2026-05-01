@@ -108,6 +108,13 @@ pub fn route(kind: FileKind, extension: Option<&str>) -> ThumbRoute {
         (FileKind::Image, Some("exr" | "hdr" | "avif" | "heic" | "heif")) =>
             ThumbRoute { tier: 2 },
 
+        // ── Tier 2 — camera raw containers (tier1 may still shortcut first) ─
+        (FileKind::Image, Some(
+            "dng" | "cr2" | "nef" | "arw" | "orf" | "rw2"
+            | "pef" | "srw" | "raf" | "3fr" | "fff" | "iiq" | "raw"
+        )) =>
+            ThumbRoute { tier: 2 },
+
         // ── Tier 2 — libav: video keyframe extraction ─────────────────────────
         (FileKind::Video, _) =>
             ThumbRoute { tier: 2 },

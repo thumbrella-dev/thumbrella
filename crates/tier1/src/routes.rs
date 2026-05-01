@@ -4,6 +4,7 @@
 //! - `GET  /health`                — liveness probe
 //! - `GET  /thumb.jpeg?url=<url>`  — single thumbnail; returns raw JPEG bytes (canonical)
 //! - `GET  /thumb?url=<url>`       — same handler; alias without extension
+//! - `POST /handoff`               — trusted tier-to-tier thumbnail handoff
 //! - `POST /batch`                 — batch thumbnail + describe; waits for all items, returns one JSON object
 
 use std::sync::Arc;
@@ -19,9 +20,12 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use serde_json::{json, Value};
 
 use crate::cook::{InputSpec, Runtime, ThumbCook};
+use crate::cache::CacheStore;
 use crate::http_buf::PlatformStream;
+use crate::handoff::{HANDOFF_CODE_HEADER, HandoffResponse, ThumbHandoff};
 use crate::request::CallRequest;
 use crate::result::JobStatus;
+use crate::tracelog::TraceStore;
 
 // ── GET /health ───────────────────────────────────────────────────────────────
 
@@ -142,4 +146,53 @@ pub async fn batch(
     }
 
     Ok(Json(json!({ "items": items })))
+}
+
+// ── POST /handoff ────────────────────────────────────────────────────────────
+
+/// Trusted tier-to-tier handoff endpoint.
+///
+/// Accepts a serialized [`ThumbHandoff`] payload from another tier, rebuilds a
+/// cook, reconnects to the source URL, and runs render+deliver with cache
+/// lookup/store disabled on this receiving side.
+pub async fn handoff(
+    State(runtime): State<Arc<Runtime>>,
+    headers: HeaderMap,
+    Json(payload): Json<ThumbHandoff>,
+) -> axum::response::Response {
+    let Some(expected_code) = runtime.handoff_accept.as_deref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "handoff is not configured on this server" })),
+        ).into_response();
+    };
+
+    let provided_code = headers
+        .get(HANDOFF_CODE_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if provided_code != expected_code {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "invalid handoff credentials" })),
+        ).into_response();
+    }
+
+    // Handoff cooks do not own cache reads/writes or trace emission.
+    // The entry tier is the authority for cache + trace in this request chain.
+    let mut handoff_runtime = (*runtime).clone();
+    handoff_runtime.cache = CacheStore::none();
+    handoff_runtime.trace = TraceStore::none();
+    let handoff_runtime = Arc::new(handoff_runtime);
+
+    let (mut result, trace, mut after) = ThumbCook::<PlatformStream>::from_handoff(payload, handoff_runtime).run().await;
+    after.drain_spawn();
+
+    // Save bandwidth on tier-to-tier responses: send placeholder token only.
+    if result.placeholder.is_some() {
+        result.thumbnail.clear();
+    }
+
+    let body = HandoffResponse { result, trace };
+    (StatusCode::OK, Json(body)).into_response()
 }

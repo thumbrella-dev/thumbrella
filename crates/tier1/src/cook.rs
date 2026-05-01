@@ -145,6 +145,16 @@ pub struct Runtime {
     /// out-of-process HTTP round-trip.
     #[cfg(feature = "native")]
     pub renderer: Option<SharedRenderer>,
+    /// Tier-2 handoff server base URL (e.g. `http://tier2:8000`).
+    pub handoff_tier2_url: Option<String>,
+    /// Per-tier secret used when calling tier-2 `/handoff`.
+    pub handoff_tier2_code: Option<String>,
+    /// Tier-3 handoff server base URL (e.g. `http://tier3:8000`).
+    pub handoff_tier3_url: Option<String>,
+    /// Per-tier secret used when calling tier-3 `/handoff`.
+    pub handoff_tier3_code: Option<String>,
+    /// Shared secret this server accepts on `/handoff`.
+    pub handoff_accept: Option<String>,
     /// I/O and decode budget limits for the shortcut pipeline.
     /// Defaults to [`ShortcutLimits::TIER1`]; override with
     /// [`crate::with_shortcut_limits`] in the tier 2 startup hook.
@@ -159,6 +169,11 @@ impl Runtime {
         background_image: Option<RgbImage>,
         placeholder_general: Vec<u8>,
         placeholder_error: Vec<u8>,
+        handoff_tier2_url: Option<String>,
+        handoff_tier2_code: Option<String>,
+        handoff_tier3_url: Option<String>,
+        handoff_tier3_code: Option<String>,
+        handoff_accept: Option<String>,
     ) -> Arc<Self> {
         Arc::new(Self {
             cache,
@@ -170,6 +185,11 @@ impl Runtime {
             placeholder_error,
             #[cfg(feature = "native")]
             renderer: None,
+            handoff_tier2_url,
+            handoff_tier2_code,
+            handoff_tier3_url,
+            handoff_tier3_code,
+            handoff_accept,
             shortcut_limits: ShortcutLimits::TIER1,
         })
     }
@@ -309,6 +329,10 @@ pub struct ThumbCook<S: HttpStream> {
     pub tel_download_tail_bytes: u64,
     /// Byte length of the encoded JPEG.
     pub tel_thumbnail_bytes: Option<u64>,
+    /// Override trace tier when the resolver tier is a handoff target.
+    pub tel_job_tier_override: Option<u8>,
+    /// Override trace version when the resolver tier is a handoff target.
+    pub tel_version_override: Option<String>,
 
     // ── Attribution / context ─────────────────────────────────────────────────
     /// How this cook was invoked.
@@ -319,6 +343,9 @@ pub struct ThumbCook<S: HttpStream> {
     pub ctx_customer_id: Option<String>,
     /// True if the client connection dropped before this item completed.
     pub ctx_cancelled: bool,
+    /// True when this cook was reconstructed from a higher-tier handoff.
+    /// Handoff cooks skip cache and inspect/shortcut stages.
+    pub ctx_handoff: bool,
 
     // Cancel flag — set via request_cancel(), read via cancelled().
     cancel: Arc<AtomicBool>,
@@ -366,12 +393,24 @@ impl<S: HttpStream> ThumbCook<S> {
             tel_io_secs:         0.0,
             tel_download_tail_bytes: 0,
             tel_thumbnail_bytes: None,
+            tel_job_tier_override: None,
+            tel_version_override: None,
             ctx_caller:      None,
             ctx_session_id:  None,
             ctx_customer_id: None,
             ctx_cancelled:   false,
+            ctx_handoff:     false,
             cancel: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Reconstruct a cook from a serialized handoff payload.
+    pub fn from_handoff(handoff: crate::handoff::ThumbHandoff, runtime: Arc<Runtime>) -> Self {
+        let mut cook = Self::from_input(handoff.input, runtime);
+        cook.media = handoff.media;
+        cook.src = handoff.src;
+        cook.ctx_handoff = true;
+        cook
     }
 
     // ── Pipeline gate ─────────────────────────────────────────────────────────
@@ -561,6 +600,11 @@ impl<S: HttpStream> ThumbCook<S> {
             CookStatus::Rendering   => JobStatus::Rendering,
         };
 
+        #[cfg(feature = "native")]
+        let default_tier = if self.runtime.renderer.is_some() { 2 } else { 1 };
+        #[cfg(not(feature = "native"))]
+        let default_tier = 1;
+
         ThumbTrace {
             timestamp,
             status,
@@ -582,7 +626,7 @@ impl<S: HttpStream> ThumbCook<S> {
             deliver_secs:        self.tel_deliver_secs,
             render_resolution:   self.render_resolution,
             thumbnail_bytes:     self.tel_thumbnail_bytes,
-            job_tier:            1,
+            job_tier:            self.tel_job_tier_override.unwrap_or(default_tier),
             job_renderer:        self.render_renderer.clone(),
             job_codec:           self.render_codec.clone(),
             video_seek_secs:     self.render_video_seek_secs,
@@ -593,7 +637,7 @@ impl<S: HttpStream> ThumbCook<S> {
             caller:              self.ctx_caller.clone(),
             cancelled:           self.ctx_cancelled,
             server:              self.runtime.server.clone(),
-            version:             self.runtime.version.clone(),
+            version:             self.tel_version_override.clone().unwrap_or_else(|| self.runtime.version.clone()),
         }
     }
 
@@ -660,7 +704,8 @@ impl<S: HttpStream> ThumbCook<S> {
         }
 
         // ── cache check ───────────────────────────────────────────────────────
-        if let Some(ref key) = self.src.cache_key.clone() {
+        if !self.ctx_handoff {
+            if let Some(ref key) = self.src.cache_key.clone() {
             if let Some(cached) = self.runtime.cache.check(key).await {
                 self.http_close().await;
                 self.out_thumbnail     = cached.thumbnail;
@@ -679,30 +724,33 @@ impl<S: HttpStream> ThumbCook<S> {
                 return self.finish(after);
             }
         }
-
-        // ── inspect ───────────────────────────────────────────────────────────
-        let t_step = std::time::Instant::now();
-        pipeline::inspect(&mut self).await;
-        self.tel_inspect_secs = t_step.elapsed().as_secs_f64();
-        if !self.status.is_processing() {
-            self.stamp_download_bytes();
-            self.out_duration = t0.elapsed().as_secs_f64();
-            return self.finish(after);
         }
 
-        // ── shortcut ──────────────────────────────────────────────────────────
-        let t_step = std::time::Instant::now();
-        pipeline::shortcut(&mut self).await;
-        self.tel_shortcut_secs = t_step.elapsed().as_secs_f64();
-        self.stamp_download_bytes();
-
-        if self.status == CookStatus::Complete {
-            self.out_duration = t0.elapsed().as_secs_f64();
-            if let Some(ref key) = self.src.cache_key.clone() {
-                let result = self.to_result();
-                self.runtime.cache.store(key, &result, &mut after);
+        if !self.ctx_handoff {
+            // ── inspect ───────────────────────────────────────────────────────
+            let t_step = std::time::Instant::now();
+            pipeline::inspect(&mut self).await;
+            self.tel_inspect_secs = t_step.elapsed().as_secs_f64();
+            if !self.status.is_processing() {
+                self.stamp_download_bytes();
+                self.out_duration = t0.elapsed().as_secs_f64();
+                return self.finish(after);
             }
-            return self.finish(after);
+
+            // ── shortcut ──────────────────────────────────────────────────────
+            let t_step = std::time::Instant::now();
+            pipeline::shortcut(&mut self).await;
+            self.tel_shortcut_secs = t_step.elapsed().as_secs_f64();
+            self.stamp_download_bytes();
+
+            if self.status == CookStatus::Complete {
+                self.out_duration = t0.elapsed().as_secs_f64();
+                if let Some(ref key) = self.src.cache_key.clone() {
+                    let result = self.to_result();
+                    self.runtime.cache.store(key, &result, &mut after);
+                }
+                return self.finish(after);
+            }
         }
 
         // ── deliver (when shortcut decoded an image) ──────────────────────────
@@ -711,7 +759,7 @@ impl<S: HttpStream> ThumbCook<S> {
             pipeline::deliver(&mut self).await;
             self.tel_deliver_secs = t_step.elapsed().as_secs_f64();
             self.out_duration = t0.elapsed().as_secs_f64();
-            if self.status == CookStatus::Complete {
+            if !self.ctx_handoff && self.status == CookStatus::Complete {
                 if let Some(ref key) = self.src.cache_key.clone() {
                     let result = self.to_result();
                     self.runtime.cache.store(key, &result, &mut after);
@@ -725,25 +773,26 @@ impl<S: HttpStream> ThumbCook<S> {
         // connection so the renderer can stream from the live HttpBuffer.
         #[cfg(feature = "native")]
         if let Some(renderer) = self.runtime.renderer.clone() {
-            // Snapshot bytes-fetched so far (inspect/shortcut phase).
-            // The renderer takes the live buffer via RenderCook::take_reader;
-            // after that point the buffer is gone and we can't query it.
-            self.stamp_download_bytes();
-
             // Coerce &mut ThumbCook<S> → &mut dyn RenderCook.  Valid because
             // impl<S: HttpStream + Send + 'static> RenderCook for ThumbCook<S>
             // and run() requires S: Send + 'static.
+            let t_render = std::time::Instant::now();
             if renderer.render(&mut self as &mut dyn RenderCook).await {
                 // Renderer claimed the format.  On success render_image is set
                 // and deliver produces the thumbnail.  On failure the renderer
                 // called fail_cook() and render_image is None; status != Complete.
+                self.tel_decode_secs = t_render.elapsed().as_secs_f64();
+                self.render_handler = if self.ctx_handoff {
+                    RenderHandler::Handoff
+                } else {
+                    RenderHandler::Builtin
+                };
 
-                // Best-effort download size when the renderer consumed bytes
-                // we can no longer count via the buffer.
-                if self.out_download_bytes == 0 {
-                    if let Some(sz) = self.media.file_size {
-                        self.out_download_bytes = sz;
-                    }
+                // The renderer consumed the full file via take_reader(); use
+                // file_size as the authoritative download byte count since the
+                // partial inspect-phase snapshot is no longer meaningful.
+                if let Some(sz) = self.media.file_size {
+                    self.out_download_bytes = sz;
                 }
 
                 if self.render_image.is_some() {
@@ -751,7 +800,7 @@ impl<S: HttpStream> ThumbCook<S> {
                     pipeline::deliver(&mut self).await;
                     self.tel_deliver_secs = t_step.elapsed().as_secs_f64();
                     self.out_duration = t0.elapsed().as_secs_f64();
-                    if self.status == CookStatus::Complete {
+                    if !self.ctx_handoff && self.status == CookStatus::Complete {
                         if let Some(ref key) = self.src.cache_key.clone() {
                             let result = self.to_result();
                             self.runtime.cache.store(key, &result, &mut after);
@@ -768,11 +817,69 @@ impl<S: HttpStream> ThumbCook<S> {
             return self.finish(after);
         }
 
-        // No in-process renderer — close the HTTP connection and build a
-        // portable handoff bundle for an out-of-process tier-2 endpoint.
-        let first_page = self.http_close().await;
-        let _handoff = self.to_handoff(first_page);
-        // TODO: out-of-process HTTP handoff to a tier-2 endpoint.
+        // No in-process renderer — try out-of-process handoff when a target is configured.
+        let target_tier = self
+            .media
+            .kind
+            .map(|kind| crate::dispatch::route(kind, self.media.extension.as_deref()).tier)
+            .unwrap_or(2);
+        let (target_url, target_code) = match target_tier {
+            2 => (self.runtime.handoff_tier2_url.clone(), self.runtime.handoff_tier2_code.clone()),
+            3 => (self.runtime.handoff_tier3_url.clone(), self.runtime.handoff_tier3_code.clone()),
+            _ => (None, None),
+        };
+
+        if let Some(url) = target_url.as_deref() {
+            let local_download_bytes = self.http_bytes_fetched();
+            let first_page = self.http_close().await;
+            let payload = self.to_handoff(first_page);
+            match crate::handoff::post_handoff(url, target_code.as_deref(), &payload).await {
+                Ok(remote) => {
+                    let remote_result = remote.result;
+                    let remote_trace = remote.trace;
+
+                    self.status = cook_status_from_job(remote_result.status);
+                    self.out_thumbnail = remote_result.thumbnail;
+                    self.out_strategy = remote_result.strategy;
+                    self.out_message = remote_result.message.unwrap_or_default();
+                    self.out_placeholder = remote_result.placeholder;
+                    self.out_download_bytes = local_download_bytes.saturating_add(remote_result.download_size);
+                    self.media.mime = remote_result.mime;
+                    self.media.file_size = remote_result.file_size;
+                    self.media.kind = remote_result.kind;
+                    self.media.extension = remote_result.extension;
+                    self.media.properties = Some(remote_result.properties);
+
+                    // Preserve the resolver tier provenance from the handed-off trace.
+                    self.tel_job_tier_override = Some(remote_trace.job_tier);
+                    self.tel_version_override = Some(remote_trace.version.clone());
+
+                    // Keep key render metadata from the resolver tier.
+                    if self.render_renderer.is_none() {
+                        self.render_renderer = remote_trace.job_renderer.clone();
+                    }
+                    self.render_codec = remote_trace.job_codec.clone();
+                    self.render_video_seek_secs = remote_trace.video_seek_secs;
+                    self.render_resolution = remote_trace.render_resolution;
+                    self.tel_thumbnail_bytes = remote_trace.thumbnail_bytes;
+                    self.tel_download_tail_bytes = remote_trace.download_tail_bytes;
+                    self.tel_decode_secs = remote_trace.decode_secs;
+                    self.tel_deliver_secs = remote_trace.deliver_secs;
+                    self.tel_io_secs += remote_trace.io_secs;
+
+                    self.render_handler = RenderHandler::Handoff;
+                    self.render_renderer = Some(format!("handoff/tier{target_tier}"));
+                }
+                Err(e) => {
+                    self.status = CookStatus::Failed;
+                    self.out_message = format!("handoff to tier {target_tier} failed: {e}");
+                }
+            }
+            self.out_duration = t0.elapsed().as_secs_f64();
+            return self.finish(after);
+        }
+
+        self.http_close().await;
         self.status = CookStatus::Unavailable;
         self.out_message = "no higher-tier renderer is configured".to_string();
         self.out_duration = t0.elapsed().as_secs_f64();
@@ -787,15 +894,16 @@ impl<S: HttpStream> ThumbCook<S> {
         // Always return a thumbnail.  If the pipeline didn't produce one,
         // fill in the appropriate placeholder JPEG.
         if self.out_thumbnail.is_empty() {
-            let (bytes, label) = match self.status {
-                CookStatus::Failed => (
-                    self.runtime.placeholder_error.clone(),
-                    "error",
-                ),
-                _ => (
-                    self.runtime.placeholder_general.clone(),
-                    "general",
-                ),
+            let (bytes, label) = match self.out_placeholder.as_deref() {
+                Some("error") => (self.runtime.placeholder_error.clone(), "error"),
+                Some(other) => {
+                    let label = if other.is_empty() { "general" } else { other };
+                    (self.runtime.placeholder_general.clone(), label)
+                }
+                None => match self.status {
+                    CookStatus::Failed => (self.runtime.placeholder_error.clone(), "error"),
+                    _ => (self.runtime.placeholder_general.clone(), "general"),
+                },
             };
             if !bytes.is_empty() {
                 self.out_thumbnail  = bytes;
@@ -807,6 +915,17 @@ impl<S: HttpStream> ThumbCook<S> {
         let trace  = self.to_trace();
         self.runtime.trace.record(trace.clone(), &mut after);
         (result, trace, after)
+    }
+}
+
+fn cook_status_from_job(status: JobStatus) -> CookStatus {
+    match status {
+        JobStatus::Success | JobStatus::Cached => CookStatus::Complete,
+        JobStatus::NotModified => CookStatus::NotModified,
+        JobStatus::Failed => CookStatus::Failed,
+        JobStatus::DeferUser => CookStatus::DeferUser,
+        JobStatus::Unavailable => CookStatus::Unavailable,
+        JobStatus::Rendering => CookStatus::Rendering,
     }
 }
 

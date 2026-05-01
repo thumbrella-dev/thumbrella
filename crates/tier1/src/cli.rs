@@ -29,7 +29,11 @@ struct Cli {
 enum Command {
     /// Start the HTTP server.
     ///
-    /// Port and other options come from environment variables (TBR_PORT, etc.).
+    /// Port and other options come from environment variables (defaults).
+    /// TBR_PORT (8001) serve port
+    /// TBR_HANDOFF code accepted for inbound /handoff requests
+    /// TBR_TIER2 downstream tier2 url (optional #code fragment for outbound auth)
+    /// TBR_TIER3 downstream tier3 url (optional #code fragment for outbound auth)
     Serve,
 
     /// Thumbnail one or more URLs and print results to stdout.
@@ -146,6 +150,8 @@ async fn run_server(runtime: Arc<Runtime>) {
     let app = Router::new()
         .route("/health", get(routes::health))
         .route("/thumb.jpeg", get(routes::thumb))
+        .route("/thumb", get(routes::thumb))
+        .route("/handoff", post(routes::handoff))
         .route("/batch", post(routes::batch))
         .with_state(runtime);
 
@@ -528,23 +534,55 @@ async fn run_batch_dir(dir: String, output: String, runtime: Arc<Runtime>) {
         html.push_str("</div>\n");
 
         html.push_str("    <div class=\"info\">\n");
+        {
+            let size_str = result.file_size
+                .map(|n| format!(" &nbsp;<span class=\"thumb-size\">{}</span>", fmt_bytes(n)))
+                .unwrap_or_default();
+            let res_str = {
+                let w = result.properties.get("width").and_then(|v| v.as_u64());
+                let h = result.properties.get("height").and_then(|v| v.as_u64());
+                match (w, h) {
+                    (Some(w), Some(h)) => format!(
+                        " &nbsp;<span class=\"thumb-size\">{w}\u{d7}{h}</span>"
+                    ),
+                    _ => String::new(),
+                }
+            };
+            html.push_str(&format!(
+                "      <div class=\"filename\">{}{}{}</div>\n",
+                html_escape(&filename),
+                size_str,
+                res_str,
+            ));
+        }
+        // ── caption line: status • thumb-size • download • cpu ────────────
         html.push_str(&format!(
-            "      <div class=\"filename\">{}</div>\n",
-            html_escape(&filename)
-        ));
-        html.push_str(&format!(
-            "      <span class=\"{}\">&#9679; {}</span>\n",
+            "      <span class=\"{}\">&#9679; {}</span>",
             status_class,
             html_escape(status_str)
         ));
         if let Some(b64) = &thumb_b64 {
-            let jpeg_bytes = b64.len() * 3 / 4;
-            let size_str = if jpeg_bytes >= 1024 {
-                format!(" &nbsp;<span class=\"thumb-size\">{:.1} KB</span>", jpeg_bytes as f32 / 1024.0)
-            } else {
-                format!(" &nbsp;<span class=\"thumb-size\">{} B</span>", jpeg_bytes)
-            };
-            html.push_str(&size_str);
+            let jpeg_bytes = (b64.len() * 3 / 4) as u64;
+            html.push_str(&format!(
+                " &nbsp;<span class=\"thumb-size\">{}</span>",
+                fmt_bytes(jpeg_bytes)
+            ));
+        }
+        if result.download_size > 0 {
+            html.push_str(&format!(
+                " &nbsp;<span class=\"thumb-size\">&#8595;{}</span>",
+                fmt_bytes(result.download_size)
+            ));
+        }
+        {
+            // CPU time = total - connect - io  (all in the trace)
+            let cpu = (result.duration - trace.connect_secs - trace.io_secs).max(0.0);
+            if cpu > 0.0 {
+                html.push_str(&format!(
+                    " &nbsp;<span class=\"thumb-size\">&#128336;{}</span>",
+                    fmt_secs(cpu)
+                ));
+            }
         }
         html.push('\n');
 

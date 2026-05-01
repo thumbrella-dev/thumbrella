@@ -23,6 +23,10 @@
 
 use serde::{Deserialize, Serialize};
 use crate::cook::{InputSpec, MediaInfo, SourceIdentity};
+use crate::result::{ThumbResult, ThumbTrace};
+
+/// Shared secret header name for tier-to-tier handoff requests.
+pub const HANDOFF_CODE_HEADER: &str = "x-tbr-handoff-code";
 
 /// Serialisable bundle forwarded to a higher-tier renderer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,4 +41,46 @@ pub struct ThumbHandoff {
     /// cached before the connection was closed (unusual).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_page: Option<Vec<u8>>,
+}
+
+/// HTTP payload returned by `/handoff`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandoffResponse {
+    pub result: ThumbResult,
+    pub trace: ThumbTrace,
+}
+
+/// Send a handoff payload to another tier and return both result + trace.
+#[cfg(feature = "native")]
+pub async fn post_handoff(
+    base_url: &str,
+    handoff_code: Option<&str>,
+    payload: &ThumbHandoff,
+) -> Result<HandoffResponse, String> {
+    let endpoint = format!("{}/handoff", base_url.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .http2_adaptive_window(true)
+        .tcp_nodelay(true)
+        .build()
+        .map_err(|e| format!("handoff client init failed: {e}"))?;
+
+    let mut req = client.post(&endpoint).json(payload);
+    if let Some(code) = handoff_code {
+        req = req.header(HANDOFF_CODE_HEADER, code);
+    }
+
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("handoff request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("handoff server returned {status}: {body}"));
+    }
+
+    resp.json::<HandoffResponse>()
+        .await
+        .map_err(|e| format!("handoff response decode failed: {e}"))
 }
