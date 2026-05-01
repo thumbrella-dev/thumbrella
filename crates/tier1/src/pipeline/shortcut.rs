@@ -990,16 +990,34 @@ fn read_u32(buf: &[u8], off: usize, little: bool) -> Option<u32> {
 pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     let config = &ThumbnailConfig::CANONICAL;
 
+    let ext_owned = cook.media.extension.clone().unwrap_or_default();
+    let ext = ext_owned.as_str();
+
+    // ── EXIF embedded thumbnail (JPEG EXIF IFD1 / TIFF IFD chain) ────────
+    //
+    // Attempt this BEFORE the small-image full-download path so that JPEG/TIFF
+    // files with an embedded thumbnail are served from the thumbnail bytes only
+    // (typically a few hundred bytes header + a few KB for the thumbnail) rather
+    // than downloading the entire source file.
+    let is_jpeg = matches!(ext, "jpeg");
+    let is_tiff = matches!(ext, "tiff");
+    if is_jpeg || is_tiff {
+        try_exif_shortcut(cook).await;
+        if !cook.http_is_open() { return; }
+    }
+
     // ── Small image: any format `image` supports, ≤ SMALL_FILE_THRESHOLD ─
     //
     // `inspect` has already classified the file; trust its verdict.
     // Covers JPEG, PNG, GIF, BMP, WebP, TIFF, ICO, … without any byte sniffing.
     //
+    // Keep this BEFORE the progressive JPEG path so genuinely small files
+    // always use a full decode for reliability/quality.
+    //
     // Exclude formats that require libav (HEIC, HEIF, AVIF, EXR, HDR) — they
     // are classified as `FileKind::Image` but `image::load_from_memory` cannot
     // decode them.  If we entered streaming mode and consumed the bytes here,
     // the connection would be at EOF when tier 2 tries `take_reader()` for libav.
-    let ext = cook.media.extension.as_deref().unwrap_or("");
     let is_image_crate_format = !matches!(ext, "heic" | "heif" | "avif" | "exr" | "hdr");
     let is_small_image = cook.media.kind == Some(FileKind::Image)
         && is_image_crate_format
@@ -1049,15 +1067,7 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
         }
     }
 
-    // ── EXIF embedded thumbnail (JPEG EXIF IFD1 / TIFF IFD chain) ────────
-    let is_jpeg = matches!(cook.media.extension.as_deref(), Some("jpeg"));
-    let is_tiff = matches!(cook.media.extension.as_deref(), Some("tiff"));
-    if is_jpeg || is_tiff {
-        try_exif_shortcut(cook).await;
-        if !cook.http_is_open() { return; }
-    }
-
-    // ── Progressive JPEG (falls through from EXIF when no thumbnail found) ─
+    // ── Progressive JPEG (falls through from EXIF and small-image checks) ─
     if is_jpeg {
         try_progressive_jpeg_shortcut(cook).await;
         if !cook.http_is_open() { return; }

@@ -155,12 +155,18 @@ fn extract_raw_preview(
     }
     eprintln!("[tier2] raw_preview: {} bytes JPEG @ offset {}", jpeg_bytes.len(), jpeg_off);
 
-    let img = match image::load_from_memory(&jpeg_bytes) {
+    let mut img = match image::load_from_memory(&jpeg_bytes) {
         Ok(i) => i,
         Err(_) => return Err(reader),
     };
     let (src_w, src_h) = img.dimensions();
     let depth = img.color().bits_per_pixel();
+
+    // The embedded JPEG in DNG files is often physically rotated 90° CW in its
+    // bytes, and may also carry an EXIF orientation tag. To avoid double-rotation
+    // when an EXIF tag is present, we must undo the physical rotation first.
+    // A 270° CW rotation corrects a 90° CW physical rotation.
+    img = DynamicImage::ImageRgba8(img.to_rgba8()).rotate270();
 
     // Do not apply EXIF orientation for raw-container previews.
     //

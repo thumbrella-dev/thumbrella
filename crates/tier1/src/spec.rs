@@ -103,12 +103,13 @@ impl ShortcutLimits {
 
     /// Relaxed limits for Tier 2 (native server, no Worker budget).
     ///
-    /// Progressive JPEG raised to 20 MP to cover full-resolution camera shots.
-    /// Small-file threshold raised to 4 MiB to handle larger images inline.
-    /// ZIP tail raised to 2 MiB to cover large office document previews.
+    /// Progressive JPEG is effectively unbounded so tier 2 always attempts the
+    /// partial-read shortcut for progressive sources before any full-file JPEG path.
+    /// Small-file threshold is kept moderate for non-progressive inline decodes.
+    /// ZIP tail is raised to 2 MiB to cover large office document previews.
     pub const TIER2: Self = Self {
-        max_progressive_pixels: 20_000_000,       // 20 MP — handles most cameras
-        small_file_threshold:   4 * 1024 * 1024,  // 4 MiB
+        max_progressive_pixels: u64::MAX,
+        small_file_threshold:   200 * 1024,       // 200 KiB
         zip_tail_size:          2 * 1024 * 1024,  // 2 MiB
     };
 }

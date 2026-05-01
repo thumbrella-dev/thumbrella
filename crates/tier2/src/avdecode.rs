@@ -65,6 +65,48 @@ fn apply_rotation(img: DynamicImage, clockwise_degrees: i32) -> DynamicImage {
     }
 }
 
+unsafe fn tile_grid_dimensions(fmt_ctx: *mut AVFormatContext) -> Option<(i32, i32)> {
+    let group_count = (*fmt_ctx).nb_stream_groups as usize;
+    let mut best: Option<(i32, i32)> = None;
+
+    for i in 0..group_count {
+        let group = *(*fmt_ctx).stream_groups.add(i);
+        if (*group).type_ != AVStreamGroupParamsType::AV_STREAM_GROUP_PARAMS_TILE_GRID {
+            continue;
+        }
+
+        let tile_grid = unsafe { (*group).params.tile_grid };
+        if tile_grid.is_null() {
+            continue;
+        }
+
+        let width = if (*tile_grid).width > 0 {
+            (*tile_grid).width
+        } else {
+            (*tile_grid).coded_width
+        };
+        let height = if (*tile_grid).height > 0 {
+            (*tile_grid).height
+        } else {
+            (*tile_grid).coded_height
+        };
+
+        if width <= 0 || height <= 0 {
+            continue;
+        }
+
+        let area = width as i64 * height as i64;
+        let keep = best
+            .map(|(best_w, best_h)| area > best_w as i64 * best_h as i64)
+            .unwrap_or(true);
+        if keep {
+            best = Some((width, height));
+        }
+    }
+
+    best
+}
+
 // ── Seek whence constants (POSIX) ─────────────────────────────────────────────
 
 const SEEK_SET: c_int = 0;
@@ -370,6 +412,7 @@ unsafe fn decode_inner(
     let src_h     = (*codecpar).height;
     let pix_fmt: AVPixelFormat = std::mem::transmute((*codecpar).format);
     let codec_id  = (*codecpar).codec_id;
+    let (reported_w, reported_h) = tile_grid_dimensions(*fmt_ctx).unwrap_or((src_w, src_h));
 
     // Codec name for the trace record.
     let codec_name: Option<String> = {
@@ -380,7 +423,7 @@ unsafe fn decode_inner(
             Some(CStr::from_ptr(p).to_string_lossy().into_owned())
         }
     };
-    eprintln!("[avdecode] codec={codec_name:?}  src={src_w}x{src_h}");
+    eprintln!("[avdecode] codec={codec_name:?}  src={src_w}x{src_h} reported={reported_w}x{reported_h}");
 
     // Bits-per-pixel from the pixel-format descriptor.
     let depth = {
@@ -529,8 +572,8 @@ unsafe fn decode_inner(
         codec:           codec_name,
         video_seek_secs: None,
         properties:      Some(json!({
-            "width":  src_w,
-            "height": src_h,
+            "width":  reported_w,
+            "height": reported_h,
             "depth":  depth,
         })),
     })

@@ -394,7 +394,6 @@ pub fn print_thumb_items(items: &[(crate::ThumbResult, crate::ThumbTrace)], show
 
 async fn run_batch_dir(dir: String, output: String, runtime: Arc<Runtime>) {
     use base64::Engine as _;
-    use futures::stream::{FuturesUnordered, StreamExt};
     use std::fs;
     use crate::{ThumbCook, cook::InputSpec};
 
@@ -420,38 +419,29 @@ async fn run_batch_dir(dir: String, output: String, runtime: Arc<Runtime>) {
 
     let mut results: Vec<(usize, crate::ThumbResult, crate::ThumbTrace)> =
         Vec::with_capacity(entries.len());
-    let mut pool: FuturesUnordered<_> = entries
-        .iter()
-        .enumerate()
-        .map(|(i, path)| {
-            let abs = if path.is_absolute() {
-                path.clone()
-            } else {
-                std::env::current_dir().unwrap_or_default().join(path)
-            };
-            let url = format!("file://{}", abs.display());
-            let input = InputSpec { url, etag: None, allow_local: true };
-            let rt = Arc::clone(&runtime);
-            async move {
-                let (result, trace, mut after) =
-                    ThumbCook::from_input(input, rt).run().await;
-                after.drain_spawn();
-                (i, result, trace)
-            }
-        })
-        .collect();
 
-    while let Some(item) = pool.next().await {
+    for (i, path) in entries.iter().enumerate() {
+        let abs = if path.is_absolute() {
+            path.clone()
+        } else {
+            std::env::current_dir().unwrap_or_default().join(path)
+        };
+        let url = format!("file://{}", abs.display());
+        let input = InputSpec { url, etag: None, allow_local: true };
+
+        let (result, trace, mut after) =
+            ThumbCook::from_input(input, Arc::clone(&runtime)).run().await;
+        after.drain_spawn();
+
         let done = results.len() + 1;
         let total = entries.len();
-        let filename = entries[item.0]
+        let filename = entries[i]
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         eprintln!("[{done}/{total}] {filename}");
-        results.push(item);
+        results.push((i, result, trace));
     }
-    results.sort_by_key(|(i, _, _)| *i);
 
     let mut html = String::with_capacity(256 * 1024);
     html.push_str(r#"<!DOCTYPE html>
