@@ -85,6 +85,28 @@ enum Command {
         #[arg(long, default_value = "report.html")]
         output: String,
     },
+
+    /// Submit a batch request in streaming mode and print result events as they arrive.
+    ///
+    /// Sends `Accept: application/x-ndjson` and prints one JSON line per
+    /// `item.result` event with client-measured elapsed milliseconds since submit.
+    #[command(name = "stream-batch")]
+    StreamBatch {
+        /// Tier server base URL.
+        ///
+        /// Can be supplied either as `--server <url>` or as the first
+        /// positional argument before the thumbnail URLs.
+        #[arg(long)]
+        server: Option<String>,
+
+        /// Source URLs to include in the batch.
+        #[arg(required = true, num_args = 1..)]
+        args: Vec<String>,
+
+        /// Previously returned etag (applied to all URLs when supplied).
+        #[arg(long)]
+        etag: Option<String>,
+    },
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -121,7 +143,7 @@ where
 
     let cli = Cli::parse();
 
-    let runtime = if !matches!(cli.command, Command::Diag { .. }) {
+    let runtime = if !matches!(cli.command, Command::Diag { .. } | Command::StreamBatch { .. }) {
         let cfg = crate::config::AppConfig::from_env();
         let rt = crate::startup::startup(&cfg).await;
         Some(hook(rt).await)
@@ -134,7 +156,38 @@ where
         Command::Thumb { urls, etag, json, trace } => run_thumb(urls, etag, json, trace, runtime.unwrap()).await,
         Command::Diag { json }                     => run_diag(json),
         Command::BatchDir { dir, output }          => run_batch_dir(dir, output, runtime.unwrap()).await,
+        Command::StreamBatch { server, args, etag } => {
+            let (server, urls) = normalize_stream_batch_args(server, args);
+            run_stream_batch(server, urls, etag).await;
+        }
     }
+}
+
+fn normalize_stream_batch_args(server: Option<String>, mut args: Vec<String>) -> (String, Vec<String>) {
+    const DEFAULT_SERVER: &str = "http://127.0.0.1:8001";
+
+    if let Some(server) = server {
+        return (server, args);
+    }
+
+    if args.len() >= 2 && looks_like_server_base(&args[0]) {
+        let server = args.remove(0);
+        return (server, args);
+    }
+
+    (DEFAULT_SERVER.to_string(), args)
+}
+
+fn looks_like_server_base(value: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(value) else {
+        return false;
+    };
+
+    if url.query().is_some() || url.fragment().is_some() {
+        return false;
+    }
+
+    matches!(url.path(), "" | "/")
 }
 
 // ── serve ─────────────────────────────────────────────────────────────────────
@@ -221,6 +274,109 @@ async fn run_thumb(urls: Vec<String>, etag: Option<String>, json: bool, show_tra
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
     } else {
         print_thumb_items(&items, show_trace);
+    }
+}
+
+async fn run_stream_batch(server: String, urls: Vec<String>, etag: Option<String>) {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+    use futures::StreamExt;
+    use reqwest::header;
+    use tokio::time::Instant;
+
+    let endpoint = format!("{}/batch", server.trim_end_matches('/'));
+    let request = crate::CallRequest {
+        items: urls
+            .into_iter()
+            .map(|url| {
+                if let Some(tag) = etag.clone() {
+                    crate::ThumbInput::Object(crate::ThumbObject {
+                        url,
+                        etag: Some(tag),
+                    })
+                } else {
+                    crate::ThumbInput::Url(url)
+                }
+            })
+            .collect(),
+    };
+
+    let started = Instant::now();
+    let response = match reqwest::Client::new()
+        .post(endpoint)
+        .header(header::ACCEPT, "application/x-ndjson")
+        .json(&request)
+        .send()
+        .await
+    {
+        Ok(resp) => resp,
+        Err(err) => {
+            eprintln!("stream request failed: {err}");
+            return;
+        }
+    };
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        eprintln!("stream request failed with {status}: {body}");
+        return;
+    }
+
+    let mut stream = response.bytes_stream();
+    let mut pending = Vec::<u8>::new();
+    while let Some(chunk) = stream.next().await {
+        let Ok(bytes) = chunk else {
+            eprintln!("stream read failed");
+            return;
+        };
+        pending.extend_from_slice(&bytes);
+
+        while let Some(pos) = pending.iter().position(|b| *b == b'\n') {
+            let mut line = pending.drain(..=pos).collect::<Vec<u8>>();
+            while line.last().is_some_and(|b| *b == b'\n' || *b == b'\r') {
+                line.pop();
+            }
+            if line.is_empty() {
+                continue;
+            }
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&line) else {
+                continue;
+            };
+            let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let is_result       = event_type == "item.result";
+            let is_intermediate = event_type == "item.intermediate";
+            if !is_result && !is_intermediate {
+                continue;
+            }
+            let Some(result) = value.get("result") else {
+                continue;
+            };
+
+            let mut result = result.clone();
+            if let Some(obj) = result.as_object_mut() {
+                if let Some(thumb) = obj.get("thumbnail").and_then(|v| v.as_str()) {
+                    if !thumb.is_empty() {
+                        let kb = STANDARD
+                            .decode(thumb)
+                            .ok()
+                            .map(|bytes| bytes.len().div_ceil(1024))
+                            .unwrap_or(0);
+                        obj.insert(
+                            "thumbnail".into(),
+                            serde_json::Value::String(format!("<binary thumbnail data {kb} kb>")),
+                        );
+                    }
+                }
+            }
+
+            let out = serde_json::json!({
+                "elapsed_ms": started.elapsed().as_millis(),
+                "event":      if is_intermediate { "loading" } else { "result" },
+                "result": result,
+            });
+            println!("{}", serde_json::to_string_pretty(&out).unwrap_or_else(|_| "{}".to_string()));
+        }
     }
 }
 

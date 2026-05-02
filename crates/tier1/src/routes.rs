@@ -7,17 +7,19 @@
 //! - `POST /handoff`               — trusted tier-to-tier thumbnail handoff
 //! - `POST /batch`                 — batch thumbnail + describe; waits for all items, returns one JSON object
 
-use std::sync::Arc;
+use std::{convert::Infallible, sync::Arc};
 
 use axum::{
+    body::Body,
     Json,
     extract::{Query, State},
     http::{HeaderMap, StatusCode, header},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use bytes::Bytes;
-use futures::stream::{FuturesUnordered, StreamExt};
+use futures::stream::{self, FuturesUnordered, StreamExt};
 use serde_json::{json, Value};
+use tokio::{sync::mpsc, task::JoinSet};
 
 use crate::cook::{InputSpec, Runtime, ThumbCook};
 use crate::cache::CacheStore;
@@ -124,28 +126,119 @@ pub async fn thumb(
 /// deliver the same shape, just with earlier items arriving sooner.
 pub async fn batch(
     State(runtime): State<Arc<Runtime>>,
+    headers: HeaderMap,
     Json(req): Json<CallRequest>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let mut pool = FuturesUnordered::new();
-    for input in req.items {
+) -> Response {
+    let stream_mode = wants_ndjson(&headers);
+
+    let mut jobs = Vec::with_capacity(req.items.len());
+    for (idx, input) in req.items.into_iter().enumerate() {
         let (url, etag) = input.into_parts();
         if url.starts_with("file://") {
-            return Err((
+            return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({ "error": "file:// URLs are not permitted" })),
-            ));
+            )
+                .into_response();
         }
-        let spec = InputSpec { url, etag, allow_local: false };
-        pool.push(ThumbCook::<PlatformStream>::from_input(spec, Arc::clone(&runtime)).run());
+        jobs.push((idx, InputSpec { url, etag, allow_local: false }));
+    }
+    let count = jobs.len();
+
+    if stream_mode {
+        let (tx, rx) = mpsc::unbounded_channel::<Bytes>();
+        let batch_runtime = Arc::clone(&runtime);
+        tokio::spawn(async move {
+            let _ = tx.send(as_ndjson_line(json!({
+                "type": "batch.started",
+                "count": count,
+            })));
+
+            let mut pending = JoinSet::new();
+            for (idx, spec) in jobs {
+                let _ = tx.send(as_ndjson_line(json!({
+                    "type": "item.accepted",
+                    "index": idx,
+                })));
+
+                let item_runtime = Arc::clone(&batch_runtime);
+                let item_tx = tx.clone();
+                pending.spawn(async move {
+                    let progress_tx = item_tx.clone();
+                    let progress = Box::new(move |result| {
+                        let _ = progress_tx.send(as_ndjson_line(json!({
+                            "type": "item.intermediate",
+                            "index": idx,
+                            "result": result,
+                        })));
+                    });
+
+                    let (result, _trace, mut after) = ThumbCook::<PlatformStream>::from_input(spec, item_runtime)
+                        .run_with_progress(Some(progress))
+                        .await;
+                    after.drain_spawn();
+                    let _ = item_tx.send(as_ndjson_line(json!({
+                        "type": "item.result",
+                        "index": idx,
+                        "result": result,
+                    })));
+                });
+            }
+
+            while pending.join_next().await.is_some() {}
+            let _ = tx.send(as_ndjson_line(json!({ "type": "batch.complete" })));
+        });
+
+        let stream = stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|line| (Ok::<Bytes, Infallible>(line), rx))
+        });
+        let body = Body::from_stream(stream);
+        return (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "application/x-ndjson"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            body,
+        )
+            .into_response();
     }
 
-    let mut items = Vec::with_capacity(pool.len());
-    while let Some((result, _trace, mut after)) = pool.next().await {
+    let mut pool = FuturesUnordered::new();
+    for (idx, spec) in jobs {
+        let job_runtime = Arc::clone(&runtime);
+        pool.push(async move {
+            let (result, trace, after) = ThumbCook::<PlatformStream>::from_input(spec, job_runtime).run().await;
+            (idx, result, trace, after)
+        });
+    }
+
+    let mut items = Vec::with_capacity(count);
+    while let Some((_idx, result, _trace, mut after)) = pool.next().await {
         after.drain_spawn();
         items.push(result);
     }
 
-    Ok(Json(json!({ "items": items })))
+    Json(json!({ "items": items })).into_response()
+}
+
+fn wants_ndjson(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|accept| {
+            accept.split(',').any(|part| {
+                let mime = part.split(';').next().unwrap_or("").trim();
+                mime.eq_ignore_ascii_case("application/x-ndjson")
+                    || mime.eq_ignore_ascii_case("application/ndjson")
+            })
+        })
+}
+
+fn as_ndjson_line(value: Value) -> Bytes {
+    let mut buf = serde_json::to_vec(&value).unwrap_or_else(|_| b"{\"type\":\"error\"}".to_vec());
+    buf.push(b'\n');
+    Bytes::from(buf)
 }
 
 // ── POST /handoff ────────────────────────────────────────────────────────────

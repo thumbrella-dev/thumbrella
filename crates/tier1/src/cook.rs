@@ -579,6 +579,30 @@ impl<S: HttpStream> ThumbCook<S> {
         }
     }
 
+    /// Materialise an intermediate client-facing result while processing is still in flight.
+    ///
+    /// Used by streaming batch responses to send a placeholder-backed snapshot
+    /// after inspect/shortcut and before render or handoff begins.
+    pub fn to_progress_result(&self, duration: f64) -> ThumbResult {
+        ThumbResult {
+            url:           self.input.url.clone(),
+            status:        JobStatus::Rendering,
+            duration,
+            download_size: self.out_download_bytes.max(self.http_bytes_fetched()),
+            message:       None,
+            strategy:      self.out_strategy,
+            etag:          self.src.etag.clone(),
+            thumbnail:     self.runtime.placeholder_general.clone(),
+            placeholder:   Some(self.out_placeholder.clone().unwrap_or_else(|| "general".to_string())),
+            mime:          self.media.mime.clone(),
+            file_size:     self.media.file_size,
+            kind:          self.media.kind,
+            extension:     self.media.extension.clone(),
+            properties:    self.media.properties.clone().unwrap_or_else(|| Value::Object(Default::default())),
+            cache:         self.out_cache.map(|c| c.public_label().to_string()),
+        }
+    }
+
     /// Materialise the internal [`ThumbTrace`] for the log sink.  Called once
     /// at end of `run()`, after `to_result()`.
     pub fn to_trace(&self) -> ThumbTrace {
@@ -662,7 +686,18 @@ impl<S: HttpStream> ThumbCook<S> {
     /// after the HTTP response is sent:
     /// - Native: `after.drain_spawn()` fires all tasks on the tokio thread pool.
     /// - Workers: iterate `after.drain()` and pass each to `ctx.wait_until()`.
-    pub async fn run(mut self) -> (ThumbResult, ThumbTrace, AfterResponse)
+    pub async fn run(self) -> (ThumbResult, ThumbTrace, AfterResponse)
+    where
+        S: Send + 'static,
+    {
+        self.run_with_progress(None).await
+    }
+
+    /// Run the full pipeline and optionally emit intermediate progress snapshots.
+    pub async fn run_with_progress(
+        mut self,
+        mut on_progress: Option<Box<dyn FnMut(ThumbResult) + Send>>,
+    ) -> (ThumbResult, ThumbTrace, AfterResponse)
     where
         S: Send + 'static,
     {
@@ -751,6 +786,12 @@ impl<S: HttpStream> ThumbCook<S> {
                 }
                 return self.finish(after);
             }
+
+            if !self.ctx_handoff && self.status.is_processing() && self.render_image.is_none() {
+                if let Some(progress) = on_progress.as_mut() {
+                    progress(self.to_progress_result(t0.elapsed().as_secs_f64()));
+                }
+            }
         }
 
         // ── deliver (when shortcut decoded an image) ──────────────────────────
@@ -818,11 +859,22 @@ impl<S: HttpStream> ThumbCook<S> {
         }
 
         // No in-process renderer — try out-of-process handoff when a target is configured.
-        let target_tier = self
+        let routed_tier = self
             .media
             .kind
             .map(|kind| crate::dispatch::route(kind, self.media.extension.as_deref()).tier)
             .unwrap_or(2);
+        // If tier 1 couldn't produce a render locally (no shortcut/render_image)
+        // and tier 2 is available, escalate unresolved image inputs to tier 2.
+        // This avoids returning `unavailable` for large/progressive JPEGs.
+        let target_tier = if routed_tier == 1
+            && self.media.kind == Some(FileKind::Image)
+            && self.runtime.handoff_tier2_url.is_some()
+        {
+            2
+        } else {
+            routed_tier
+        };
         let (target_url, target_code) = match target_tier {
             2 => (self.runtime.handoff_tier2_url.clone(), self.runtime.handoff_tier2_code.clone()),
             3 => (self.runtime.handoff_tier3_url.clone(), self.runtime.handoff_tier3_code.clone()),
