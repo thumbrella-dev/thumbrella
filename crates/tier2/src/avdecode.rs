@@ -43,6 +43,16 @@ struct ReaderState {
     reader: Box<dyn ReadSeek + Send>,
     /// `Content-Length` or equivalent total size, used to answer `AVSEEK_SIZE`.
     content_length: Option<u64>,
+    avio_debug: bool,
+    read_calls: u64,
+    read_bytes: u64,
+    read_zero: u64,
+    read_short: u64,
+    read_errors: u64,
+    seek_calls: u64,
+    seek_errors: u64,
+    last_seek_offset: i64,
+    last_seek_whence: c_int,
 }
 
 use ffmpeg_sys_next::*;
@@ -51,6 +61,12 @@ use serde_json::json;
 
 use tier1::renderer::RenderOutput;
 use tier1::spec::ThumbnailConfig;
+
+fn avio_debug_enabled() -> bool {
+    std::env::var("TBR_AVIO_DEBUG")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
 
 // ── Orientation helpers ───────────────────────────────────────────────────────
 
@@ -123,11 +139,27 @@ const AVSEEK_SIZE: c_int = 0x10000;
 /// The opaque pointer is `*mut ReaderState`.
 unsafe extern "C" fn avio_read_cb(opaque: *mut c_void, buf: *mut u8, buf_size: c_int) -> c_int {
     let state = &mut *(opaque as *mut ReaderState);
+    state.read_calls += 1;
     let slice = std::slice::from_raw_parts_mut(buf, buf_size as usize);
     match state.reader.read(slice) {
-        Ok(0) => AVERROR_EOF,
-        Ok(n) => n as c_int,
-        Err(_) => -5, // −EIO
+        Ok(0) => {
+            state.read_zero += 1;
+            AVERROR_EOF
+        }
+        Ok(n) => {
+            state.read_bytes += n as u64;
+            if n < buf_size as usize {
+                state.read_short += 1;
+            }
+            n as c_int
+        }
+        Err(e) => {
+            state.read_errors += 1;
+            if state.avio_debug && state.read_errors <= 4 {
+                eprintln!("[avdecode][avio] read error {}: {}", state.read_errors, e);
+            }
+            -5 // −EIO
+        }
     }
 }
 
@@ -137,10 +169,22 @@ unsafe extern "C" fn avio_read_cb(opaque: *mut c_void, buf: *mut u8, buf_size: c
 /// pseudo-flag `AVSEEK_SIZE` (return total length without seeking).
 unsafe extern "C" fn avio_seek_cb(opaque: *mut c_void, offset: i64, whence: c_int) -> i64 {
     let state = &mut *(opaque as *mut ReaderState);
+    state.seek_calls += 1;
+    state.last_seek_offset = offset;
+    state.last_seek_whence = whence;
     match whence {
-        SEEK_SET => state.reader.seek(SeekFrom::Start(offset as u64)).map(|p| p as i64).unwrap_or(-1),
-        SEEK_CUR => state.reader.seek(SeekFrom::Current(offset)).map(|p| p as i64).unwrap_or(-1),
-        SEEK_END => state.reader.seek(SeekFrom::End(offset)).map(|p| p as i64).unwrap_or(-1),
+        SEEK_SET => state.reader.seek(SeekFrom::Start(offset as u64)).map(|p| p as i64).unwrap_or_else(|_| {
+            state.seek_errors += 1;
+            -1
+        }),
+        SEEK_CUR => state.reader.seek(SeekFrom::Current(offset)).map(|p| p as i64).unwrap_or_else(|_| {
+            state.seek_errors += 1;
+            -1
+        }),
+        SEEK_END => state.reader.seek(SeekFrom::End(offset)).map(|p| p as i64).unwrap_or_else(|_| {
+            state.seek_errors += 1;
+            -1
+        }),
         w if w == AVSEEK_SIZE => state.content_length.map(|n| n as i64).unwrap_or(-1),
         _ => -1,
     }
@@ -204,8 +248,9 @@ pub fn decode_with_libav(
     content_length: Option<u64>,
     ext_hint: Option<String>,
     rotation_hint: i32,
+    seek_secs: Option<f64>,
 ) -> Option<RenderOutput> {
-    eprintln!("[avdecode] decode_with_libav: content_length={content_length:?}, ext_hint={ext_hint:?}, rotation_hint={rotation_hint}");
+    eprintln!("[avdecode] decode_with_libav: content_length={content_length:?}, ext_hint={ext_hint:?}, rotation_hint={rotation_hint}, seek_secs={seek_secs:?}");
 
     // Resolve the optional format hint to a *mut AVInputFormat.
     // av_find_input_format returns NULL when the name is unknown — that's fine,
@@ -229,7 +274,20 @@ pub fn decode_with_libav(
     // Box the reader state so it has a stable address.  All libav callbacks
     // hold a raw pointer into this box; the box must outlive every libav
     // resource.
-    let mut state = Box::new(ReaderState { reader, content_length });
+    let mut state = Box::new(ReaderState {
+        reader,
+        content_length,
+        avio_debug: avio_debug_enabled(),
+        read_calls: 0,
+        read_bytes: 0,
+        read_zero: 0,
+        read_short: 0,
+        read_errors: 0,
+        seek_calls: 0,
+        seek_errors: 0,
+        last_seek_offset: 0,
+        last_seek_whence: 0,
+    });
     let opaque = state.as_mut() as *mut ReaderState as *mut c_void;
 
     // Null-initialise all resource handles so the cleanup block can safely
@@ -246,6 +304,7 @@ pub fn decode_with_libav(
             opaque,
             fmt_hint_ptr,
             rotation_hint,
+            seek_secs,
             &mut avio_ctx,
             &mut fmt_ctx,
             &mut codec_ctx,
@@ -278,6 +337,19 @@ pub fn decode_with_libav(
         // set — free it ourselves.
         free_avio_ctx(&mut avio_ctx);
     }
+    if state.avio_debug {
+        eprintln!("[avdecode][avio] reads={} bytes={} short_reads={} eof_reads={} read_errors={} seeks={} seek_errors={} last_seek=(off={}, whence={})",
+            state.read_calls,
+            state.read_bytes,
+            state.read_short,
+            state.read_zero,
+            state.read_errors,
+            state.seek_calls,
+            state.seek_errors,
+            state.last_seek_offset,
+            state.last_seek_whence,
+        );
+    }
 
     // state drops here, after every libav resource that held its pointer is gone.
     drop(state);
@@ -292,6 +364,7 @@ unsafe fn decode_inner(
     opaque:        *mut c_void,
     fmt_hint:      *mut AVInputFormat,
     rotation_hint: i32,
+    seek_secs:  Option<f64>,
     avio_ctx:      &mut *mut AVIOContext,
     fmt_ctx:       &mut *mut AVFormatContext,
     codec_ctx:     &mut *mut AVCodecContext,
@@ -452,6 +525,25 @@ unsafe fn decode_inner(
         return None;
     }
 
+    // Video thumbnail path: try a lightweight seek to ~1s before decoding.
+    // This approximates ffmpeg `-ss 1` before input and avoids many first-frame
+    // black/splash thumbnails.
+    let mut applied_seek_secs: Option<f64> = None;
+    if let Some(secs) = seek_secs.filter(|s| *s > 0.0) {
+        let time_base = (*stream).time_base;
+        if time_base.num > 0 && time_base.den > 0 {
+            let target_ts = ((secs * time_base.den as f64) / time_base.num as f64).round() as i64;
+            let seek_ret = av_seek_frame(*fmt_ctx, stream_idx, target_ts, AVSEEK_FLAG_BACKWARD as c_int);
+            if seek_ret >= 0 {
+                avcodec_flush_buffers(*codec_ctx);
+                applied_seek_secs = Some(secs);
+                eprintln!("[avdecode] seek applied: {secs:.3}s (ts={target_ts})");
+            } else {
+                eprintln!("[avdecode] seek skipped: av_seek_frame returned {seek_ret}");
+            }
+        }
+    }
+
     // ── Decode first frame ────────────────────────────────────────────────────
     *packet = av_packet_alloc();
     *frame  = av_frame_alloc();
@@ -461,25 +553,40 @@ unsafe fn decode_inner(
     }
 
     let mut decoded = false;
-    while av_read_frame(*fmt_ctx, *packet) >= 0 {
-        if (**packet).stream_index == stream_idx {
-            if avcodec_send_packet(*codec_ctx, *packet) >= 0
-                && avcodec_receive_frame(*codec_ctx, *frame) >= 0
-            {
-                decoded = true;
-                av_packet_unref(*packet);
-                break;
+    let attempts = if applied_seek_secs.is_some() { 2 } else { 1 };
+    for attempt in 0..attempts {
+        if attempt == 1 {
+            // Seeked decode failed once; retry from stream start for robustness.
+            let _ = av_seek_frame(*fmt_ctx, stream_idx, 0, AVSEEK_FLAG_BACKWARD as c_int);
+            avcodec_flush_buffers(*codec_ctx);
+            eprintln!("[avdecode] retrying decode from stream start");
+        }
+
+        while av_read_frame(*fmt_ctx, *packet) >= 0 {
+            if (**packet).stream_index == stream_idx {
+                if avcodec_send_packet(*codec_ctx, *packet) >= 0
+                    && avcodec_receive_frame(*codec_ctx, *frame) >= 0
+                {
+                    decoded = true;
+                    av_packet_unref(*packet);
+                    break;
+                }
+            }
+            av_packet_unref(*packet);
+        }
+
+        // Flush the decoder - some codecs buffer the frame and only emit it
+        // when EOF is signalled by a NULL packet.
+        if !decoded {
+            if avcodec_send_packet(*codec_ctx, ptr::null_mut()) >= 0 {
+                if avcodec_receive_frame(*codec_ctx, *frame) >= 0 {
+                    decoded = true;
+                }
             }
         }
-        av_packet_unref(*packet);
-    }
-    // Flush the decoder — some image codecs (e.g. AV1/AVIF, some PNG paths)
-    // buffer the frame and only emit it when EOF is signalled by a NULL packet.
-    if !decoded {
-        if avcodec_send_packet(*codec_ctx, ptr::null_mut()) >= 0 {
-            if avcodec_receive_frame(*codec_ctx, *frame) >= 0 {
-                decoded = true;
-            }
+
+        if decoded {
+            break;
         }
     }
     if !decoded {
@@ -570,7 +677,7 @@ unsafe fn decode_inner(
         image:           img,
         renderer:        Some("ffmpeg".to_string()),
         codec:           codec_name,
-        video_seek_secs: None,
+        video_seek_secs: applied_seek_secs,
         properties:      Some(json!({
             "width":  reported_w,
             "height": reported_h,

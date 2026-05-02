@@ -55,7 +55,7 @@ impl InProcessRenderer for Tier2Renderer {
 
             match kind {
                 Some(FileKind::Image) => render_image(cook, &ext, content_length).await,
-                // TODO: FileKind::Video  → ffmpeg seek+frame
+                Some(FileKind::Video) => render_video(cook, &ext, content_length).await,
                 //       FileKind::Vector → resvg
                 //       FileKind::Document → pdfium first page
                 _ => false,
@@ -280,7 +280,7 @@ async fn render_image(
                     // a MOV/ISOBMFF container that libav can handle.
                     let mut reader = reader;
                     let rotation_hint = container_rotation_hint(&mut *reader);
-                    crate::avdecode::decode_with_libav(reader, content_length, Some(ext_owned), rotation_hint)
+                    crate::avdecode::decode_with_libav(reader, content_length, Some(ext_owned), rotation_hint, None)
                 }
             }
         })
@@ -292,7 +292,7 @@ async fn render_image(
         tokio::task::spawn_blocking(move || {
             let mut reader = reader;
             let rotation_hint = container_rotation_hint(&mut *reader);
-            crate::avdecode::decode_with_libav(reader, content_length, Some(ext_owned), rotation_hint)
+            crate::avdecode::decode_with_libav(reader, content_length, Some(ext_owned), rotation_hint, None)
         })
         .await
         .ok()
@@ -326,12 +326,59 @@ async fn render_image_fallback(
         let rotation_hint = isobmff_irot_rotation(&bytes);
         tokio::task::spawn_blocking(move || {
             let reader: Box<dyn ReadSeek + Send> = Box::new(Cursor::new(bytes));
-            crate::avdecode::decode_with_libav(reader, cl, Some(ext_owned), rotation_hint)
+            crate::avdecode::decode_with_libav(reader, cl, Some(ext_owned), rotation_hint, None)
         })
         .await
         .ok()
         .flatten()
     };
+    apply_result(cook, result)
+}
+
+/// Render a video thumbnail.
+///
+/// First pass behavior:
+/// - seek to ~1s into the stream (`-ss 1` equivalent)
+/// - decode first frame after seek
+/// - scale to cover the canonical thumbnail dimensions
+async fn render_video(
+    cook: &mut dyn RenderCook,
+    ext: &str,
+    content_length: Option<u64>,
+) -> bool {
+    const VIDEO_SEEK_SECS: f64 = 1.0;
+
+    let reader = match cook.take_reader() {
+        Some(r) => r,
+        None => {
+            let url = cook.input_url().to_string();
+            let ext_owned = ext.to_string();
+            let Some(bytes) = fetch_url(&url).await else {
+                cook.fail_cook("tier2: video fallback fetch failed");
+                return true;
+            };
+            let cl = Some(bytes.len() as u64);
+            let result = tokio::task::spawn_blocking(move || {
+                let reader: Box<dyn ReadSeek + Send> = Box::new(Cursor::new(bytes));
+                crate::avdecode::decode_with_libav(reader, cl, Some(ext_owned), 0, Some(VIDEO_SEEK_SECS))
+            })
+            .await
+            .ok()
+            .flatten();
+            return apply_result(cook, result);
+        }
+    };
+
+    let ext_owned = ext.to_string();
+    eprintln!("[tier2] render_video: streaming reader  ext={ext}  seek={VIDEO_SEEK_SECS}s");
+
+    let result = tokio::task::spawn_blocking(move || {
+        crate::avdecode::decode_with_libav(reader, content_length, Some(ext_owned), 0, Some(VIDEO_SEEK_SECS))
+    })
+    .await
+    .ok()
+    .flatten();
+
     apply_result(cook, result)
 }
 

@@ -10,10 +10,10 @@
 //! There is exactly one [`ThumbCook`] per request.  The renderer receives it
 //! as `&mut dyn RenderCook` — a thin trait-object view that erases the `S`
 //! (HttpStream) type parameter and exposes only what the renderer needs:
-//! - **Read** — `take_reader()` enters streaming mode on the buffer and
-//!   moves it out as a `Box<dyn ReadSeek + Send>`.  libav's `AVIOContext`
-//!   callbacks call into this synchronously, driving the HTTP download
-//!   on-demand without buffering the whole file.
+//! - **Read** — `take_reader()` moves the buffer out as a
+//!   `Box<dyn ReadSeek + Send>` while preserving random-access page-cache
+//!   semantics.  libav's `AVIOContext` callbacks call into this synchronously,
+//!   driving HTTP reads on-demand without buffering the whole file.
 //! - **Metadata** — `media_kind()`, `media_extension()`, `content_length()`,
 //!   `input_url()`.
 //! - **Write-back** — `set_render_image()`, `set_render_renderer()`, etc.

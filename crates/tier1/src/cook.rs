@@ -495,8 +495,8 @@ impl<S: HttpStream> ThumbCook<S> {
         self.http_stream_len()
     }
 
-    /// Enter streaming mode on the buffer, snapshot I/O time, take the buffer
-    /// out of the cook, and wrap it as a `Box<dyn ReadSeek + Send>`.
+    /// Snapshot I/O time, take the buffer out of the cook, and wrap it as a
+    /// `Box<dyn ReadSeek + Send>`.
     ///
     /// Returns `None` when no connection is open.
     #[cfg(feature = "native")]
@@ -505,7 +505,6 @@ impl<S: HttpStream> ThumbCook<S> {
         S: Send + 'static,
     {
         let buf = self.http_buf.as_mut()?;
-        buf.enter_streaming_mode();
         self.tel_io_secs = buf.io_secs();
         let buf = self.http_buf.take()?;
         Some(Box::new(crate::http_buf::SyncHttpReader::new(buf)))
