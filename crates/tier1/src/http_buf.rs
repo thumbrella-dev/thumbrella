@@ -32,6 +32,11 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
+#[cfg(not(target_arch = "wasm32"))]
+use web_time::Instant;
+
 /// Page size for the sparse cache (4 KiB).
 pub const PAGE_SIZE: usize = 4 * 1024;
 
@@ -104,6 +109,12 @@ pub trait HttpStream: Sized {
     /// Flattened response headers (lowercase keys).
     fn response_headers(&self) -> HashMap<String, String>;
 
+    /// Final response URL after redirects, if the backend exposes it.
+    ///
+    /// Used for redirect-aware cache identity. Backends that cannot provide a
+    /// post-redirect URL can return `None`.
+    fn final_url(&self) -> Option<String> { None }
+
     /// Pull the next chunk of bytes from the response body.
     /// Returns `Ok(None)` when the stream is exhausted.
     async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, HttpError>;
@@ -117,6 +128,26 @@ pub trait HttpStream: Sized {
     /// response body signals the connection pool automatically.
     async fn close(&mut self) {}
 }
+
+// ── StreamBound — platform-sensitive trait bound ──────────────────────────────
+
+/// Sealed bound used by [`ThumbCookGeneric::run`].
+///
+/// On native the in-process renderer requires `Send + 'static` so it can
+/// coerce `&mut ThumbCook<S>` to `&mut dyn RenderCook`.  On wasm32 /
+/// non-native targets there is only one thread and no `Send` requirement.
+///
+/// Callers outside tier1 never need to name this trait — it is automatically
+/// satisfied by any `HttpStream` impl on each platform.
+#[cfg(feature = "native")]
+pub trait StreamBound: HttpStream + Send + 'static {}
+#[cfg(feature = "native")]
+impl<S: HttpStream + Send + 'static> StreamBound for S {}
+
+#[cfg(not(feature = "native"))]
+pub trait StreamBound: HttpStream {}
+#[cfg(not(feature = "native"))]
+impl<S: HttpStream> StreamBound for S {}
 
 // ── HttpBuffer ────────────────────────────────────────────────────────────────
 
@@ -172,6 +203,7 @@ impl<S: HttpStream> HttpBuffer<S> {
     /// Zero bytes are pulled from the body at this point.
     pub async fn open(url: String, options: ConnectOptions) -> Result<Self, HttpError> {
         let stream = S::connect(&url, &options).await?;
+        let final_url = stream.final_url().unwrap_or_else(|| url.clone());
 
         let status = stream.status();
         let headers = stream.response_headers();
@@ -185,7 +217,7 @@ impl<S: HttpStream> HttpBuffer<S> {
             .unwrap_or(false);
 
         Ok(Self {
-            url,
+            url: final_url,
             headers,
             status,
             content_length,
@@ -418,7 +450,7 @@ impl<S: HttpStream> HttpBuffer<S> {
 
         // cursor >= stream_pos: fetch the next chunk(s) until cursor lands inside.
         loop {
-            let t = std::time::Instant::now();
+            let t = Instant::now();
             let chunk = self.stream.next_chunk().await?;
             self.io_secs_count += t.elapsed().as_secs_f64();
             let Some(chunk) = chunk else {
@@ -447,7 +479,7 @@ impl<S: HttpStream> HttpBuffer<S> {
             if self.pages.contains_key(&target_page) {
                 break;
             }
-            let t = std::time::Instant::now();
+            let t = Instant::now();
             let chunk = self.stream.next_chunk().await?;
             self.io_secs_count += t.elapsed().as_secs_f64();
             let Some(chunk) = chunk else { break };
@@ -469,7 +501,7 @@ impl<S: HttpStream> HttpBuffer<S> {
                 format!("bytes={tail_start}-{}", content_length - 1),
             )],
         };
-        let t = std::time::Instant::now();
+        let t = Instant::now();
         let mut stream = S::connect(&self.url, &opts).await?;
         let mut bytes = Vec::new();
         while let Some(chunk) = stream.next_chunk().await? {
@@ -502,7 +534,7 @@ impl<S: HttpStream> HttpBuffer<S> {
         let opts = ConnectOptions {
             headers: vec![("range".into(), format!("bytes={start}-{end}"))],
         };
-        let t = std::time::Instant::now();
+        let t = Instant::now();
         let mut stream = S::connect(&self.url, &opts).await?;
         let mut bytes = Vec::with_capacity(len);
         while let Some(chunk) = stream.next_chunk().await? {
@@ -554,6 +586,7 @@ impl<S: HttpStream> HttpBuffer<S> {
 pub struct ReqwestStream {
     status: u16,
     headers: HashMap<String, String>,
+    final_url: Option<String>,
     inner: ReqwestStreamInner,
 }
 
@@ -594,6 +627,7 @@ impl HttpStream for ReqwestStream {
                     Ok(Self {
                         status: if range_start > 0 { 206 } else { 200 },
                         headers,
+                        final_url: Some(url.to_string()),
                         inner: ReqwestStreamInner::File { data: sliced, pos: 0 },
                     })
                 }
@@ -606,6 +640,7 @@ impl HttpStream for ReqwestStream {
                     Ok(Self {
                         status,
                         headers: HashMap::new(),
+                        final_url: Some(url.to_string()),
                         inner: ReqwestStreamInner::File { data: vec![], pos: 0 },
                     })
                 }
@@ -625,14 +660,16 @@ impl HttpStream for ReqwestStream {
             .await
             .map_err(|e| HttpError::Network(e.to_string()))?;
 
+        let final_url = Some(resp.url().to_string());
         let status = resp.status().as_u16();
         let headers = flatten_headers(resp.headers());
 
-        Ok(Self { status, headers, inner: ReqwestStreamInner::Http(resp) })
+        Ok(Self { status, headers, final_url, inner: ReqwestStreamInner::Http(resp) })
     }
 
     fn status(&self) -> u16 { self.status }
     fn response_headers(&self) -> HashMap<String, String> { self.headers.clone() }
+    fn final_url(&self) -> Option<String> { self.final_url.clone() }
 
     async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, HttpError> {
         match &mut self.inner {

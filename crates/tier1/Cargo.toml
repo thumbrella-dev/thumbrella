@@ -48,7 +48,7 @@ mozjpeg-rs  = "0.9"
 # heavy native decoders (e.g. mozjpeg) belong in a higher tier or a
 # native-only feature so they don't block the wasm32 target.
 image = { version = "0.25", default-features = false, features = [
-    "jpeg", "png", "gif", "webp", "bmp", "tiff",
+    "jpeg", "png", "gif", "bmp", "tiff",
 ] }
 # jpeg-decoder is a transitive dep of image; listed directly to access scale()
 # for DCT-level power-of-two downscaling in the progressive JPEG shortcut path.
@@ -63,6 +63,7 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 # Bytes — zero-copy buffer primitive.  WASM-compatible; used by the native
 # streaming handler and transitively by tokio/axum/reqwest.
 bytes = "1"
+web-time = "1"
 
 # ── Native-only ───────────────────────────────────────────────────────────────
 rusqlite        = { version = "0.32", features = ["bundled"],                optional = true }
@@ -70,8 +71,7 @@ tokio           = { version = "1", features = ["full"],                      opt
 axum            = { version = "0.8",                                         optional = true }
 axum-extra      = { version = "0.10", features = ["query"],                  optional = true }
 tower-http      = { version = "0.6", features = ["trace", "cors"],           optional = true }
-reqwest         = { version = "0.12", default-features = false,
-                    features = ["rustls-tls", "stream", "http2", "json"],     optional = true }
+reqwest         = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "http2", "json"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"],          optional = true }
 time            = { version = "0.3", features = ["formatting"],              optional = true }
 clap            = { version = "4", features = ["derive"],                    optional = true }

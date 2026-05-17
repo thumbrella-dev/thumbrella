@@ -170,7 +170,6 @@ pub struct ThumbTrace {
 
     // ── Source identity ───────────────────────────────────────────────────────
     pub canonical_url:    Option<String>,
-    pub final_url:        Option<String>,
     pub cache_key:        Option<String>,
     pub cache_key_source: Option<String>,
     pub source_etag:      Option<String>,
@@ -178,24 +177,27 @@ pub struct ThumbTrace {
     // ── Download metrics ──────────────────────────────────────────────────────
     pub download_bytes:      u64,
     pub download_tail_bytes: u64,
-    pub connect_secs:        f64,
+    /// All time awaiting fetch (connect + transfer).
     pub io_secs:             f64,
 
     // ── Step timing ───────────────────────────────────────────────────────────
+    /// Inspect phase, plus shortcut phase if it failed.
     pub inspect_secs:   f64,
-    pub shortcut_secs:  f64,
-    pub decode_secs:    f64,
+    /// Decode/render phase, or the shortcut phase when shortcut succeeded.
+    pub render_secs:    f64,
     pub deliver_secs:   f64,
 
     // ── Render details ────────────────────────────────────────────────────────
-    pub render_resolution: Option<[u32; 2]>,
     pub thumbnail_bytes:   Option<u64>,
 
     // ── Job provenance ────────────────────────────────────────────────────────
     pub job_tier:     u8,
     pub job_renderer: Option<String>,
-    pub job_codec:    Option<String>,
-    pub video_seek_secs: Option<f64>,
+
+    // ── Failure detail ────────────────────────────────────────────────────────
+    /// Human-readable error description; `None` on success.  Mirrors
+    /// [`ThumbResult::message`] so the trace contains the full failure reason.
+    pub message: Option<String>,
 
     // ── Attribution ───────────────────────────────────────────────────────────
     pub session_id:  Option<String>,

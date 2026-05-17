@@ -4,7 +4,7 @@
 //! ## Async contract
 //!
 //! `get` is async because Cloudflare Workers cache lookups are async JS calls.
-//! `put_task` returns an owned [`DeferredFuture`] the caller schedules via
+//! `put` returns an owned [`DeferredFuture`] the caller schedules via
 //! [`AfterResponse`] — writes never block the response path.
 //!
 //! ## Global cache store
@@ -29,7 +29,8 @@ pub mod sqlite;
 
 // ── Backend trait ─────────────────────────────────────────────────────────────
 
-/// A single cache storage backend.  Implementations must be `Send + Sync`.
+/// A single cache storage backend.
+#[cfg(feature = "native")]
 pub trait CacheBackend: Send + Sync {
     /// Human-readable name used in logs (e.g. `"sqlite"`, `"redis"`).
     fn name(&self) -> &'static str;
@@ -40,9 +41,32 @@ pub trait CacheBackend: Send + Sync {
 
     /// Return a `'static + Send` future that writes `value` under `key`.
     ///
+    /// `cost` is a normalized render-complexity weight (0 = trivial, 100 = ≥ 1 s render).
+    /// Backends use it to favour retaining expensive entries under eviction pressure.
+    ///
     /// The future is owned and can be handed to [`AfterResponse`] so the
     /// write runs after the HTTP response.  Errors should be swallowed inside.
-    fn put_task(&self, key: String, value: String) -> DeferredFuture;
+    fn put(&self, key: String, value: String, cost: u8) -> DeferredFuture;
+}
+
+/// A single cache storage backend for single-threaded wasm targets.
+#[cfg(not(feature = "native"))]
+pub trait CacheBackend {
+    /// Human-readable name used in logs (e.g. "sqlite", "redis").
+    fn name(&self) -> &'static str;
+
+    /// Async lookup.  Returns the stored JSON string on hit, `None` on miss.
+    /// Also bumps `last_accessed_at` / `access_count` in-place.
+    fn get<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = Option<String>> + 'a>>;
+
+    /// Return a `'static` future that writes `value` under `key`.
+    ///
+    /// `cost` is a normalized render-complexity weight (0 = trivial, 100 = ≥ 1 s render).
+    /// Backends use it to favour retaining expensive entries under eviction pressure.
+    ///
+    /// The future is owned and can be handed to [`AfterResponse`] so the
+    /// write runs after the HTTP response.  Errors should be swallowed inside.
+    fn put(&self, key: String, value: String, cost: u8) -> DeferredFuture;
 }
 
 // ── CacheStore ────────────────────────────────────────────────────────────────
@@ -89,16 +113,17 @@ impl CacheStore {
         let json = hit_json?;
 
         // Back-propagate into earlier (hotter) backends that missed.
+        // Cost 0 — back-prop is a warm, not a fresh render; no cost context available.
         #[cfg(feature = "native")]
         for backend in &self.backends[..hit_index] {
             let b = Arc::clone(backend);
             let k = key.to_string();
             let v = json.clone();
-            tokio::task::spawn(async move { b.put_task(k, v).await });
+            tokio::task::spawn(async move { b.put(k, v, 0).await });
         }
         #[cfg(not(feature = "native"))]
         for backend in &self.backends[..hit_index] {
-            backend.put_task(key.to_string(), json.clone()).await;
+            backend.put(key.to_string(), json.clone(), 0).await;
         }
 
         serde_json::from_str(&json).ok()
@@ -106,15 +131,30 @@ impl CacheStore {
 
     /// Schedule writes of `result` into all backends via `after`.
     ///
+    /// `cost` is a normalized render-complexity weight — see [`CacheBackend::put`].
+    /// Use [`render_cost_from_secs`] to derive it from step timing.
+    ///
     /// Writes are deferred — they run after the HTTP response via
     /// [`AfterResponse::drain_spawn`] (native) or `ctx.wait_until` (Workers).
-    pub fn store(&self, key: &str, result: &ThumbResult, after: &mut AfterResponse) {
+    pub fn store(&self, key: &str, result: &ThumbResult, cost: u8, after: &mut AfterResponse) {
         if self.backends.is_empty() { return; }
         let Ok(json) = serde_json::to_string(result) else { return };
         for backend in &self.backends {
-            after.push(backend.put_task(key.to_string(), json.clone()));
+            after.push(backend.put(key.to_string(), json.clone(), cost));
         }
     }
+}
+
+// ── Cost helper ───────────────────────────────────────────────────────────────
+
+/// Normalize total render-step duration to a cache cost (0–100).
+///
+/// Maps linearly: 0 s → 0, 1 s → 100. Any duration ≥ 1 s saturates at 100.
+/// Pass the sum of all processing step timings (inspect + shortcut + decode +
+/// deliver), excluding network I/O which is outside our control.
+pub fn render_cost_from_secs(render_secs: f64) -> u8 {
+    let render_ms = (render_secs * 1000.0) as u64;
+    (render_ms.min(1000) / 10) as u8
 }
 
 // ── DSN parser ────────────────────────────────────────────────────────────────

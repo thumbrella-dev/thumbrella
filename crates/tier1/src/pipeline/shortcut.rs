@@ -20,7 +20,7 @@
 //!   requests needed
 
 use std::collections::{HashSet, VecDeque};
-use std::time::Instant;
+use web_time::Instant;
 
 use image::{DynamicImage, imageops::FilterType};
 
@@ -183,6 +183,7 @@ async fn try_progressive_jpeg_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     cook.render_handler     = RenderHandler::Builtin;
     cook.tel_decode_secs    = decode_secs;
     cook.out_download_bytes = dl_bytes;
+    cook.render_is_progressive_partial = true;  // Mark as partial decode to suppress pixel-art heuristic
     if src_w > 0 && src_h > 0 {
         cook.media.properties = Some(image_properties(src_w, src_h, color_type));
     }

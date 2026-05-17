@@ -60,8 +60,7 @@ pub async fn startup(cfg: &AppConfig) -> Arc<Runtime> {
     tracing::debug!("startup: complete");
 
     // ── 5. Background image ───────────────────────────────────────────────────
-    static BG_PNG: &[u8] = include_bytes!("../assets/background.png");
-    let background_image = image::load_from_memory(BG_PNG)
+    let background_image = image::load_from_memory(crate::assets::BACKGROUND_PNG)
         .ok()
         .map(|img| img.into_rgb8());
     if background_image.is_some() {
@@ -71,11 +70,8 @@ pub async fn startup(cfg: &AppConfig) -> Arc<Runtime> {
     }
 
     // ── 6. Placeholder images ─────────────────────────────────────────────────
-    static PH_GENERAL_JPG: &[u8] = include_bytes!("../assets/placeholder_general.jpg");
-    static PH_ERROR_JPG:   &[u8] = include_bytes!("../assets/placeholder_error.jpg");
-
-    let placeholder_general = PH_GENERAL_JPG.to_vec();
-    let placeholder_error   = PH_ERROR_JPG.to_vec();
+    let placeholder_general = crate::assets::PLACEHOLDER_GENERAL_JPG.to_vec();
+    let placeholder_error   = crate::assets::PLACEHOLDER_ERROR_JPG.to_vec();
 
     Runtime::new(
         cache,

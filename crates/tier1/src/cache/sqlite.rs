@@ -102,21 +102,22 @@ impl CacheBackend for SqliteCacheBackend {
         })
     }
 
-    fn put_task(&self, key: String, value: String) -> DeferredFuture {
+    fn put(&self, key: String, value: String, cost: u8) -> DeferredFuture {
         let conn = Arc::clone(&self.conn);
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
                 let size = value.len() as i64;
                 let conn = conn.lock().unwrap();
                 conn.execute(
-                    "INSERT INTO thumbrella(cache_key, value, size_bytes, last_accessed_at)
-                          VALUES (?1, ?2, ?3, unixepoch())
+                    "INSERT INTO thumbrella(cache_key, value, size_bytes, last_accessed_at, render_cost)
+                          VALUES (?1, ?2, ?3, unixepoch(), ?4)
                      ON CONFLICT(cache_key) DO UPDATE
                         SET value            = excluded.value,
                             size_bytes       = excluded.size_bytes,
                             last_accessed_at = unixepoch(),
+                            render_cost      = excluded.render_cost,
                             access_count     = access_count + 1",
-                    params![key, value, size],
+                    params![key, value, size, cost as i64],
                 )
                 .ok();
             })
@@ -173,7 +174,7 @@ fn check_schema(path: &str) -> crate::diag::Validation {
         );
     }
 
-    let required = ["cache_key", "value", "size_bytes", "last_accessed_at", "access_count"];
+    let required = ["cache_key", "value", "size_bytes", "last_accessed_at", "access_count", "render_cost"];
     let missing: Vec<&str> = required.iter()
         .copied()
         .filter(|c| !cols.iter().any(|col| col == c))
@@ -202,11 +203,12 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             value            TEXT    NOT NULL,
             size_bytes       INTEGER NOT NULL DEFAULT 0,
             last_accessed_at INTEGER NOT NULL DEFAULT (unixepoch()),
-            access_count     INTEGER NOT NULL DEFAULT 1
+            access_count     INTEGER NOT NULL DEFAULT 1,
+            render_cost      INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE INDEX IF NOT EXISTS idx_thumbrella_lru
-            ON thumbrella(last_accessed_at);
+            ON thumbrella(last_accessed_at, render_cost);
 
         -- Human-readable stats view.
         CREATE VIEW IF NOT EXISTS cache_stats AS
@@ -235,10 +237,10 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
 
         INSERT OR REPLACE INTO readme VALUES (
             'drop_entries_by_gb',
-            'Delete the oldest entries until total stored data fits within ?1 GiB.',
+            'Delete cheapest+oldest entries until total stored data fits within ?1 GiB.',
             'DELETE FROM thumbrella WHERE cache_key IN (
                 SELECT cache_key FROM thumbrella
-                 ORDER BY last_accessed_at ASC
+                 ORDER BY last_accessed_at ASC, render_cost ASC
                  LIMIT max(0, (
                      SELECT count(*) FROM thumbrella
                  ) - (

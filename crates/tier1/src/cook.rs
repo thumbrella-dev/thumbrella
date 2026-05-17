@@ -56,7 +56,7 @@ use image::{DynamicImage, RgbImage};
 use serde_json::Value;
 
 use crate::after::AfterResponse;
-use crate::cache::CacheStore;
+use crate::cache::{CacheStore, render_cost_from_secs};
 use crate::http_buf::{HttpBuffer, HttpStream};
 use crate::media::{FileKind, Strategy};
 use crate::result::{CacheOutcome, JobStatus, RenderHandler, ThumbResult, ThumbTrace};
@@ -301,6 +301,10 @@ pub struct ThumbCook<S: HttpStream> {
     pub render_codec: Option<String>,
     /// Video seek offset in seconds (video only).
     pub render_video_seek_secs: Option<f64>,
+    /// True when `render_image` is a partial progressive JPEG decode (low-res
+    /// intermediate). Used to suppress pixel-art heuristic since the small size
+    /// is an artifact of partial decoding, not genuine small-image content.
+    pub render_is_progressive_partial: bool,
 
     // ── Output fields — written as steps complete ────────────────────────────
     /// The encoded JPEG thumbnail bytes.
@@ -378,6 +382,7 @@ impl<S: HttpStream> ThumbCook<S> {
             render_renderer:          None,
             render_codec:             None,
             render_video_seek_secs:   None,
+            render_is_progressive_partial: false,
             out_thumbnail:       Vec::new(),
             out_strategy:        None,
             out_message:         String::new(),
@@ -628,6 +633,9 @@ impl<S: HttpStream> ThumbCook<S> {
         #[cfg(not(feature = "native"))]
         let default_tier = 1;
 
+        // Shortcut succeeded when it ran (secs > 0) but no full decode followed.
+        let shortcut_succeeded = self.tel_shortcut_secs > 0.0 && self.tel_decode_secs == 0.0;
+
         ThumbTrace {
             timestamp,
             status,
@@ -635,26 +643,21 @@ impl<S: HttpStream> ThumbCook<S> {
             kind:                self.media.kind,
             extension:           self.media.extension.clone(),
             canonical_url:       self.src.canonical_url.clone(),
-            final_url:           self.src.final_url.clone(),
             cache_key:           self.src.cache_key.clone(),
             cache_key_source:    self.src.cache_key_source.clone(),
             source_etag:         self.src.etag.clone(),
             download_bytes:      self.out_download_bytes,
             download_tail_bytes: self.tel_download_tail_bytes,
-            connect_secs:        self.tel_connect_secs,
-            io_secs:             self.tel_io_secs,
-            inspect_secs:        self.tel_inspect_secs,
-            shortcut_secs:       self.tel_shortcut_secs,
-            decode_secs:         self.tel_decode_secs,
+            io_secs:             self.tel_connect_secs + self.tel_io_secs,
+            inspect_secs:        self.tel_inspect_secs + if shortcut_succeeded { 0.0 } else { self.tel_shortcut_secs },
+            render_secs:         if shortcut_succeeded { self.tel_shortcut_secs } else { self.tel_decode_secs },
             deliver_secs:        self.tel_deliver_secs,
-            render_resolution:   self.render_resolution,
             thumbnail_bytes:     self.tel_thumbnail_bytes,
             job_tier:            self.tel_job_tier_override.unwrap_or(default_tier),
             job_renderer:        self.render_renderer.clone(),
-            job_codec:           self.render_codec.clone(),
-            video_seek_secs:     self.render_video_seek_secs,
             session_id:          self.ctx_session_id.clone(),
             customer_id:         self.ctx_customer_id.clone(),
+            message:             if self.out_message.is_empty() { None } else { Some(self.out_message.clone()) },
             cache_hit:           self.out_cache,
             render_handler:      self.render_handler,
             caller:              self.ctx_caller.clone(),
@@ -701,10 +704,10 @@ impl<S: HttpStream> ThumbCook<S> {
         S: Send + 'static,
     {
         let mut after = AfterResponse::new();
-        let t0 = std::time::Instant::now();
+        let t0 = web_time::Instant::now();
 
         // ── connect ───────────────────────────────────────────────────────────
-        let t_step = std::time::Instant::now();
+        let t_step = web_time::Instant::now();
         pipeline::connect(&mut self).await;
         self.tel_connect_secs = t_step.elapsed().as_secs_f64();
         if !self.status.is_processing() {
@@ -762,7 +765,7 @@ impl<S: HttpStream> ThumbCook<S> {
 
         if !self.ctx_handoff {
             // ── inspect ───────────────────────────────────────────────────────
-            let t_step = std::time::Instant::now();
+            let t_step = web_time::Instant::now();
             pipeline::inspect(&mut self).await;
             self.tel_inspect_secs = t_step.elapsed().as_secs_f64();
             if !self.status.is_processing() {
@@ -772,7 +775,7 @@ impl<S: HttpStream> ThumbCook<S> {
             }
 
             // ── shortcut ──────────────────────────────────────────────────────
-            let t_step = std::time::Instant::now();
+            let t_step = web_time::Instant::now();
             pipeline::shortcut(&mut self).await;
             self.tel_shortcut_secs = t_step.elapsed().as_secs_f64();
             self.stamp_download_bytes();
@@ -781,7 +784,8 @@ impl<S: HttpStream> ThumbCook<S> {
                 self.out_duration = t0.elapsed().as_secs_f64();
                 if let Some(ref key) = self.src.cache_key.clone() {
                     let result = self.to_result();
-                    self.runtime.cache.store(key, &result, &mut after);
+                    let cost = render_cost_from_secs(self.out_duration);
+                    self.runtime.cache.store(key, &result, cost, &mut after);
                 }
                 return self.finish(after);
             }
@@ -795,14 +799,15 @@ impl<S: HttpStream> ThumbCook<S> {
 
         // ── deliver (when shortcut decoded an image) ──────────────────────────
         if self.render_image.is_some() {
-            let t_step = std::time::Instant::now();
+            let t_step = web_time::Instant::now();
             pipeline::deliver(&mut self).await;
             self.tel_deliver_secs = t_step.elapsed().as_secs_f64();
             self.out_duration = t0.elapsed().as_secs_f64();
             if !self.ctx_handoff && self.status == CookStatus::Complete {
                 if let Some(ref key) = self.src.cache_key.clone() {
                     let result = self.to_result();
-                    self.runtime.cache.store(key, &result, &mut after);
+                    let cost = render_cost_from_secs(self.out_duration);
+                    self.runtime.cache.store(key, &result, cost, &mut after);
                 }
             }
             return self.finish(after);
@@ -816,7 +821,7 @@ impl<S: HttpStream> ThumbCook<S> {
             // Coerce &mut ThumbCook<S> → &mut dyn RenderCook.  Valid because
             // impl<S: HttpStream + Send + 'static> RenderCook for ThumbCook<S>
             // and run() requires S: Send + 'static.
-            let t_render = std::time::Instant::now();
+            let t_render = web_time::Instant::now();
             if renderer.render(&mut self as &mut dyn RenderCook).await {
                 // Renderer claimed the format.  On success render_image is set
                 // and deliver produces the thumbnail.  On failure the renderer
@@ -836,14 +841,15 @@ impl<S: HttpStream> ThumbCook<S> {
                 }
 
                 if self.render_image.is_some() {
-                    let t_step = std::time::Instant::now();
+                    let t_step = web_time::Instant::now();
                     pipeline::deliver(&mut self).await;
                     self.tel_deliver_secs = t_step.elapsed().as_secs_f64();
                     self.out_duration = t0.elapsed().as_secs_f64();
                     if !self.ctx_handoff && self.status == CookStatus::Complete {
                         if let Some(ref key) = self.src.cache_key.clone() {
                             let result = self.to_result();
-                            self.runtime.cache.store(key, &result, &mut after);
+                            let cost = render_cost_from_secs(self.out_duration);
+                            self.runtime.cache.store(key, &result, cost, &mut after);
                         }
                     }
                 }
@@ -909,12 +915,9 @@ impl<S: HttpStream> ThumbCook<S> {
                     if self.render_renderer.is_none() {
                         self.render_renderer = remote_trace.job_renderer.clone();
                     }
-                    self.render_codec = remote_trace.job_codec.clone();
-                    self.render_video_seek_secs = remote_trace.video_seek_secs;
-                    self.render_resolution = remote_trace.render_resolution;
                     self.tel_thumbnail_bytes = remote_trace.thumbnail_bytes;
                     self.tel_download_tail_bytes = remote_trace.download_tail_bytes;
-                    self.tel_decode_secs = remote_trace.decode_secs;
+                    self.tel_decode_secs = remote_trace.render_secs;
                     self.tel_deliver_secs = remote_trace.deliver_secs;
                     self.tel_io_secs += remote_trace.io_secs;
 

@@ -21,6 +21,7 @@
 //! - `Thumb*` — per-item types (`ThumbInput`, `ThumbResult`, `ThumbTrace`, `ThumbCook`, `ThumbHandoff`, …)
 
 // ── Core modules (always compiled) ───────────────────────────────────────────
+pub mod assets;
 pub mod after;
 pub mod cache;
 pub mod cook;
@@ -62,7 +63,7 @@ pub use cook::{CallerContext, CookStatus, InputSpec, MediaInfo, Runtime, SourceI
 pub use renderer::{InProcessRenderer, RenderCook, RenderOutput, SharedRenderer, apply_render_output, with_renderer};
 pub use spec::ShortcutLimits;
 pub use dispatch::{ThumbRoute, route};
-pub use handoff::ThumbHandoff;
+pub use handoff::{HandoffResponse, ThumbHandoff};
 pub use media::{FileKind, Strategy};
 pub use request::{CallRequest, ThumbInput, ThumbObject};
 pub use result::{CacheOutcome, CallRecord, CallResponse, JobStatus, RenderHandler, ThumbResult, ThumbTrace};
@@ -74,7 +75,7 @@ pub type ThumbCook = cook::ThumbCook<http_buf::PlatformStream>;
 
 /// Combined `Read + Seek` supertrait.  Use `Box<dyn ReadSeek + Send>` where a
 /// type-erased seekable reader is needed (e.g. libav AVIOContext opaque).
-pub use http_buf::ReadSeek;
+pub use http_buf::{ReadSeek, StreamBound};
 
 /// Synchronous `Read + Seek` adapter over the live HTTP buffer.
 ///

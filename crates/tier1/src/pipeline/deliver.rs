@@ -4,7 +4,7 @@
 //! a higher-tier handoff) and produces the final thumbnail JPEG stored in
 //! `cook.response.thumbnail`.
 
-use std::time::Instant;
+use web_time::Instant;
 
 use image::imageops::{crop_imm, resize, unsharpen, FilterType};
 use image::DynamicImage;
@@ -30,7 +30,10 @@ pub async fn deliver<S: HttpStream>(cook: &mut ThumbCook<S>) {
     // quality to preserve hard edges without ringing artifacts.
     // Embedded camera thumbnails (e.g. 192×144 EXIF previews) are photographic
     // content and must NOT trigger this path.
-    let pixel_art = img.width() <= config.pixel_art_max_px
+    // Also, progressive JPEG partial decodes produce artificially small images
+    // and must NOT trigger this path — use the photographic quality instead.
+    let pixel_art = !cook.render_is_progressive_partial
+        && img.width() <= config.pixel_art_max_px
         && img.height() <= config.pixel_art_max_px;
 
     let t0 = Instant::now();

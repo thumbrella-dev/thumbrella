@@ -38,7 +38,12 @@ use std::future::Future;
 use std::pin::Pin;
 
 /// A fire-and-forget future.
+#[cfg(feature = "native")]
 pub type DeferredFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+
+/// A fire-and-forget future for single-threaded wasm targets.
+#[cfg(not(feature = "native"))]
+pub type DeferredFuture = Pin<Box<dyn Future<Output = ()> + 'static>>;
 
 /// Collects futures that should run after the response is sent.
 #[derive(Default)]
@@ -52,7 +57,14 @@ impl AfterResponse {
     }
 
     /// Schedule a future to run after the response.
+    #[cfg(feature = "native")]
     pub fn push(&mut self, fut: impl Future<Output = ()> + Send + 'static) {
+        self.tasks.push(Box::pin(fut));
+    }
+
+    /// Schedule a future to run after the response.
+    #[cfg(not(feature = "native"))]
+    pub fn push(&mut self, fut: impl Future<Output = ()> + 'static) {
         self.tasks.push(Box::pin(fut));
     }
 
