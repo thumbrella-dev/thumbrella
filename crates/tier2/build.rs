@@ -20,19 +20,30 @@
 // So we only need to add the transitive deps here.
 
 fn main() {
+    // Only re-run this script if build.rs itself changes.  Without this,
+    // Cargo re-runs on every file-system event — a problem on Windows-hosted
+    // bind mounts where NTFS timestamps fire spuriously and trigger relinks.
+    println!("cargo:rerun-if-changed=build.rs");
+
     // Tell the linker where to find the system static archives.
     // On Debian/Ubuntu amd64 these land in /usr/lib/x86_64-linux-gnu.
     println!("cargo:rustc-link-search=native=/usr/lib/x86_64-linux-gnu");
 
-    // Transitive deps of our minimal FFmpeg build.
-    // Link these dynamically so GNU ld ordering constraints don't matter;
-    // all three have .so files on Debian/Ubuntu.
-    println!("cargo:rustc-link-lib=dylib=z");
-    println!("cargo:rustc-link-lib=dylib=bz2");
-    println!("cargo:rustc-link-lib=dylib=lzma");
+    // Transitive deps of our minimal FFmpeg build: z (zlib), bz2, lzma.
+    //
+    // These must appear *after* the FFmpeg archives on the linker command
+    // line so GNU ld can resolve the forward references from libavcodec etc.
+    // into these compression libraries.  cargo:rustc-link-arg values are
+    // always appended after all cargo:rustc-link-lib values (including those
+    // emitted by ffmpeg-sys-next's build script), so this single -Wl flag
+    // lands in the right position without any --start-group tricks.
+    //
+    // -Bstatic / -Bdynamic scope the mode so only these three archives are
+    // pulled as .a files; the linker reverts to shared-library search after.
+    println!("cargo:rustc-link-arg=-Wl,-Bstatic,-lz,-lbz2,-llzma,-Bdynamic");
 
-    // These are glibc-provided; linking them dynamically is fine and
-    // avoids the pitfalls of statically linking libpthread.
+    // These are glibc-provided; keep dynamic (statically linking glibc is
+    // fragile and ties the binary to the build host's glibc version).
     println!("cargo:rustc-link-lib=dylib=m");
     println!("cargo:rustc-link-lib=dylib=atomic");
 }

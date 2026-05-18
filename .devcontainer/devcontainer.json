@@ -5,7 +5,9 @@
     "target": "dev"
   },
   "mounts": [
-    "source=${localWorkspaceFolder},target=/workspace,type=bind"
+    "source=${localWorkspaceFolder},target=/workspace,type=bind",
+    "source=thumbrella-target,target=/workspaces/thumbrella/target,type=volume",
+    "source=thumbrella-cargo-registry,target=/usr/local/cargo/registry,type=volume"
   ],
   "customizations": {
     "vscode": {

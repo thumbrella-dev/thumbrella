@@ -468,11 +468,6 @@ pub fn print_thumb_items(items: &[(crate::ThumbResult, crate::ThumbTrace)], show
             if let Some(ref u) = trace.canonical_url {
                 println!("    canonical_url     : {u}");
             }
-            if trace.final_url.as_deref() != trace.canonical_url.as_deref() {
-                if let Some(ref u) = trace.final_url {
-                    println!("    final_url         : {u}");
-                }
-            }
             if let Some(ref h) = trace.cache_key {
                 let src = trace.cache_key_source.as_deref().unwrap_or("url");
                 println!("    cache_key         : {h}  (from {src})");
@@ -489,9 +484,6 @@ pub fn print_thumb_items(items: &[(crate::ThumbResult, crate::ThumbTrace)], show
             } else {
                 println!("    download_bytes    : {}", fmt_bytes(trace.download_bytes));
             }
-            if trace.connect_secs > 0.0 {
-                println!("    connect_secs      : {}", fmt_secs(trace.connect_secs));
-            }
             if trace.io_secs > 0.0 {
                 println!("    io_secs           : {}", fmt_secs(trace.io_secs));
             }
@@ -499,29 +491,12 @@ pub fn print_thumb_items(items: &[(crate::ThumbResult, crate::ThumbTrace)], show
             if trace.inspect_secs > 0.0 {
                 println!("    inspect_secs      : {}", fmt_secs(trace.inspect_secs));
             }
-            if trace.shortcut_secs > 0.0 {
-                println!("    shortcut_secs     : {}", fmt_secs(trace.shortcut_secs));
-            }
-            if trace.decode_secs > 0.0 {
-                println!("    decode_secs       : {}", fmt_secs(trace.decode_secs));
-            }
             if trace.deliver_secs > 0.0 {
                 println!("    deliver_secs      : {}", fmt_secs(trace.deliver_secs));
             }
-            if let Some([w, h]) = trace.render_resolution {
-                println!("    render_resolution : {w}×{h}");
-            }
-
             if let Some(ref r) = trace.job_renderer {
                 println!("    job_renderer      : {r}");
             }
-            if let Some(ref c) = trace.job_codec {
-                println!("    job_codec         : {c}");
-            }
-            if let Some(v) = trace.video_seek_secs {
-                println!("    video_seek_secs   : {}", fmt_secs(v));
-            }
-
             let handler = get_str(&trace_json, "render_handler");
             println!("    render_handler    : {handler}");
             println!("    tier              : {}  v{}", trace.job_tier, trace.version);
@@ -722,7 +697,7 @@ async fn run_batch_dir(dir: String, output: String, runtime: Arc<Runtime>) {
         }
         {
             // CPU time = total - connect - io  (all in the trace)
-            let cpu = (result.duration - trace.connect_secs - trace.io_secs).max(0.0);
+            let cpu = (result.duration - trace.io_secs).max(0.0);
             if cpu > 0.0 {
                 html.push_str(&format!(
                     " &nbsp;<span class=\"thumb-size\">&#128336;{}</span>",
