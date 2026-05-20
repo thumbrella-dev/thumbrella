@@ -96,16 +96,20 @@ impl CacheStore {
     ///
     /// On the first hit, propagates the value back into earlier-index backends
     /// (best-effort, fire-and-forget) so hotter caches warm from cooler ones.
-    pub async fn check(&self, key: &str) -> Option<ThumbResult> {
+    ///
+    /// Returns the deserialized result and the name of the backend that hit.
+    pub async fn check(&self, key: &str) -> Option<(ThumbResult, &'static str)> {
         if self.backends.is_empty() { return None; }
 
         let mut hit_json:  Option<String> = None;
         let mut hit_index: usize = 0;
+        let mut hit_name:  &'static str = "";
 
         for (i, backend) in self.backends.iter().enumerate() {
             if let Some(v) = backend.get(key).await {
                 hit_json  = Some(v);
                 hit_index = i;
+                hit_name  = backend.name();
                 break;
             }
         }
@@ -126,7 +130,8 @@ impl CacheStore {
             backend.put(key.to_string(), json.clone(), 0).await;
         }
 
-        serde_json::from_str(&json).ok()
+        let result = serde_json::from_str(&json).ok()?;
+        Some((result, hit_name))
     }
 
     /// Schedule writes of `result` into all backends via `after`.

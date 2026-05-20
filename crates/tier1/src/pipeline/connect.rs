@@ -2,7 +2,7 @@
 
 use crate::cook::{CookStatus, ThumbCook};
 use crate::http_buf::{ConnectOptions, HttpBuffer, HttpStream};
-use crate::source::{canonical_url, conditional_headers, etag_from_headers};
+use crate::source::{CacheHints, canonical_url};
 
 /// Open the HTTP connection and capture response metadata.
 ///
@@ -17,15 +17,15 @@ use crate::source::{canonical_url, conditional_headers, etag_from_headers};
 /// - `cook.http_headers`          — full response headers
 /// - `cook.http_status`           — HTTP status code
 /// - `cook.http_accepts_ranges`   — from `Accept-Ranges` header
-/// - `cook.src.etag`              — upstream freshness token (opaque)
+/// - `cook.src.cache_hints`        — upstream freshness hints (parsed from headers)
 /// - `cook.src.final_url`         — URL after any redirects
 /// - `cook.src.canonical_url`     — query-stripped stable cache key
 pub async fn connect<S: HttpStream>(cook: &mut ThumbCook<S>) {
     let mut options = ConnectOptions::default();
 
-    // Apply conditional request headers from caller's prior etag.
-    if let Some(etag) = &cook.input.etag {
-        if let Some((name, value)) = conditional_headers(etag) {
+    // Apply conditional request headers from caller's prior cache hints.
+    if let Some(ref hints) = cook.input.hints {
+        if let Some((name, value)) = hints.to_conditional() {
             options.headers.push((name.to_string(), value.to_string()));
         }
     }
@@ -62,7 +62,7 @@ pub async fn connect<S: HttpStream>(cook: &mut ThumbCook<S>) {
         _ => {} // 2xx — continue
     }
 
-    cook.src.etag = etag_from_headers(&buf.headers);
+    cook.src.cache_hints   = CacheHints::from_response_headers(&buf.headers);
     cook.src.final_url     = Some(buf.url.clone());
     cook.src.canonical_url = canonical_url(&buf.url);
 

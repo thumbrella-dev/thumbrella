@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::source::CacheHints;
+
 // ── Per-item input ────────────────────────────────────────────────────────────
 
 /// Accepts either a bare URL string or a full object.
@@ -25,25 +27,24 @@ pub struct ThumbObject {
     /// Source URL.
     pub url: String,
 
-    /// Previously returned `etag` from a `ThumbResult`.
+    /// Cache hints from a prior `ThumbResult.hints`.
     ///
-    /// When supplied, the service issues a conditional fetch.  A `not_modified`
-    /// result may be returned — the one case where `thumbnail` bytes are absent.
-    ///
-    /// Opaque prefix determines the upstream request header:
-    /// - `E…` → `If-None-Match`
-    /// - `M…` → `If-Modified-Since`
+    /// When supplied, the service:
+    /// - Returns `not_modified` immediately if the hints say the resource is
+    ///   still fresh (no upstream fetch needed).
+    /// - Issues a conditional fetch (`If-None-Match` / `If-Modified-Since`)
+    ///   when the resource is stale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub etag: Option<String>,
+    pub hints: Option<CacheHints>,
 
 }
 
 impl ThumbInput {
-    /// Extract the URL, validator, and ops without allocating an intermediate struct.
-    pub fn into_parts(self) -> (String, Option<String>) {
+    /// Extract the URL and hints without allocating an intermediate struct.
+    pub fn into_parts(self) -> (String, Option<CacheHints>) {
         match self {
             Self::Url(url) => (url, None),
-            Self::Object(obj) => (obj.url, obj.etag),
+            Self::Object(obj) => (obj.url, obj.hints),
         }
     }
 }

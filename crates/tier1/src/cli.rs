@@ -46,11 +46,12 @@ enum Command {
         #[arg(required = true)]
         urls: Vec<String>,
 
-        /// Previously returned etag (applied to all URLs when supplied).
+        /// Previously returned cache hints JSON (from `ThumbResult.hints`).
         ///
-        /// Prefix encodes the header: `E…` → If-None-Match, `M…` → If-Modified-Since.
+        /// When supplied, enables conditional fetch and client-side freshness
+        /// checks.  Pass the value of the `hints` field from a prior result.
         #[arg(long)]
-        etag: Option<String>,
+        hints: Option<String>,
 
         /// Emit machine-readable JSON instead of the default pretty text.
         #[arg(long)]
@@ -103,9 +104,9 @@ enum Command {
         #[arg(required = true, num_args = 1..)]
         args: Vec<String>,
 
-        /// Previously returned etag (applied to all URLs when supplied).
+        /// Previously returned cache hints JSON (from `ThumbResult.hints`).
         #[arg(long)]
-        etag: Option<String>,
+        hints: Option<String>,
     },
 }
 
@@ -152,13 +153,13 @@ where
     };
 
     match cli.command {
-        Command::Serve                              => run_server(runtime.unwrap()).await,
-        Command::Thumb { urls, etag, json, trace } => run_thumb(urls, etag, json, trace, runtime.unwrap()).await,
-        Command::Diag { json }                     => run_diag(json),
-        Command::BatchDir { dir, output }          => run_batch_dir(dir, output, runtime.unwrap()).await,
-        Command::StreamBatch { server, args, etag } => {
+        Command::Serve                                   => run_server(runtime.unwrap()).await,
+        Command::Thumb { urls, hints, json, trace }      => run_thumb(urls, hints, json, trace, runtime.unwrap()).await,
+        Command::Diag { json }                           => run_diag(json),
+        Command::BatchDir { dir, output }               => run_batch_dir(dir, output, runtime.unwrap()).await,
+        Command::StreamBatch { server, args, hints } => {
             let (server, urls) = normalize_stream_batch_args(server, args);
-            run_stream_batch(server, urls, etag).await;
+            run_stream_batch(server, urls, hints).await;
         }
     }
 }
@@ -240,15 +241,22 @@ pub fn promote_url(raw: &str) -> String {
     format!("file://{}", abs.display())
 }
 
-async fn run_thumb(urls: Vec<String>, etag: Option<String>, json: bool, show_trace: bool, runtime: Arc<Runtime>) {
+async fn run_thumb(urls: Vec<String>, hints_json: Option<String>, json: bool, show_trace: bool, runtime: Arc<Runtime>) {
     use futures::stream::{FuturesUnordered, StreamExt};
     use crate::{ThumbCook, cook::InputSpec};
+
+    let hints = hints_json.as_deref().and_then(|s| {
+        match serde_json::from_str(s) {
+            Ok(h) => Some(h),
+            Err(e) => { eprintln!("warning: could not parse --hints JSON: {e}"); None }
+        }
+    });
 
     let mut pool = FuturesUnordered::new();
     for raw in urls {
         let is_local = !raw.contains("://") || raw.starts_with("file://");
         let url = promote_url(&raw);
-        let input = InputSpec { url, etag: etag.clone(), allow_local: is_local };
+        let input = InputSpec { url, hints: hints.clone(), allow_local: is_local };
         pool.push(ThumbCook::from_input(input, Arc::clone(&runtime)).run());
     }
 
@@ -277,22 +285,29 @@ async fn run_thumb(urls: Vec<String>, etag: Option<String>, json: bool, show_tra
     }
 }
 
-async fn run_stream_batch(server: String, urls: Vec<String>, etag: Option<String>) {
+async fn run_stream_batch(server: String, urls: Vec<String>, hints_json: Option<String>) {
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD;
     use futures::StreamExt;
     use reqwest::header;
     use tokio::time::Instant;
 
+    let hints: Option<crate::source::CacheHints> = hints_json.as_deref().and_then(|s| {
+        match serde_json::from_str(s) {
+            Ok(h) => Some(h),
+            Err(e) => { eprintln!("warning: could not parse --hints JSON: {e}"); None }
+        }
+    });
+
     let endpoint = format!("{}/batch", server.trim_end_matches('/'));
     let request = crate::CallRequest {
         items: urls
             .into_iter()
             .map(|url| {
-                if let Some(tag) = etag.clone() {
+                if let Some(ref h) = hints {
                     crate::ThumbInput::Object(crate::ThumbObject {
                         url,
-                        etag: Some(tag),
+                        hints: Some(h.clone()),
                     })
                 } else {
                     crate::ThumbInput::Url(url)
@@ -440,13 +455,19 @@ pub fn print_thumb_items(items: &[(crate::ThumbResult, crate::ThumbTrace)], show
             println!("  strategy  : {strategy}");
         }
 
-        if let Some(ref e) = result.etag {
-            println!("  etag      : {e}");
-        }
-
-        if let Some(ref c) = result.cache {
-            if c != "miss" {
-                println!("  cache     : {c}");
+        if let Some(ref hints) = result.cache {
+            if let Ok(val) = serde_json::to_value(hints) {
+                if let Some(obj) = val.as_object() {
+                    let pairs: Vec<String> = obj.iter()
+                        .map(|(k, v)| {
+                            if let Some(s) = v.as_str() { format!("{k}={s}") }
+                            else { format!("{k}={v}") }
+                        })
+                        .collect();
+                    if !pairs.is_empty() {
+                        println!("  cache     : {}", pairs.join("  "));
+                    }
+                }
             }
         }
 
@@ -558,7 +579,7 @@ async fn run_batch_dir(dir: String, output: String, runtime: Arc<Runtime>) {
             std::env::current_dir().unwrap_or_default().join(path)
         };
         let url = format!("file://{}", abs.display());
-        let input = InputSpec { url, etag: None, allow_local: true };
+        let input = InputSpec { url, hints: None, allow_local: true };
 
         let (result, trace, mut after) =
             ThumbCook::from_input(input, Arc::clone(&runtime)).run().await;

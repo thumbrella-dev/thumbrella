@@ -27,6 +27,7 @@ use crate::http_buf::PlatformStream;
 use crate::handoff::{HANDOFF_CODE_HEADER, HandoffResponse, ThumbHandoff};
 use crate::request::CallRequest;
 use crate::result::JobStatus;
+use crate::source::CacheHints;
 use crate::tracelog::TraceStore;
 
 // ── GET /health ───────────────────────────────────────────────────────────────
@@ -84,12 +85,12 @@ pub async fn thumb(
             .into_response();
     }
 
-    let etag: Option<String> = headers
+    let hints: Option<CacheHints> = headers
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_owned());
+        .map(|etag| CacheHints { etag: Some(etag.to_owned()), ..Default::default() });
 
-    let input = InputSpec { url: q.url, etag, allow_local: false };
+    let input = InputSpec { url: q.url, hints, allow_local: false };
     let (result, _trace, mut after) = ThumbCook::<PlatformStream>::from_input(input, runtime).run().await;
     after.drain_spawn();
 
@@ -102,15 +103,8 @@ pub async fn thumb(
             .into_response();
     }
 
-    let mut resp_headers = axum::http::HeaderMap::new();
-    if let Some(ref tok) = result.etag {
-        if let Ok(hv) = axum::http::HeaderValue::from_str(tok) {
-            resp_headers.insert(header::ETAG, hv);
-        }
-    }
     (
         StatusCode::OK,
-        resp_headers,
         [(header::CONTENT_TYPE, "image/jpeg")],
         Bytes::from(result.thumbnail),
     )
@@ -133,7 +127,7 @@ pub async fn batch(
 
     let mut jobs = Vec::with_capacity(req.items.len());
     for (idx, input) in req.items.into_iter().enumerate() {
-        let (url, etag) = input.into_parts();
+        let (url, hints) = input.into_parts();
         if url.starts_with("file://") {
             return (
                 StatusCode::BAD_REQUEST,
@@ -141,7 +135,7 @@ pub async fn batch(
             )
                 .into_response();
         }
-        jobs.push((idx, InputSpec { url, etag, allow_local: false }));
+        jobs.push((idx, InputSpec { url, hints, allow_local: false }));
     }
     let count = jobs.len();
 

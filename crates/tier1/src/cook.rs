@@ -59,7 +59,8 @@ use crate::after::AfterResponse;
 use crate::cache::{CacheStore, render_cost_from_secs};
 use crate::http_buf::{HttpBuffer, HttpStream};
 use crate::media::{FileKind, Strategy};
-use crate::result::{CacheOutcome, JobStatus, RenderHandler, ThumbResult, ThumbTrace};
+use crate::result::{JobStatus, RenderHandler, ThumbResult, ThumbTrace};
+use crate::source::CacheHints;
 use crate::spec::ShortcutLimits;
 use crate::tracelog::TraceStore;
 use crate::pipeline;
@@ -206,8 +207,8 @@ impl Runtime {
 pub struct InputSpec {
     /// Source URL to fetch and thumbnail.
     pub url: String,
-    /// Caller's prior etag for conditional fetch.
-    pub etag: Option<String>,
+    /// Caller's prior cache hints for conditional fetch and client-side freshness.
+    pub hints: Option<CacheHints>,
     /// Allow `file://` URLs.  Only the CLI sets this to `true`.
     pub allow_local: bool,
 }
@@ -240,8 +241,8 @@ pub struct SourceIdentity {
     pub final_url: Option<String>,
     /// Query-stripped stable cache key URL.
     pub canonical_url: Option<String>,
-    /// Upstream ETag or Last-Modified in opaque `E…`/`M…` prefixed form.
-    pub etag: Option<String>,
+    /// Structured freshness hints parsed from upstream response headers.
+    pub cache_hints: Option<CacheHints>,
     /// SHA-256(customer_id ":" content_identity) — the cache storage key.
     pub cache_key: Option<String>,
     /// Which header (or fallback) was used as the identity input for `cache_key`.
@@ -316,7 +317,7 @@ pub struct ThumbCook<S: HttpStream> {
     /// Stable token identifying the placeholder image, when applicable.
     pub out_placeholder: Option<String>,
     /// Cache outcome — `None` until the cache check runs.
-    pub out_cache: Option<CacheOutcome>,
+    pub cache_hit: Option<String>,
     /// Wall-clock seconds to generate this result.
     pub out_duration: f64,
     /// Bytes read from the source to generate this result.
@@ -387,7 +388,7 @@ impl<S: HttpStream> ThumbCook<S> {
             out_strategy:        None,
             out_message:         String::new(),
             out_placeholder:     None,
-            out_cache:           None,
+            cache_hit:           None,
             out_duration:        0.0,
             out_download_bytes:  0,
             tel_connect_secs:    0.0,
@@ -571,7 +572,6 @@ impl<S: HttpStream> ThumbCook<S> {
             download_size: self.out_download_bytes,
             message:       if self.out_message.is_empty() { None } else { Some(self.out_message.clone()) },
             strategy:      self.out_strategy,
-            etag:          self.src.etag.clone(),
             thumbnail:     self.out_thumbnail.clone(),
             placeholder:   self.out_placeholder.clone(),
             mime:          self.media.mime.clone(),
@@ -579,7 +579,7 @@ impl<S: HttpStream> ThumbCook<S> {
             kind:          self.media.kind,
             extension:     self.media.extension.clone(),
             properties:    self.media.properties.clone().unwrap_or_else(|| Value::Object(Default::default())),
-            cache:         self.out_cache.map(|c| c.public_label().to_string()),
+            cache:         self.src.cache_hints.clone(),
         }
     }
 
@@ -595,7 +595,6 @@ impl<S: HttpStream> ThumbCook<S> {
             download_size: self.out_download_bytes.max(self.http_bytes_fetched()),
             message:       None,
             strategy:      self.out_strategy,
-            etag:          self.src.etag.clone(),
             thumbnail:     self.runtime.placeholder_general.clone(),
             placeholder:   Some(self.out_placeholder.clone().unwrap_or_else(|| "general".to_string())),
             mime:          self.media.mime.clone(),
@@ -603,7 +602,7 @@ impl<S: HttpStream> ThumbCook<S> {
             kind:          self.media.kind,
             extension:     self.media.extension.clone(),
             properties:    self.media.properties.clone().unwrap_or_else(|| Value::Object(Default::default())),
-            cache:         self.out_cache.map(|c| c.public_label().to_string()),
+            cache:         self.src.cache_hints.clone(),
         }
     }
 
@@ -645,7 +644,7 @@ impl<S: HttpStream> ThumbCook<S> {
             canonical_url:       self.src.canonical_url.clone(),
             cache_key:           self.src.cache_key.clone(),
             cache_key_source:    self.src.cache_key_source.clone(),
-            source_etag:         self.src.etag.clone(),
+            source_etag:         self.src.cache_hints.as_ref().and_then(|h| h.etag.clone()),
             download_bytes:      self.out_download_bytes,
             download_tail_bytes: self.tel_download_tail_bytes,
             io_secs:             self.tel_connect_secs + self.tel_io_secs,
@@ -658,7 +657,7 @@ impl<S: HttpStream> ThumbCook<S> {
             session_id:          self.ctx_session_id.clone(),
             customer_id:         self.ctx_customer_id.clone(),
             message:             if self.out_message.is_empty() { None } else { Some(self.out_message.clone()) },
-            cache_hit:           self.out_cache,
+            cache_hit:           self.cache_hit.clone(),
             render_handler:      self.render_handler,
             caller:              self.ctx_caller.clone(),
             cancelled:           self.ctx_cancelled,
@@ -706,6 +705,15 @@ impl<S: HttpStream> ThumbCook<S> {
         let mut after = AfterResponse::new();
         let t0 = web_time::Instant::now();
 
+        // ── Level 2 fast path (client-side freshness) ─────────────────────────
+        // If the caller's cache hints say the resource is still fresh, skip
+        // the upstream fetch entirely and return NotModified immediately.
+        if self.input.hints.as_ref().map_or(false, |h| h.is_fresh()) {
+            self.status = CookStatus::NotModified;
+            self.out_duration = t0.elapsed().as_secs_f64();
+            return self.finish(after);
+        }
+
         // ── connect ───────────────────────────────────────────────────────────
         let t_step = web_time::Instant::now();
         pipeline::connect(&mut self).await;
@@ -743,7 +751,7 @@ impl<S: HttpStream> ThumbCook<S> {
         // ── cache check ───────────────────────────────────────────────────────
         if !self.ctx_handoff {
             if let Some(ref key) = self.src.cache_key.clone() {
-            if let Some(cached) = self.runtime.cache.check(key).await {
+            if let Some((cached, backend_name)) = self.runtime.cache.check(key).await {
                 self.http_close().await;
                 self.out_thumbnail     = cached.thumbnail;
                 self.out_strategy      = cached.strategy;
@@ -755,7 +763,8 @@ impl<S: HttpStream> ThumbCook<S> {
                 self.media.kind        = cached.kind;
                 self.media.extension   = cached.extension;
                 self.media.properties  = Some(cached.properties);
-                self.out_cache         = Some(CacheOutcome::File);
+                self.src.cache_hints   = cached.cache.clone();
+                self.cache_hit         = Some(backend_name.to_string());
                 self.status            = CookStatus::Complete;
                 self.out_duration      = t0.elapsed().as_secs_f64();
                 return self.finish(after);

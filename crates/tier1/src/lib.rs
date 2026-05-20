@@ -66,8 +66,8 @@ pub use dispatch::{ThumbRoute, route};
 pub use handoff::{HandoffResponse, ThumbHandoff};
 pub use media::{FileKind, Strategy};
 pub use request::{CallRequest, ThumbInput, ThumbObject};
-pub use result::{CacheOutcome, CallRecord, CallResponse, JobStatus, RenderHandler, ThumbResult, ThumbTrace};
-pub use source::{SourceRef, canonical_url, conditional_headers, etag_from_headers};
+pub use result::{CallRecord, CallResponse, JobStatus, RenderHandler, ThumbResult, ThumbTrace};
+pub use source::{CacheHints, SourceRef, canonical_url};
 
 /// Concrete `ThumbCook` type for native server builds.
 #[cfg(feature = "native")]

@@ -8,6 +8,8 @@
 //! need to persist after the connection closes (`final_url`, the upstream etag)
 //! are stored in `ThumbTrace`.
 
+use std::time::SystemTime;
+
 use serde::{Deserialize, Serialize};
 
 // ── Source reference ──────────────────────────────────────────────────────────
@@ -138,6 +140,7 @@ pub fn content_hash_from_headers(
 /// - `M…` → was a Last-Modified value
 ///
 /// Returns `None` if neither header is present.
+#[deprecated(note = "use CacheHints::from_response_headers instead")]
 pub fn etag_from_headers(headers: &std::collections::HashMap<String, String>) -> Option<String> {
     if let Some(v) = headers.get("etag") {
         return Some(format!("E{v}"));
@@ -155,10 +158,170 @@ pub fn etag_from_headers(headers: &std::collections::HashMap<String, String>) ->
 /// subsequent fetch so the server can respond with `304 Not Modified`.
 ///
 /// Returns `None` if the string is empty or has an unrecognised prefix.
+#[deprecated(note = "use CacheHints::to_conditional instead")]
 pub fn conditional_headers(etag: &str) -> Option<(&'static str, &str)> {
     match etag.as_bytes().first() {
         Some(b'E') => Some(("if-none-match", &etag[1..])),
         Some(b'M') => Some(("if-modified-since", &etag[1..])),
         _ => None,
     }
+}
+
+// ── CacheHints ────────────────────────────────────────────────────────────────
+
+/// Structured cache freshness hints derived from upstream HTTP response headers.
+///
+/// Returned to callers as part of [`crate::result::ThumbResult`] and accepted
+/// back on subsequent [`crate::request::ThumbObject`] requests, enabling both
+/// client-side and server-side freshness fast paths without encoding tricks.
+///
+/// # Client-side fast path
+///
+/// Before re-requesting a thumbnail, check `is_fresh()`.  If the hints say the
+/// resource is still fresh, the client can skip the request entirely.
+///
+/// # Server-side fast path
+///
+/// When a client sends `hints` back and `is_fresh()` is true, the pipeline
+/// returns `NotModified` immediately — no upstream HTTP call, no cache lookup.
+///
+/// # Conditional requests
+///
+/// When the resource is stale, `to_conditional()` produces the `If-None-Match`
+/// or `If-Modified-Since` header for an upstream revalidation request.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheHints {
+    /// Unix timestamp (seconds) after which the resource should be considered
+    /// stale.  Derived from `Cache-Control: max-age` (or `s-maxage`) minus the
+    /// `Age` header at fetch time.  `None` means no explicit freshness window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
+
+    /// `Cache-Control: stale-while-revalidate` window in seconds.
+    /// When set, the client may serve a stale response for this many extra
+    /// seconds while triggering a background refresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_while_revalidate: Option<u32>,
+
+    /// True when `Cache-Control: immutable` was present.
+    /// The resource will not change within its freshness window; clients should
+    /// skip revalidation until `expires_at` elapses.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub immutable: bool,
+
+    /// Raw upstream `ETag` value (with surrounding quotes).
+    /// Used to construct `If-None-Match` on revalidation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
+
+    /// Raw upstream `Last-Modified` value.
+    /// Used to construct `If-Modified-Since` when no ETag is available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_modified: Option<String>,
+}
+
+impl CacheHints {
+    /// Parse freshness hints from HTTP response headers.
+    ///
+    /// Returns `None` when none of the recognised headers are present or
+    /// contain useful information (e.g. `Cache-Control: no-store` only).
+    pub fn from_response_headers(headers: &std::collections::HashMap<String, String>) -> Option<Self> {
+        let mut hints = Self::default();
+        let mut any = false;
+
+        // ── Cache-Control ─────────────────────────────────────────────────────
+        if let Some(cc) = headers.get("cache-control") {
+            let mut max_age: Option<u64> = None;
+            for directive in cc.split(',').map(str::trim) {
+                let (key, val) = if let Some((k, v)) = directive.split_once('=') {
+                    (k.trim(), Some(v.trim()))
+                } else {
+                    (directive, None)
+                };
+                match key.to_ascii_lowercase().as_str() {
+                    "s-maxage" => {
+                        if let Some(v) = val.and_then(|v| v.parse::<u64>().ok()) {
+                            max_age = Some(v); // s-maxage takes priority
+                        }
+                    }
+                    "max-age" if max_age.is_none() => {
+                        if let Some(v) = val.and_then(|v| v.parse::<u64>().ok()) {
+                            max_age = Some(v);
+                        }
+                    }
+                    "immutable" => {
+                        hints.immutable = true;
+                        any = true;
+                    }
+                    "stale-while-revalidate" => {
+                        if let Some(v) = val.and_then(|v| v.parse::<u32>().ok()) {
+                            hints.stale_while_revalidate = Some(v);
+                            any = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            if let Some(age_secs) = max_age {
+                let age_consumed = headers
+                    .get("age")
+                    .and_then(|v| v.trim().parse::<u64>().ok())
+                    .unwrap_or(0);
+                let remaining = age_secs.saturating_sub(age_consumed);
+                let now = unix_now_secs();
+                hints.expires_at = Some(now + remaining);
+                any = true;
+            }
+        }
+
+        // ── ETag ──────────────────────────────────────────────────────────────
+        if let Some(v) = headers.get("etag") {
+            let v = v.trim().to_string();
+            if !v.is_empty() {
+                hints.etag = Some(v);
+                any = true;
+            }
+        }
+
+        // ── Last-Modified ─────────────────────────────────────────────────────
+        if let Some(v) = headers.get("last-modified") {
+            let v = v.trim().to_string();
+            if !v.is_empty() {
+                hints.last_modified = Some(v);
+                any = true;
+            }
+        }
+
+        if any { Some(hints) } else { None }
+    }
+
+    /// Produce the conditional-request `(header-name, value)` for revalidation.
+    ///
+    /// Prefers `If-None-Match` (ETag) over `If-Modified-Since`.
+    /// Returns `None` when neither validator is present.
+    pub fn to_conditional(&self) -> Option<(&'static str, &str)> {
+        if let Some(ref etag) = self.etag {
+            return Some(("if-none-match", etag.as_str()));
+        }
+        if let Some(ref lm) = self.last_modified {
+            return Some(("if-modified-since", lm.as_str()));
+        }
+        None
+    }
+
+    /// Returns `true` if the resource should still be considered fresh.
+    ///
+    /// Freshness is determined solely from `expires_at`.  When `expires_at` is
+    /// `None` the resource has no explicit freshness window and is always stale.
+    pub fn is_fresh(&self) -> bool {
+        self.expires_at.map_or(false, |exp| unix_now_secs() < exp)
+    }
+}
+
+fn unix_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }

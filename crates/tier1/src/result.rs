@@ -17,40 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use crate::cook::CallerContext;
 use crate::media::{FileKind, Strategy};
-
-// ── Cache outcome ─────────────────────────────────────────────────────────────
-
-/// Which cache backend provided (or skipped) this result — internal detail.
-///
-/// Stored in [`ThumbTrace`]; never sent to clients verbatim.  The public-facing
-/// field on [`ThumbResult`] collapses all hit variants to `"hit"` via
-/// [`CacheOutcome::public_label`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum CacheOutcome {
-    #[default]
-    Miss,
-    Ignore,
-    File,
-    CfCache,
-    CfKv,
-    Redis,
-    Sqlite,
-}
-
-impl CacheOutcome {
-    pub fn is_hit(self) -> bool {
-        matches!(self, Self::File | Self::CfCache | Self::CfKv | Self::Redis | Self::Sqlite)
-    }
-
-    pub fn public_label(self) -> &'static str {
-        match self {
-            Self::Ignore => "ignore",
-            Self::Miss   => "miss",
-            _            => "hit",
-        }
-    }
-}
+use crate::source::CacheHints;
 
 // ── Render handler ────────────────────────────────────────────────────────────
 
@@ -112,9 +79,6 @@ pub struct ThumbResult {
     /// Human-readable error/status detail; `None` on clean success.
     pub message: Option<String>,
     pub strategy: Option<Strategy>,
-    pub etag: Option<String>,
-    #[serde(with = "base64_bytes")]
-    pub thumbnail: Vec<u8>,
     pub placeholder: Option<String>,
     pub mime: Option<String>,
     pub file_size: Option<u64>,
@@ -123,7 +87,14 @@ pub struct ThumbResult {
     /// Format-specific properties (dimensions, color depth, …).  Always present;
     /// empty object `{}` when no properties were extracted.
     pub properties: Value,
-    pub cache: Option<String>,
+    /// Structured cache freshness hints from the upstream response.
+    ///
+    /// Round-trip this field back as `ThumbObject.hints` on subsequent requests
+    /// to enable server-side conditional fetches and client-side freshness checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<CacheHints>,
+    #[serde(with = "base64_bytes")]
+    pub thumbnail: Vec<u8>,
 }
 
 impl Default for ThumbResult {
@@ -135,8 +106,6 @@ impl Default for ThumbResult {
             download_size: 0,
             message:       None,
             strategy:      None,
-            etag:          None,
-            thumbnail:     Vec::new(),
             placeholder:   None,
             mime:          None,
             file_size:     None,
@@ -144,6 +113,7 @@ impl Default for ThumbResult {
             extension:     None,
             properties:    Value::Object(Default::default()),
             cache:         None,
+            thumbnail:     Vec::new(),
         }
     }
 }
@@ -202,7 +172,8 @@ pub struct ThumbTrace {
     // ── Attribution ───────────────────────────────────────────────────────────
     pub session_id:  Option<String>,
     pub customer_id: Option<String>,
-    pub cache_hit:   Option<CacheOutcome>,
+    /// Name of the cache backend that produced the hit (e.g. `"sqlite"`, `"redis"`); `None` on miss.
+    pub cache_hit:   Option<String>,
     pub render_handler: RenderHandler,
     pub caller:      Option<CallerContext>,
     pub cancelled:   bool,
