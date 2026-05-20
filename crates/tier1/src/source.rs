@@ -275,17 +275,17 @@ impl CacheHints {
             }
         }
 
-        // ── ETag ──────────────────────────────────────────────────────────────
+        // ── ETag / Last-Modified ──────────────────────────────────────────────
+        // ETag is the authoritative validator (RFC 7232 §6 — servers must give
+        // it precedence over If-Modified-Since).  Only fall back to Last-Modified
+        // when no ETag is available; storing both would be redundant dead weight.
         if let Some(v) = headers.get("etag") {
             let v = v.trim().to_string();
             if !v.is_empty() {
                 hints.etag = Some(v);
                 any = true;
             }
-        }
-
-        // ── Last-Modified ─────────────────────────────────────────────────────
-        if let Some(v) = headers.get("last-modified") {
+        } else if let Some(v) = headers.get("last-modified") {
             let v = v.trim().to_string();
             if !v.is_empty() {
                 hints.last_modified = Some(v);

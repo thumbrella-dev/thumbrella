@@ -33,6 +33,7 @@ pub mod pipeline;
 pub mod spec;
 pub mod request;
 pub mod result;
+pub mod fetch_guard;
 pub mod source;
 pub mod tracelog;
 

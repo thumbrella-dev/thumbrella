@@ -17,6 +17,9 @@
 //! | `TBR_CACHE`                | —       | Cache backend DSN — `sqlite:<path>`, …          |
 //! | `TBR_CACHE_MAX_ITEMS`      | —       | Max cache entries (backend-specific meaning)     |
 //! | `TBR_TRACE`                | —       | Trace sink DSN — `ndjson:<path>`, …             |
+//! | `TBR_FAILURE_TTL`          | 5       | URL failure debounce window (seconds)            |
+//! | `TBR_BACKOFF_DEFAULT`      | 60      | Origin back-off TTL when no `Retry-After` header |
+//! | `TBR_BACKOFF_CEILING`      | 3600    | Origin back-off maximum TTL cap (seconds)        |
 
 // ── AppConfig ─────────────────────────────────────────────────────────────────
 
@@ -62,6 +65,16 @@ pub struct AppConfig {
     /// `ndjson:<path>`, etc.  `None` disables trace logging.
     pub trace_url: Option<String>,
 
+    // ── Fetch protection ──────────────────────────────────────────────────────
+    /// URL failure debounce window in seconds (`TBR_FAILURE_TTL`). Default: 5.
+    pub failure_ttl: u32,
+    /// Default origin back-off TTL when no `Retry-After` header is present
+    /// (`TBR_BACKOFF_DEFAULT`). Default: 60.
+    pub backoff_default: u32,
+    /// Maximum origin back-off TTL cap in seconds (`TBR_BACKOFF_CEILING`).
+    /// Default: 3600.
+    pub backoff_ceiling: u32,
+
 }
 
 impl Default for AppConfig {
@@ -78,6 +91,9 @@ impl Default for AppConfig {
             cache_url: None,
             cache_max_items: None,
             trace_url: None,
+            failure_ttl: 5,
+            backoff_default: 60,
+            backoff_ceiling: 3_600,
         }
     }
 }
@@ -99,6 +115,9 @@ impl AppConfig {
             cache_url:            std::env::var("TBR_CACHE").ok(),
             cache_max_items:      env_opt_u32("TBR_CACHE_MAX_ITEMS"),
             trace_url:            std::env::var("TBR_TRACE").ok(),
+            failure_ttl:          env_u32("TBR_FAILURE_TTL", 5),
+            backoff_default:      env_u32("TBR_BACKOFF_DEFAULT", 60),
+            backoff_ceiling:      env_u32("TBR_BACKOFF_CEILING", 3_600),
         }
     }
 }
@@ -118,6 +137,10 @@ fn env_bool(name: &str, default: bool) -> bool {
         Ok("0" | "false" | "no") => false,
         _ => default,
     }
+}
+
+fn env_u32(name: &str, default: u32) -> u32 {
+    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
 fn env_opt_u32(name: &str) -> Option<u32> {

@@ -57,6 +57,7 @@ use serde_json::Value;
 
 use crate::after::AfterResponse;
 use crate::cache::{CacheStore, render_cost_from_secs};
+use crate::fetch_guard::{OriginBackoffCache, UrlFailureCache};
 use crate::http_buf::{HttpBuffer, HttpStream};
 use crate::media::{FileKind, Strategy};
 use crate::result::{JobStatus, RenderHandler, ThumbResult, ThumbTrace};
@@ -85,8 +86,6 @@ pub enum CookStatus {
     NotModified,
     /// Terminal failure — message is in `out_message`.
     Failed,
-    /// Request deferred — caller is rate-limited or over quota.
-    DeferUser,
     /// No higher-tier renderer is configured or available.
     Unavailable,
     /// Handed off to a higher-tier renderer; streaming result pending.
@@ -160,6 +159,15 @@ pub struct Runtime {
     /// Defaults to [`ShortcutLimits::TIER1`]; override with
     /// [`crate::with_shortcut_limits`] in the tier 2 startup hook.
     pub shortcut_limits: ShortcutLimits,
+    /// Value sent as the `User-Agent` request header on all outbound fetches.
+    pub user_agent: String,
+    /// Short-lived debounce cache for URLs that recently returned 4xx / 5xx.
+    pub url_failures: UrlFailureCache,
+    /// Rate-control cache for origins that returned 429 / 503.
+    pub origin_backoff: OriginBackoffCache,
+    /// Default origin back-off TTL (seconds) used when no `Retry-After` header
+    /// is present in a 429 / 503 response.
+    pub backoff_default: u64,
 }
 
 impl Runtime {
@@ -175,6 +183,9 @@ impl Runtime {
         handoff_tier3_url: Option<String>,
         handoff_tier3_code: Option<String>,
         handoff_accept: Option<String>,
+        failure_ttl: u64,
+        backoff_default: u64,
+        backoff_ceiling: u64,
     ) -> Arc<Self> {
         Arc::new(Self {
             cache,
@@ -192,6 +203,10 @@ impl Runtime {
             handoff_tier3_code,
             handoff_accept,
             shortcut_limits: ShortcutLimits::TIER1,
+            user_agent: format!("Thumbrella/{}", env!("CARGO_PKG_VERSION")),
+            url_failures: UrlFailureCache::new(failure_ttl),
+            origin_backoff: OriginBackoffCache::new(backoff_ceiling),
+            backoff_default,
         })
     }
 }
@@ -561,13 +576,13 @@ impl<S: HttpStream> ThumbCook<S> {
             CookStatus::Processing | CookStatus::Complete => JobStatus::Success,
             CookStatus::NotModified => JobStatus::NotModified,
             CookStatus::Failed      => JobStatus::Failed,
-            CookStatus::DeferUser   => JobStatus::DeferUser,
             CookStatus::Unavailable => JobStatus::Unavailable,
             CookStatus::Rendering   => JobStatus::Rendering,
         };
         ThumbResult {
             url:           self.input.url.clone(),
             status,
+            source_status: if self.http_status == 0 { None } else { Some(self.http_status) },
             duration:      self.out_duration,
             download_size: self.out_download_bytes,
             message:       if self.out_message.is_empty() { None } else { Some(self.out_message.clone()) },
@@ -591,6 +606,7 @@ impl<S: HttpStream> ThumbCook<S> {
         ThumbResult {
             url:           self.input.url.clone(),
             status:        JobStatus::Rendering,
+            source_status: None,
             duration,
             download_size: self.out_download_bytes.max(self.http_bytes_fetched()),
             message:       None,
@@ -622,7 +638,6 @@ impl<S: HttpStream> ThumbCook<S> {
             CookStatus::Processing | CookStatus::Complete => JobStatus::Success,
             CookStatus::NotModified => JobStatus::NotModified,
             CookStatus::Failed      => JobStatus::Failed,
-            CookStatus::DeferUser   => JobStatus::DeferUser,
             CookStatus::Unavailable => JobStatus::Unavailable,
             CookStatus::Rendering   => JobStatus::Rendering,
         };
@@ -645,6 +660,7 @@ impl<S: HttpStream> ThumbCook<S> {
             cache_key:           self.src.cache_key.clone(),
             cache_key_source:    self.src.cache_key_source.clone(),
             source_etag:         self.src.cache_hints.as_ref().and_then(|h| h.etag.clone()),
+            source_status:       if self.http_status == 0 { None } else { Some(self.http_status) },
             download_bytes:      self.out_download_bytes,
             download_tail_bytes: self.tel_download_tail_bytes,
             io_secs:             self.tel_connect_secs + self.tel_io_secs,
@@ -983,10 +999,9 @@ impl<S: HttpStream> ThumbCook<S> {
 
 fn cook_status_from_job(status: JobStatus) -> CookStatus {
     match status {
-        JobStatus::Success | JobStatus::Cached => CookStatus::Complete,
+        JobStatus::Success => CookStatus::Complete,
         JobStatus::NotModified => CookStatus::NotModified,
         JobStatus::Failed => CookStatus::Failed,
-        JobStatus::DeferUser => CookStatus::DeferUser,
         JobStatus::Unavailable => CookStatus::Unavailable,
         JobStatus::Rendering => CookStatus::Rendering,
     }

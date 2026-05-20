@@ -21,6 +21,7 @@ default = ["native"]
 # when targeting wasm32 (the workers build lives in a downstream crate that
 # provides its own runtime and HTTP bindings via workers-rs).
 native = [
+    "dep:moka",
     "dep:rusqlite",
     "dep:tokio",
     "dep:axum",
@@ -64,6 +65,7 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 # streaming handler and transitively by tokio/axum/reqwest.
 bytes = "1"
 web-time = "1"
+parking_lot = "0.12"
 
 # ── Native-only ───────────────────────────────────────────────────────────────
 rusqlite        = { version = "0.32", features = ["bundled"],                optional = true }
@@ -76,3 +78,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"],          opti
 time            = { version = "0.3", features = ["formatting"],              optional = true }
 clap            = { version = "4", features = ["derive"],                    optional = true }
 libc            = { version = "0.2",                                         optional = true }
+moka            = { version = "0.12", features = ["future"],                  optional = true }

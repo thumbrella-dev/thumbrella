@@ -40,11 +40,9 @@ pub enum RenderHandler {
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {
     Success,
-    Cached,
     NotModified,
     #[default]
     Failed,
-    DeferUser,
     Unavailable,
     Rendering,
 }
@@ -68,12 +66,16 @@ pub struct CallRecord {
 /// Per-item result — the public API output, cache object, and client response.
 ///
 /// Materialised from [`ThumbCook`] by [`ThumbCook::to_result`] at the end of
-/// processing.  This struct is stored in cache on `success` and returned
-/// verbatim on a `cached` hit (with `status` overridden to `cached`).
+/// processing.  Stored in cache on `success` and returned verbatim on a cache
+/// hit (with `status` overridden to `success`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThumbResult {
     pub url: String,
     pub status: JobStatus,
+    /// HTTP status code returned by the upstream source fetch.
+    /// `None` when no network request was made (cache hit, client-side freshness).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_status: Option<u16>,
     pub duration: f64,
     pub download_size: u64,
     /// Human-readable error/status detail; `None` on clean success.
@@ -111,6 +113,7 @@ impl Default for ThumbResult {
             file_size:     None,
             kind:          None,
             extension:     None,
+            source_status: None,
             properties:    Value::Object(Default::default()),
             cache:         None,
             thumbnail:     Vec::new(),
@@ -143,6 +146,9 @@ pub struct ThumbTrace {
     pub cache_key:        Option<String>,
     pub cache_key_source: Option<String>,
     pub source_etag:      Option<String>,
+    /// HTTP status code returned by the upstream source fetch.
+    /// `None` when no network request was made.
+    pub source_status:    Option<u16>,
 
     // ── Download metrics ──────────────────────────────────────────────────────
     pub download_bytes:      u64,
