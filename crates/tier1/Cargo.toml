@@ -49,7 +49,7 @@ mozjpeg-rs  = "0.9"
 # heavy native decoders (e.g. mozjpeg) belong in a higher tier or a
 # native-only feature so they don't block the wasm32 target.
 image = { version = "0.25", default-features = false, features = [
-    "jpeg", "png", "gif", "bmp", "tiff",
+    "jpeg", "png", "gif", "bmp", "tiff", "webp", "ico",
 ] }
 # jpeg-decoder is a transitive dep of image; listed directly to access scale()
 # for DCT-level power-of-two downscaling in the progressive JPEG shortcut path.

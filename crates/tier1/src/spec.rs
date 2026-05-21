@@ -51,8 +51,8 @@ pub struct ThumbnailConfig {
     pub fill_budget: f32,
     /// JPEG quality 1–100 for photographic content.
     pub jpeg_quality: u8,
-    /// JPEG quality for pixel-art / icon content (typically higher to avoid
-    /// visible DCT artifacts on hard edges).
+    /// JPEG quality for pixel-art / icon content (typically lower to compete
+    /// with really efficient pixel formats like png).
     pub pixel_art_quality: u8,
     /// Background colour used when flattening transparency (RGB).
     pub background_rgb: [u8; 3],
@@ -78,7 +78,7 @@ impl ThumbnailConfig {
         exact_height: 200,
         min_fill_ratio: 0.6,
         fill_budget: 0.10,
-        jpeg_quality: 60,
+        jpeg_quality: 66,
         pixel_art_quality: 18,
         background_rgb: [255, 255, 255],
         vignette_strength: 0.25,

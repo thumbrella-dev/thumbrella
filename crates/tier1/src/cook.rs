@@ -135,12 +135,9 @@ pub struct Runtime {
     /// Pre-decoded background image for RGBA compositing (always 250×200 RGB).
     /// Loaded once at startup; `None` falls back to the solid `background_rgb` colour.
     pub background_image: Option<RgbImage>,
-    /// Pre-encoded placeholder JPEG returned when no thumbnail can be produced
-    /// (unavailable renderer, unsupported format, etc.).
-    pub placeholder_general: Vec<u8>,
-    /// Pre-encoded placeholder JPEG returned when the request itself fails
-    /// (network error, bad URL, HTTP error, etc.).
-    pub placeholder_error: Vec<u8>,
+    // Placeholder JPEGs are no longer stored in Runtime.  They are embedded
+    // as `&'static [u8]` in `crate::assets::placeholders` and selected
+    // per-kind at response time via `crate::assets::placeholder_for_kind`.
     /// Optional in-process renderer registered by a higher tier at startup.
     /// When `Some`, tier-2-routed items are dispatched directly without an
     /// out-of-process HTTP round-trip.
@@ -185,8 +182,6 @@ impl Runtime {
         trace: TraceStore,
         server: Option<String>,
         background_image: Option<RgbImage>,
-        placeholder_general: Vec<u8>,
-        placeholder_error: Vec<u8>,
         handoff_tier2_url: Option<String>,
         handoff_tier2_code: Option<String>,
         handoff_tier3_url: Option<String>,
@@ -203,8 +198,6 @@ impl Runtime {
             server,
             version: env!("CARGO_PKG_VERSION").to_string(),
             background_image,
-            placeholder_general,
-            placeholder_error,
             #[cfg(feature = "native")]
             renderer: None,
             handoff_tier2_url,
@@ -623,8 +616,12 @@ impl<S: HttpStream> ThumbCook<S> {
             download_size: self.out_download_bytes.max(self.http_bytes_fetched()),
             message:       None,
             strategy:      self.out_strategy,
-            thumbnail:     self.runtime.placeholder_general.clone(),
-            placeholder:   Some(self.out_placeholder.clone().unwrap_or_else(|| "general".to_string())),
+            thumbnail:     crate::assets::placeholder_for_kind(
+                               self.media.kind.unwrap_or_default()
+                           ).to_vec(),
+            placeholder:   Some(self.out_placeholder.clone().unwrap_or_else(|| {
+                               kind_slug(self.media.kind.unwrap_or_default()).to_string()
+                           })),
             mime:          self.media.mime.clone(),
             file_size:     self.media.file_size,
             kind:          self.media.kind,
@@ -694,11 +691,19 @@ impl<S: HttpStream> ThumbCook<S> {
         }
     }
 
-    /// Project into a [`ThumbHandoff`] for forwarding to a higher-tier renderer.
+    /// Close the HTTP connection and project into a [`ThumbHandoff`] for
+    /// forwarding to a higher-tier renderer over an external transport.
     ///
-    /// `first_page` is the return value of [`http_close`] — the first cached
-    /// page, forwarded so the receiver can start parsing without a new request.
-    pub fn to_handoff(&self, first_page: Option<Vec<u8>>) -> crate::handoff::ThumbHandoff {
+    /// Closing and serialising are combined into a single step so it is
+    /// structurally impossible to send a handoff while the connection is
+    /// still open — the caller cannot obtain a `ThumbHandoff` without
+    /// first relinquishing the live stream.
+    #[cfg(feature = "native")]
+    pub async fn take_handoff(&mut self) -> crate::handoff::ThumbHandoff
+    where
+        S: Send + 'static,
+    {
+        let first_page = self.http_close().await;
         crate::handoff::ThumbHandoff {
             input:      self.input.clone(),
             media:      self.media.clone(),
@@ -1010,8 +1015,10 @@ impl<S: HttpStream> ThumbCook<S> {
                     // ── Leader ────────────────────────────────────────────────
                     // No handoff is in flight for this key; perform it and
                     // wake any joiners that registered while we were awaiting.
-                    let first_page = self.http_close().await;
-                    let payload    = self.to_handoff(first_page);
+                    // take_handoff() closes the connection and builds the payload
+                    // atomically — the live stream is relinquished before the
+                    // JSON is serialised for the outbound HTTP request.
+                    let payload = self.take_handoff().await;
                     let shared = Arc::new(
                         crate::handoff::post_handoff(url, target_code.as_deref(), &payload).await,
                     );
@@ -1048,19 +1055,30 @@ impl<S: HttpStream> ThumbCook<S> {
         // Always return a thumbnail.  If the pipeline didn't produce one,
         // fill in the appropriate placeholder JPEG.
         if self.out_thumbnail.is_empty() {
-            let (bytes, label) = match self.out_placeholder.as_deref() {
-                Some("error") => (self.runtime.placeholder_error.clone(), "error"),
-                Some(other) => {
-                    let label = if other.is_empty() { "general" } else { other };
-                    (self.runtime.placeholder_general.clone(), label)
+            if let Some(kind) = self.media.kind {
+                // Kind was identified: use the kind-specific placeholder.
+                // If the pipeline failed at the render step (e.g. unsupported
+                // codec, EXR, SVG) promote the status to Unavailable — we know
+                // what the file is, we just can't render it yet.
+                if self.status == CookStatus::Failed {
+                    self.status = CookStatus::Unavailable;
                 }
-                None => match self.status {
-                    CookStatus::Failed => (self.runtime.placeholder_error.clone(), "error"),
-                    _ => (self.runtime.placeholder_general.clone(), "general"),
-                },
-            };
-            if !bytes.is_empty() {
-                self.out_thumbnail  = bytes;
+                let slug = kind_slug(kind);
+                self.out_thumbnail   = crate::assets::placeholder_for_kind(kind).to_vec();
+                self.out_placeholder = Some(slug.to_string());
+            } else {
+                // Kind never determined (network error, bad URL, early abort) —
+                // use the FAILED icon only for genuine infrastructure errors.
+                let (bytes, label): (&[u8], &str) =
+                    if self.status == CookStatus::Failed
+                        || self.out_placeholder.as_deref() == Some("error")
+                        || self.out_placeholder.as_deref() == Some("failed")
+                    {
+                        (crate::assets::placeholders::FAILED, "failed")
+                    } else {
+                        (crate::assets::placeholders::UNKNOWN, "unknown")
+                    };
+                self.out_thumbnail   = bytes.to_vec();
                 self.out_placeholder = Some(label.to_string());
             }
         }
@@ -1069,6 +1087,23 @@ impl<S: HttpStream> ThumbCook<S> {
         let trace  = self.to_trace();
         self.runtime.trace.record(trace.clone(), &mut after);
         (result, trace, after)
+    }
+}
+
+/// Map a [`FileKind`] to its stable lowercase ASCII slug used in placeholder labels.
+fn kind_slug(kind: crate::media::FileKind) -> &'static str {
+    use crate::media::FileKind::*;
+    match kind {
+        Image    => "image",
+        Video    => "video",
+        Audio    => "audio",
+        Vector   => "vector",
+        Document => "document",
+        Geometry => "geometry",
+        Archive  => "archive",
+        Text     => "text",
+        Binary   => "binary",
+        Unknown  => "unknown",
     }
 }
 

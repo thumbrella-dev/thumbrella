@@ -390,22 +390,40 @@ impl<S: HttpStream> HttpBuffer<S> {
     }
 
     async fn ensure_page_cached(&mut self, page_index: u64) -> Result<(), HttpError> {
-        if self.pages.contains_key(&page_index) {
+        let page_start = page_index * PAGE_SIZE as u64;
+        let page_end   = page_start + PAGE_SIZE as u64;
+
+        // How many bytes we need for this page to be complete.
+        let expected_len = if let Some(cl) = self.content_length {
+            if page_start >= cl {
+                return Ok(()); // past EOF — nothing to fetch
+            }
+            (cl.min(page_end).saturating_sub(page_start)) as usize
+        } else {
+            PAGE_SIZE // unknown length: wait for a full page
+        };
+
+        // Page is already fully populated — nothing to do.
+        let have = self.pages.get(&page_index).map_or(0, |p| p.len());
+        if have >= expected_len {
             return Ok(());
         }
-        if let Some(total) = self.content_length {
-            if page_index * PAGE_SIZE as u64 >= total {
-                return Ok(());
-            }
+
+        // The stream has already advanced past this page; store_chunk_at will
+        // have deposited whatever bytes arrived, so we cannot get any more.
+        if self.stream_pos >= page_end {
+            return Ok(());
         }
-        let page_offset = page_index * PAGE_SIZE as u64;
+
+        // Range-fetch shortcut for distant tail pages.
         if let Some(total) = self.content_length {
-            let in_tail = page_offset >= total.saturating_sub(TAIL_FETCH_SIZE);
-            let big_gap = page_offset.saturating_sub(self.stream_pos) > STREAM_SKIP_THRESHOLD;
+            let in_tail = page_start >= total.saturating_sub(TAIL_FETCH_SIZE);
+            let big_gap = page_start.saturating_sub(self.stream_pos) > STREAM_SKIP_THRESHOLD;
             if in_tail && big_gap && self.accepts_ranges {
                 return self.fetch_tail_into_pages(total).await;
             }
         }
+
         self.stream_forward_to_page(page_index).await
     }
 
@@ -475,8 +493,24 @@ impl<S: HttpStream> HttpBuffer<S> {
     // ── Page cache population ─────────────────────────────────────────────────
 
     async fn stream_forward_to_page(&mut self, target_page: u64) -> Result<(), HttpError> {
+        let page_start = target_page * PAGE_SIZE as u64;
+        let page_end   = page_start + PAGE_SIZE as u64;
+        // How many bytes belong to this page (less than PAGE_SIZE only for the
+        // last page of a file with a known Content-Length).
+        let expected_len = if let Some(cl) = self.content_length {
+            (cl.min(page_end).saturating_sub(page_start)) as usize
+        } else {
+            PAGE_SIZE
+        };
         loop {
-            if self.pages.contains_key(&target_page) {
+            // Done when the page has all its expected bytes …
+            let have = self.pages.get(&target_page).map_or(0, |p| p.len());
+            if have >= expected_len {
+                break;
+            }
+            // … or when the stream has already advanced past the end of this
+            // page (a previous large chunk already deposited all bytes for it).
+            if self.stream_pos >= page_end {
                 break;
             }
             let t = Instant::now();
@@ -593,58 +627,67 @@ pub struct ReqwestStream {
 #[cfg(feature = "native")]
 enum ReqwestStreamInner {
     Http(reqwest::Response),
-    File { data: Vec<u8>, pos: usize },
+    /// Lazy file reader: data is read in PAGE_SIZE chunks via `next_chunk()`.
+    /// The file handle is already seeked to `start` on construction; `remaining`
+    /// tracks how many bytes are left in the requested range.
+    File {
+        file: std::fs::File,
+        remaining: u64,
+    },
+    /// Error placeholder: file could not be opened (status carries the code).
+    /// `next_chunk` returns `Ok(None)` immediately.
+    Empty,
 }
 
 #[cfg(feature = "native")]
 impl HttpStream for ReqwestStream {
     async fn connect(url: &str, options: &ConnectOptions) -> Result<Self, HttpError> {
-        // ── file:// — read from disk ──────────────────────────────────────────
+        // ── file:// — stream from disk ────────────────────────────────────────
         if let Some(path) = url.strip_prefix("file://") {
-            return match std::fs::read(path) {
-                Ok(data) => {
-                    // Parse a `Range: bytes=start-end` header if present so
-                    // callers like `fetch_range` receive only the requested
-                    // slice.  This makes file:// behave like a range-capable
-                    // HTTP server, letting the ZIP shortcut and tail-fetch
-                    // paths work for local files.
-                    let range_start: usize = options.headers.iter()
-                        .find(|(k, _)| k.eq_ignore_ascii_case("range"))
-                        .and_then(|(_, v)| v.strip_prefix("bytes="))
-                        .and_then(|r| r.split('-').next())
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0);
-                    let sliced = if range_start > 0 && range_start < data.len() {
-                        data[range_start..].to_vec()
-                    } else {
-                        data
-                    };
-                    let mut headers = HashMap::new();
-                    headers.insert("content-length".to_string(), sliced.len().to_string());
-                    // Advertise range support so the ZIP shortcut and other
-                    // range-fetching paths are enabled for file:// URLs.
-                    headers.insert("accept-ranges".to_string(), "bytes".to_string());
-                    Ok(Self {
-                        status: if range_start > 0 { 206 } else { 200 },
-                        headers,
-                        final_url: Some(url.to_string()),
-                        inner: ReqwestStreamInner::File { data: sliced, pos: 0 },
-                    })
-                }
+            // Get file length without reading any content.
+            let file_len = match std::fs::metadata(path) {
+                Ok(m) => m.len(),
                 Err(e) => {
                     let status = match e.kind() {
                         std::io::ErrorKind::NotFound => 404,
                         std::io::ErrorKind::PermissionDenied => 403,
                         _ => 500,
                     };
-                    Ok(Self {
+                    return Ok(Self {
                         status,
                         headers: HashMap::new(),
                         final_url: Some(url.to_string()),
-                        inner: ReqwestStreamInner::File { data: vec![], pos: 0 },
-                    })
+                        inner: ReqwestStreamInner::Empty,
+                    });
                 }
             };
+
+            // Parse a `Range: bytes=start-end` header so range fetches work
+            // (ZIP shortcut, tail-fetch, raw IFD seeks).
+            let (range_start, range_end) = parse_file_range(&options.headers, file_len);
+            let slice_len = range_end.saturating_sub(range_start);
+
+            let mut file = match std::fs::File::open(path) {
+                Ok(f) => f,
+                Err(e) => return Err(HttpError::Network(format!("file open: {e}"))),
+            };
+            if range_start > 0 {
+                use std::io::Seek;
+                file.seek(std::io::SeekFrom::Start(range_start))
+                    .map_err(|e| HttpError::Network(format!("file seek: {e}")))?;
+            }
+
+            let mut headers = HashMap::new();
+            headers.insert("content-length".to_string(), slice_len.to_string());
+            // Advertise range support so ZIP shortcut and tail-fetch work.
+            headers.insert("accept-ranges".to_string(), "bytes".to_string());
+
+            return Ok(Self {
+                status: if range_start > 0 { 206 } else { 200 },
+                headers,
+                final_url: Some(url.to_string()),
+                inner: ReqwestStreamInner::File { file, remaining: slice_len },
+            });
         }
 
         // ── http:// / https:// — reqwest ──────────────────────────────────────
@@ -680,19 +723,43 @@ impl HttpStream for ReqwestStream {
                     .map_err(|e| HttpError::Network(e.to_string()))?;
                 Ok(chunk.map(|b| b.to_vec()))
             }
-            ReqwestStreamInner::File { data, pos } => {
-                if *pos >= data.len() {
+            ReqwestStreamInner::File { file, remaining } => {
+                if *remaining == 0 {
                     return Ok(None);
                 }
-                // Yield in PAGE_SIZE chunks so the buffer's page cache logic
-                // works the same as it does for HTTP responses.
-                let end = (*pos + PAGE_SIZE).min(data.len());
-                let chunk = data[*pos..end].to_vec();
-                *pos = end;
-                Ok(Some(chunk))
+                let chunk_size = PAGE_SIZE.min(*remaining as usize);
+                let mut buf = vec![0u8; chunk_size];
+                use std::io::Read;
+                match file.read(&mut buf) {
+                    Ok(0) => Ok(None),
+                    Ok(n) => {
+                        *remaining -= n as u64;
+                        buf.truncate(n);
+                        Ok(Some(buf))
+                    }
+                    Err(e) => Err(HttpError::Network(format!("file read: {e}"))),
+                }
             }
+            ReqwestStreamInner::Empty => Ok(None),
         }
     }
+}
+
+/// Parse a `Range: bytes=start-end` header into a `(start, end)` byte range
+/// (end is exclusive).  Falls back to `(0, file_len)` when absent or invalid.
+#[cfg(feature = "native")]
+fn parse_file_range(headers: &[(String, String)], file_len: u64) -> (u64, u64) {
+    if let Some((_, v)) = headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("range")) {
+        if let Some(range) = v.strip_prefix("bytes=") {
+            let mut parts = range.splitn(2, '-');
+            let start = parts.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            let end   = parts.next().and_then(|s| s.parse::<u64>().ok())
+                             .map(|e| e + 1)   // Range header end is inclusive
+                             .unwrap_or(file_len);
+            return (start.min(file_len), end.min(file_len));
+        }
+    }
+    (0, file_len)
 }
 
 #[cfg(feature = "native")]

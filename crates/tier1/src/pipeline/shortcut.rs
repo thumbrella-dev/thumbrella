@@ -1007,21 +1007,22 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
         if !cook.http_is_open() { return; }
     }
 
-    // ── Small image: any format `image` supports, ≤ SMALL_FILE_THRESHOLD ─
+    // ── Small image: known `image`-crate formats, ≤ SMALL_FILE_THRESHOLD ──
     //
     // `inspect` has already classified the file; trust its verdict.
-    // Covers JPEG, PNG, GIF, BMP, WebP, TIFF, ICO, … without any byte sniffing.
+    //
+    // Use an explicit positive list so formats that tier1's image build does
+    // NOT support (HEIC, AVIF, EXR, …) never reach load_from_memory.  This
+    // also protects against future additions to FileKind::Image that tier2
+    // should handle via libav.
     //
     // Keep this BEFORE the progressive JPEG path so genuinely small files
     // always use a full decode for reliability/quality.
-    //
-    // Exclude formats that require libav (HEIC, HEIF, AVIF, EXR, HDR) — they
-    // are classified as `FileKind::Image` but `image::load_from_memory` cannot
-    // decode them.  If we entered streaming mode and consumed the bytes here,
-    // the connection would be at EOF when tier 2 tries `take_reader()` for libav.
-    let is_image_crate_format = !matches!(ext, "heic" | "heif" | "avif" | "exr" | "hdr");
+    let is_tier1_image_format = matches!(ext,
+        "jpeg" | "png" | "gif" | "bmp" | "tiff" | "webp" | "ico"
+    );
     let is_small_image = cook.media.kind == Some(FileKind::Image)
-        && is_image_crate_format
+        && is_tier1_image_format
         && cook.http_stream_len()
             .map(|n| n <= cook.runtime.shortcut_limits.small_file_threshold)
             .unwrap_or(false);
@@ -1029,20 +1030,11 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     if is_small_image {
         let file_size = cook.http_stream_len().unwrap_or(0);
 
-        cook.http_rewind();
-        cook.http_enter_streaming_mode();
-
-        let mut data = Vec::with_capacity(file_size as usize);
-        {
-            let mut tmp = vec![0u8; 8 * 1024];
-            loop {
-                match cook.http_read(&mut tmp).await {
-                    Ok(0) => break,
-                    Ok(n) => data.extend_from_slice(&tmp[..n]),
-                    Err(_) => { data.clear(); break; }
-                }
-            }
-        }
+        // read_at has pread semantics: the cursor is saved and restored, and
+        // streaming mode is never entered.  If load_from_memory fails the
+        // buffer is left intact at cursor 0 so tier2 can call take_reader().
+        let data = cook.http_read_at(0, file_size as usize).await
+            .unwrap_or_default();
 
         if !data.is_empty() {
             if let Ok(img) = image::load_from_memory(&data) {
@@ -1063,8 +1055,9 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
                 cook.render_image = Some(img);
                 return;
             }
-            // load_from_memory failed — close and fall through to defer.
-            cook.http_close().await;
+            // load_from_memory failed — buffer is still intact (read_at
+            // restored the cursor; streaming mode was never entered).
+            // Fall through so tier2 can handle the format via libav.
         }
     }
 

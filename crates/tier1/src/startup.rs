@@ -69,17 +69,11 @@ pub async fn startup(cfg: &AppConfig) -> Arc<Runtime> {
         tracing::warn!("startup: failed to decode background.png — transparency will use solid colour");
     }
 
-    // ── 6. Placeholder images ─────────────────────────────────────────────────
-    let placeholder_general = crate::assets::PLACEHOLDER_GENERAL_JPG.to_vec();
-    let placeholder_error   = crate::assets::PLACEHOLDER_ERROR_JPG.to_vec();
-
     Runtime::new(
         cache,
         trace,
         cfg.server.clone(),
         background_image,
-        placeholder_general,
-        placeholder_error,
         cfg.tier2_url.clone(),
         cfg.tier2_code.clone(),
         cfg.tier3_url.clone(),

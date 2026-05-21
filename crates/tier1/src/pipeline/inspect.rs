@@ -67,7 +67,12 @@ fn sniff(bytes: &[u8], url: &str, content_type: Option<&str>) -> (FileKind, Stri
 
     if let Some(t) = infer::get(bytes) {
         let infer_ext = canonical_extension(t.extension());
-        let infer_kind = infer_matcher_to_kind(t.matcher_type());
+        let mut infer_kind = infer_matcher_to_kind(t.matcher_type());
+
+        // infer classifies HTML as MatcherType::Text, but HTML is a document.
+        if matches!(t.mime_type(), "text/html" | "application/xhtml+xml") {
+            infer_kind = FileKind::Document;
+        }
 
         // When magic bytes identify a generic container, prefer a more
         // specific kind from the URL extension (e.g. USDZ, DOCX are ZIP).
@@ -202,6 +207,8 @@ fn mime_to_kind(mime: &str, ext: &str) -> FileKind {
     }
     if mime.starts_with("video/") { return FileKind::Video; }
     if mime.starts_with("audio/") { return FileKind::Audio; }
+    // HTML is a document, not plain text, despite the text/ prefix.
+    if matches!(mime, "text/html" | "application/xhtml+xml") { return FileKind::Document; }
     if mime.starts_with("text/")  { return FileKind::Text;  }
     match mime {
         "application/pdf"
@@ -236,7 +243,7 @@ fn ext_to_kind(ext: &str) -> FileKind {
     match ext {
         "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff"
         | "avif" | "heic" | "heif" | "exr" | "hdr"
-        | "apng" | "ico"                                  => FileKind::Image,
+        | "apng" | "ico" | "xcf"                           => FileKind::Image,
         // Camera-raw formats (TIFF-based containers).
         "dng" | "cr2" | "nef" | "arw" | "orf" | "rw2"
         | "pef" | "srw" | "3fr" | "mef" | "rwl"          => FileKind::Image,
@@ -250,7 +257,8 @@ fn ext_to_kind(ext: &str) -> FileKind {
         | "epub" | "rtf"                                  => FileKind::Document,
         "usdz" | "glb" | "gltf" | "obj" | "stl"           => FileKind::Geometry,
         "zip" | "tar" | "gz" | "bz2" | "xz" | "rar" | "7z" => FileKind::Archive,
-        "html" | "xml" | "json" | "txt" | "csv" | "md"    => FileKind::Text,
+        "html" | "xhtml"                                  => FileKind::Document,
+        "xml" | "json" | "txt" | "csv" | "md"            => FileKind::Text,
         _                                                  => FileKind::Unknown,
     }
 }
@@ -264,6 +272,7 @@ fn mime_to_extension(mime: &str) -> &'static str {
         "image/bmp"        => "bmp",  "image/tiff"       => "tiff",
         "image/avif"       => "avif", "image/heic"       => "heic",
         "image/heif"       => "heif", "image/svg+xml"    => "svg",
+        "image/x-xcf"      => "xcf",
         "image/apng"       => "apng", "image/vnd.microsoft.icon" => "ico",
         "video/mp4"        => "mp4",  "video/quicktime"  => "mov",
         "video/webm"       => "webm", "video/mpeg"       => "mpeg",
@@ -305,6 +314,7 @@ fn ext_to_mime(ext: &str) -> &'static str {
         "avif" => "image/avif",   "heic" => "image/heic",
         "heif" => "image/heif",   "exr"  => "image/x-exr",
         "hdr"  => "image/vnd.radiance",
+        "xcf"  => "image/x-xcf",
         "dng"  => "image/x-adobe-dng",
         "cr2"  => "image/x-canon-cr2",   "nef"  => "image/x-nikon-nef",
         "arw"  => "image/x-sony-arw",    "orf"  => "image/x-olympus-orf",
