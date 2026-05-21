@@ -11,6 +11,7 @@
 //! | `TBR_PORT`                 | 8000    | HTTP listener port                               |
 //! | `TBR_SERVER`               | —       | Short server/colo identifier for traces          |
 //! | `TBR_DEVELOPER_MODE`       | false   | Verbose debug output in API responses            |
+//! | `TBR_ALLOW_FILES`          | false   | Accept `file://` URLs and bare absolute paths    |
 //! | `TBR_TIER2`                | —       | Tier-2 URL with optional `#code` handoff secret  |
 //! | `TBR_TIER3`                | —       | Tier-3 URL with optional `#code` handoff secret  |
 //! | `TBR_HANDOFF`              | —       | Shared secret this server accepts on `/handoff`  |
@@ -39,6 +40,13 @@ pub struct AppConfig {
     pub server: Option<String>,
     /// Emit verbose debug data in API responses.
     pub developer_mode: bool,
+    /// Allow `file://` URLs and bare absolute paths in HTTP endpoint requests.
+    ///
+    /// When `true`, callers may pass `file:///path/to/file` or a bare absolute
+    /// path such as `/data/image.png` and the server will read it directly from
+    /// the local filesystem.  **Only enable in trusted environments** — any
+    /// caller can read any file the server process has permission to open.
+    pub allow_local: bool,
 
     // ── Handoff tiers ─────────────────────────────────────────────────────────
     /// URL of the tier-2 handoff server (`TBR_TIER2`).
@@ -83,6 +91,7 @@ impl Default for AppConfig {
             port: 8000,
             server: None,
             developer_mode: false,
+            allow_local: false,
             tier2_url: None,
             tier2_code: None,
             tier3_url: None,
@@ -107,6 +116,7 @@ impl AppConfig {
             port:                 env_u16("TBR_PORT", 8000),
             server:               std::env::var("TBR_SERVER").ok(),
             developer_mode:       env_bool("TBR_DEVELOPER_MODE", false),
+            allow_local:          env_bool("TBR_ALLOW_FILES", false),
             tier2_url,
             tier2_code,
             tier3_url,

@@ -85,6 +85,7 @@ pub async fn startup(cfg: &AppConfig) -> Arc<Runtime> {
         cfg.tier3_url.clone(),
         cfg.tier3_code.clone(),
         cfg.handoff_accept.clone(),
+        cfg.allow_local,
         cfg.failure_ttl as u64,
         cfg.backoff_default as u64,
         cfg.backoff_ceiling as u64,

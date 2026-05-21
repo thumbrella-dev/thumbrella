@@ -15,10 +15,40 @@ use serde::{Deserialize, Serialize};
 pub struct ThumbnailConfig {
     /// Monotonically increasing version.  Bust this when any field changes.
     pub version: u32,
-    /// Exact output width in pixels.  All thumbnails are scaled to fill this size.
+    /// Canvas width in pixels.  The output JPEG is always this wide.
     pub exact_width: u32,
-    /// Exact output height in pixels.
+    /// Canvas height in pixels.  The output JPEG is always this tall.
     pub exact_height: u32,
+    /// Minimum fill ratio applied to each canvas dimension (0.0–1.0).
+    ///
+    /// Scaled content always touches at least one canvas edge.  When the source
+    /// aspect ratio is more extreme than this ratio allows, the content is
+    /// clamped to `min_fill_ratio × canvas_dimension` and partially cropped in
+    /// the overflowing axis.  The remaining canvas area shows the background.
+    ///
+    /// Example: `0.6` with a 250×200 canvas → minimum content width 150 px,
+    /// minimum content height 120 px.
+    pub min_fill_ratio: f32,
+    /// Fill budget: maximum fraction of any canvas dimension that may be
+    /// cropped in order to reduce or eliminate letterbox/pillarbox bands
+    /// (0.0–1.0).
+    ///
+    /// After fit-within scaling, the algorithm may scale up by an additional
+    /// factor of `1 / (1 - fill_budget)`, then crops the overflow.  This blends
+    /// smoothly between pure fit-within and pure fill:
+    ///
+    /// * Sources whose AR gap is less than `fill_budget` snap to full fill
+    ///   (no letterbox at all).
+    /// * Larger AR mismatches get a proportional blend: `fill_budget`-fraction
+    ///   crop on the overflowing edge, reduced letterbox on the other.
+    /// * `fill_budget = 0.0` → pure fit-within (no crop, full letterbox).
+    /// * `fill_budget → 1.0` → approaches pure fill (old fill-crop behaviour).
+    ///
+    /// Example with `fill_budget = 0.10`:
+    /// * 4:3 source on 5:4 canvas → 6% gap < 10% → snaps to full fill.
+    /// * 3:2 source → 17% gap → 10% width crop + 7.5 px letterbox instead of 33 px.
+    /// * 16:9 source → 29% gap → 10% width crop + 22 px letterbox instead of 29 px.
+    pub fill_budget: f32,
     /// JPEG quality 1–100 for photographic content.
     pub jpeg_quality: u8,
     /// JPEG quality for pixel-art / icon content (typically higher to avoid
@@ -43,9 +73,11 @@ impl Default for ThumbnailConfig {
 impl ThumbnailConfig {
     /// The one canonical config.  Update `version` whenever any value changes.
     pub const CANONICAL: Self = Self {
-        version: 4,
+        version: 7,
         exact_width: 250,
         exact_height: 200,
+        min_fill_ratio: 0.6,
+        fill_budget: 0.10,
         jpeg_quality: 60,
         pixel_art_quality: 18,
         background_rgb: [255, 255, 255],

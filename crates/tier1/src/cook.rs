@@ -58,6 +58,7 @@ use serde_json::Value;
 use crate::after::AfterResponse;
 use crate::cache::{CacheStore, render_cost_from_secs};
 use crate::fetch_guard::{OriginBackoffCache, UrlFailureCache};
+use crate::handoff::{HandoffInflight, HandoffResponse};
 use crate::http_buf::{HttpBuffer, HttpStream};
 use crate::media::{FileKind, Strategy};
 use crate::result::{JobStatus, RenderHandler, ThumbResult, ThumbTrace};
@@ -155,6 +156,12 @@ pub struct Runtime {
     pub handoff_tier3_code: Option<String>,
     /// Shared secret this server accepts on `/handoff`.
     pub handoff_accept: Option<String>,
+    /// Allow `file://` URLs and bare absolute paths in HTTP endpoint requests.
+    ///
+    /// Set from [`AppConfig::allow_local`] (`TBR_ALLOW_FILES`).  Propagated
+    /// to each [`InputSpec`] by the route handlers.  The second-line guard
+    /// in `pipeline::connect` also checks `InputSpec::allow_local` directly.
+    pub allow_local: bool,
     /// I/O and decode budget limits for the shortcut pipeline.
     /// Defaults to [`ShortcutLimits::TIER1`]; override with
     /// [`crate::with_shortcut_limits`] in the tier 2 startup hook.
@@ -168,6 +175,8 @@ pub struct Runtime {
     /// Default origin back-off TTL (seconds) used when no `Retry-After` header
     /// is present in a 429 / 503 response.
     pub backoff_default: u64,
+    /// Single-flight deduplication for concurrent handoffs to the same cache key.
+    pub handoff_inflight: HandoffInflight,
 }
 
 impl Runtime {
@@ -183,6 +192,7 @@ impl Runtime {
         handoff_tier3_url: Option<String>,
         handoff_tier3_code: Option<String>,
         handoff_accept: Option<String>,
+        allow_local: bool,
         failure_ttl: u64,
         backoff_default: u64,
         backoff_ceiling: u64,
@@ -202,11 +212,13 @@ impl Runtime {
             handoff_tier3_url,
             handoff_tier3_code,
             handoff_accept,
+            allow_local,
             shortcut_limits: ShortcutLimits::TIER1,
             user_agent: format!("Thumbrella/{}", env!("CARGO_PKG_VERSION")),
             url_failures: UrlFailureCache::new(failure_ttl),
             origin_backoff: OriginBackoffCache::new(backoff_ceiling),
             backoff_default,
+            handoff_inflight: HandoffInflight::new(),
         })
     }
 }
@@ -695,6 +707,52 @@ impl<S: HttpStream> ThumbCook<S> {
         }
     }
 
+    // ── Handoff application ───────────────────────────────────────────────────
+
+    /// Apply the result of a tier handoff to this cook.
+    ///
+    /// Shared by both the **leader** (returned directly from `post_handoff`) and
+    /// **joiners** (received via [`HandoffInflight`]).
+    ///
+    /// `local_bytes` is the number of bytes this cook fetched from the source
+    /// during connect/inspect before the handoff was issued.  It is added to
+    /// `remote.result.download_size` to form the complete download count.
+    fn apply_handoff_response(
+        &mut self,
+        remote: &HandoffResponse,
+        target_tier: u8,
+        local_bytes: u64,
+    ) {
+        let res   = &remote.result;
+        let trace = &remote.trace;
+
+        self.status             = cook_status_from_job(res.status);
+        self.out_thumbnail      = res.thumbnail.clone();
+        self.out_strategy       = res.strategy;
+        self.out_message        = res.message.clone().unwrap_or_default();
+        self.out_placeholder    = res.placeholder.clone();
+        self.out_download_bytes = local_bytes.saturating_add(res.download_size);
+        self.media.mime         = res.mime.clone();
+        self.media.file_size    = res.file_size;
+        self.media.kind         = res.kind;
+        self.media.extension    = res.extension.clone();
+        self.media.properties   = Some(res.properties.clone());
+
+        self.tel_job_tier_override   = Some(trace.job_tier);
+        self.tel_version_override    = Some(trace.version.clone());
+        if self.render_renderer.is_none() {
+            self.render_renderer = trace.job_renderer.clone();
+        }
+        self.tel_thumbnail_bytes     = trace.thumbnail_bytes;
+        self.tel_download_tail_bytes = trace.download_tail_bytes;
+        self.tel_decode_secs         = trace.render_secs;
+        self.tel_deliver_secs        = trace.deliver_secs;
+        self.tel_io_secs            += trace.io_secs;
+
+        self.render_handler  = RenderHandler::Handoff;
+        self.render_renderer = Some(format!("handoff/tier{target_tier}"));
+    }
+
     // ── Pipeline entry ────────────────────────────────────────────────────────
 
     /// Run the full pipeline and return `(result, trace, after)`.
@@ -912,46 +970,63 @@ impl<S: HttpStream> ThumbCook<S> {
         };
 
         if let Some(url) = target_url.as_deref() {
-            let local_download_bytes = self.http_bytes_fetched();
-            let first_page = self.http_close().await;
-            let payload = self.to_handoff(first_page);
-            match crate::handoff::post_handoff(url, target_code.as_deref(), &payload).await {
-                Ok(remote) => {
-                    let remote_result = remote.result;
-                    let remote_trace = remote.trace;
+            // ── Single-flight deduplication ───────────────────────────────────
+            // Use the content-addressed cache_key as the dedup key so all
+            // concurrent requests for the same content version share one
+            // outbound handoff, regardless of URL variations (redirects, CDN).
+            let hkey = self.src.cache_key.clone()
+                .or_else(|| self.src.canonical_url.clone())
+                .unwrap_or_else(|| self.input.url.clone());
+            let local_bytes = self.http_bytes_fetched();
 
-                    self.status = cook_status_from_job(remote_result.status);
-                    self.out_thumbnail = remote_result.thumbnail;
-                    self.out_strategy = remote_result.strategy;
-                    self.out_message = remote_result.message.unwrap_or_default();
-                    self.out_placeholder = remote_result.placeholder;
-                    self.out_download_bytes = local_download_bytes.saturating_add(remote_result.download_size);
-                    self.media.mime = remote_result.mime;
-                    self.media.file_size = remote_result.file_size;
-                    self.media.kind = remote_result.kind;
-                    self.media.extension = remote_result.extension;
-                    self.media.properties = Some(remote_result.properties);
-
-                    // Preserve the resolver tier provenance from the handed-off trace.
-                    self.tel_job_tier_override = Some(remote_trace.job_tier);
-                    self.tel_version_override = Some(remote_trace.version.clone());
-
-                    // Keep key render metadata from the resolver tier.
-                    if self.render_renderer.is_none() {
-                        self.render_renderer = remote_trace.job_renderer.clone();
+            match self.runtime.handoff_inflight.try_lead(&hkey) {
+                Some(rx) => {
+                    // ── Joiner ────────────────────────────────────────────────
+                    // A handoff for this key is already in flight.
+                    // Release our HTTP connection and suspend until the leader
+                    // resolves (cooperative yield — other tasks run while we wait).
+                    self.http_close().await;
+                    match rx.await {
+                        Ok(shared) => match &*shared {
+                            Ok(remote) => {
+                                self.apply_handoff_response(remote, target_tier, local_bytes);
+                            }
+                            Err(e) => {
+                                self.status = CookStatus::Failed;
+                                self.out_message =
+                                    format!("handoff to tier {target_tier} failed: {e}");
+                            }
+                        },
+                        Err(_) => {
+                            // Leader was dropped without completing (cancelled).
+                            self.status = CookStatus::Failed;
+                            self.out_message = format!(
+                                "handoff to tier {target_tier} was cancelled before completing"
+                            );
+                        }
                     }
-                    self.tel_thumbnail_bytes = remote_trace.thumbnail_bytes;
-                    self.tel_download_tail_bytes = remote_trace.download_tail_bytes;
-                    self.tel_decode_secs = remote_trace.render_secs;
-                    self.tel_deliver_secs = remote_trace.deliver_secs;
-                    self.tel_io_secs += remote_trace.io_secs;
-
-                    self.render_handler = RenderHandler::Handoff;
-                    self.render_renderer = Some(format!("handoff/tier{target_tier}"));
                 }
-                Err(e) => {
-                    self.status = CookStatus::Failed;
-                    self.out_message = format!("handoff to tier {target_tier} failed: {e}");
+                None => {
+                    // ── Leader ────────────────────────────────────────────────
+                    // No handoff is in flight for this key; perform it and
+                    // wake any joiners that registered while we were awaiting.
+                    let first_page = self.http_close().await;
+                    let payload    = self.to_handoff(first_page);
+                    let shared = Arc::new(
+                        crate::handoff::post_handoff(url, target_code.as_deref(), &payload).await,
+                    );
+                    // Notify joiners before applying to self so they unblock ASAP.
+                    self.runtime.handoff_inflight.complete(&hkey, Arc::clone(&shared));
+                    match &*shared {
+                        Ok(remote) => {
+                            self.apply_handoff_response(remote, target_tier, local_bytes);
+                        }
+                        Err(e) => {
+                            self.status = CookStatus::Failed;
+                            self.out_message =
+                                format!("handoff to tier {target_tier} failed: {e}");
+                        }
+                    }
                 }
             }
             self.out_duration = t0.elapsed().as_secs_f64();

@@ -98,7 +98,7 @@ pub const TBR_VERSION: &str = env!("CARGO_PKG_VERSION");
 ///
 /// Baked into the SHA-256 key input so old entries become unreachable without
 /// any schema migration or explicit flush.
-pub const TBR_CACHE_VERSION: u32 = 1;
+pub const TBR_CACHE_VERSION: u32 = 4;
 
 // ── Runtime builder helpers ───────────────────────────────────────────────────
 

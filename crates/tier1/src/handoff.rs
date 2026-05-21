@@ -29,9 +29,12 @@
 //! etc.).  If nothing is registered the function falls back to the native
 //! reqwest implementation (when `feature = "native"`) or returns an error.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
+
+use futures::channel::oneshot;
 
 use serde::{Deserialize, Serialize};
 use crate::cook::{InputSpec, MediaInfo, SourceIdentity};
@@ -163,4 +166,64 @@ async fn native_post_handoff(
          call tier1::handoff::register_handoff_fn() at startup"
             .to_string(),
     )
+}
+
+// ── HandoffInflight ───────────────────────────────────────────────────────────
+
+struct InflightSlot {
+    waiters: Vec<oneshot::Sender<Arc<Result<HandoffResponse, String>>>>,
+}
+
+/// Deduplicates concurrent handoffs that resolve to the same cache key.
+///
+/// When multiple requests arrive for the same content while a handoff is
+/// already in flight, joiners suspend (yield at the oneshot `.await`) until
+/// the leader's handoff resolves, then share its result.
+///
+/// # Threading model
+///
+/// Uses `parking_lot::Mutex` (never held across an `.await`) and
+/// `futures::channel::oneshot` (no-std compatible).  Works on both
+/// multi-threaded native tokio and single-threaded Cloudflare Workers.
+#[derive(Clone)]
+pub struct HandoffInflight(Arc<parking_lot::Mutex<HashMap<String, InflightSlot>>>);
+
+impl HandoffInflight {
+    pub fn new() -> Self {
+        Self(Arc::new(parking_lot::Mutex::new(HashMap::new())))
+    }
+
+    /// Attempt to register as the leader for `key`.
+    ///
+    /// Returns `None`     → caller is the **leader**; perform the handoff,
+    ///                       then call [`complete`](Self::complete).
+    /// Returns `Some(rx)` → caller is a **joiner**; `.await rx` to receive
+    ///                       the shared result once the leader finishes.
+    pub fn try_lead(
+        &self,
+        key: &str,
+    ) -> Option<oneshot::Receiver<Arc<Result<HandoffResponse, String>>>> {
+        let mut map = self.0.lock();
+        if map.contains_key(key) {
+            let (tx, rx) = oneshot::channel();
+            map.get_mut(key).unwrap().waiters.push(tx);
+            Some(rx)
+        } else {
+            map.insert(key.to_string(), InflightSlot { waiters: vec![] });
+            None
+        }
+    }
+
+    /// Notify all joiners waiting on `key` with the resolved result.
+    ///
+    /// Must be called by the leader after the handoff resolves (success or
+    /// error).  Joiners whose receiver was already dropped are silently skipped.
+    pub fn complete(&self, key: &str, result: Arc<Result<HandoffResponse, String>>) {
+        let slot = self.0.lock().remove(key);
+        if let Some(slot) = slot {
+            for tx in slot.waiters {
+                let _ = tx.send(Arc::clone(&result));
+            }
+        }
+    }
 }

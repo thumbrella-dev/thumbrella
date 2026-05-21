@@ -80,17 +80,17 @@ pub async fn thumb(
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": "url parameter is required" })))
             .into_response();
     }
-    if q.url.starts_with("file://") {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "file:// URLs are not permitted" })))
-            .into_response();
-    }
+    let url = match normalize_url(q.url, runtime.allow_local) {
+        Ok(u)    => u,
+        Err(msg) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response(),
+    };
 
     let hints: Option<CacheHints> = headers
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
         .map(|etag| CacheHints { etag: Some(etag.to_owned()), ..Default::default() });
 
-    let input = InputSpec { url: q.url, hints, allow_local: false };
+    let input = InputSpec { url, hints, allow_local: runtime.allow_local };
     let (result, _trace, mut after) = ThumbCook::<PlatformStream>::from_input(input, runtime).run().await;
     after.drain_spawn();
 
@@ -128,14 +128,11 @@ pub async fn batch(
     let mut jobs = Vec::with_capacity(req.items.len());
     for (idx, input) in req.items.into_iter().enumerate() {
         let (url, hints) = input.into_parts();
-        if url.starts_with("file://") {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "file:// URLs are not permitted" })),
-            )
-                .into_response();
-        }
-        jobs.push((idx, InputSpec { url, hints, allow_local: false }));
+        let url = match normalize_url(url, runtime.allow_local) {
+            Ok(u)    => u,
+            Err(msg) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response(),
+        };
+        jobs.push((idx, InputSpec { url, hints, allow_local: runtime.allow_local }));
     }
     let count = jobs.len();
 
@@ -214,6 +211,35 @@ pub async fn batch(
     }
 
     Json(json!({ "items": items })).into_response()
+}
+
+/// Validate and normalise a URL from a request query parameter.
+///
+/// When `allow_local` is `false` (default):
+/// - `file://` URLs → rejected with 400.
+/// - Bare paths (no `://` scheme) → rejected with 400.
+///
+/// When `allow_local` is `true` (`TBR_ALLOW_FILES=1`):
+/// - `file://` URLs → accepted unchanged.
+/// - Bare absolute paths (starting with `/`) → promoted to `file://` URLs
+///   (e.g. `/data/img.png` becomes `file:///data/img.png`).
+/// - Bare relative paths → rejected; the server's CWD is ambiguous.
+fn normalize_url(url: String, allow_local: bool) -> Result<String, &'static str> {
+    if url.contains("://") {
+        if url.starts_with("file://") && !allow_local {
+            Err("file:// URLs are not permitted")
+        } else {
+            Ok(url)
+        }
+    } else if allow_local {
+        if url.starts_with('/') {
+            Ok(format!("file://{url}"))
+        } else {
+            Err("bare relative paths are not permitted; use an absolute path or a file:// URL")
+        }
+    } else {
+        Err("url must be an http:// or https:// URL")
+    }
 }
 
 fn wants_ndjson(headers: &HeaderMap) -> bool {
