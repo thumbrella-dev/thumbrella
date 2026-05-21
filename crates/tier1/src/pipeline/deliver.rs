@@ -38,12 +38,13 @@ pub async fn deliver<S: HttpStream>(cook: &mut ThumbCook<S>) {
 
     let t0 = Instant::now();
     let mut buf = ProcessBuffer::from_dynamic(img);
-    buf.fill_crop(config.exact_width, config.exact_height, pixel_art);
-    if let Some(ref bg) = cook.runtime.background_image {
-        buf.composite_onto_image(bg);
-    } else {
-        buf.composite_onto(config.background_rgb);
-    }
+    buf.fit_to_target(config.exact_width, config.exact_height, config.min_fill_ratio, config.fill_budget, pixel_art);
+    buf.place_on_canvas(
+        config.exact_width,
+        config.exact_height,
+        config.background_rgb,
+        cook.runtime.background_image.as_ref(),
+    );
     // Post-composite processing (always on the final RGB buffer).
     if !pixel_art {
         buf.apply_unsharp_mask(0.8, 5);
@@ -103,113 +104,165 @@ impl ProcessBuffer {
         }
     }
 
-    /// Scale-to-fill with centered horizontal / upper-quarter vertical crop.
-    /// When `pixel_art` is true, uses nearest-neighbour to preserve hard edges.
-    pub(super) fn fill_crop(&mut self, target_w: u32, target_h: u32, pixel_art: bool) {
+    /// Scale source to fit within `target_w × target_h` while ensuring neither
+    /// output dimension falls below `min_ratio × target_dimension`.
+    ///
+    /// Normal ARs: pure fit-within (one dim = target, other ≤ target).
+    /// Extreme wide: scale to height = min_h, center-crop width → target_w.
+    /// Extreme tall: scale to width  = min_w, upper-crop  height → target_h.
+    ///
+    /// Call [`ProcessBuffer::place_on_canvas`] afterwards to composite the
+    /// result onto the full background canvas.
+    pub(super) fn fit_to_target(
+        &mut self,
+        target_w: u32,
+        target_h: u32,
+        min_ratio: f32,
+        fill_budget: f32,
+        pixel_art: bool,
+    ) {
         let (src_w, src_h) = self.dimensions();
         if src_w == 0 || src_h == 0 || target_w == 0 || target_h == 0 {
             self.inner = BufInner::Rgb(image::RgbImage::new(target_w.max(1), target_h.max(1)));
             return;
         }
 
-        // ── AR guard + overscale pre-crop ────────────────────────────────────────
-        // Pre-crop to target AR, divided by the overscale factor (1.10×), so
-        // the subsequent resize to exactly target_w×target_h produces the same
-        // fill-and-trim effect as the prototype's overscale-resize-then-crop —
-        // but without a post-resize crop step.
-        //
-        // Why the overscale factor cancels out of the AR:
-        //   (target_w * 1.10) / (target_h * 1.10) == target_w / target_h
-        // So both the AR constraint and the positional bias (center-x, 25%-y)
-        // can be applied directly to the tighter clip; scale from clip → target
-        // equals ≈ target_w/clip_w ≈ 1:1 and the final crop is a ≤1-pixel
-        // rounding no-op.
-        //
-        // DoS protection: even a 4000×2 source is clipped to a ~3×2 region
-        // before resize, bounding the intermediate to ≈target_w×target_h.
-        const OVERSCALE: f32 = 1.10;
-        let target_ar = target_w as f32 / target_h as f32;
-        let source_ar = src_w as f32 / src_h as f32;
-        let (clip_w, clip_h) = if source_ar > target_ar {
-            // Wide source: height is the constraining dimension.
-            let w = ((src_h as f32 * target_ar) / OVERSCALE).ceil() as u32;
-            let h = (src_h as f32 / OVERSCALE).ceil() as u32;
-            (w.min(src_w), h.min(src_h))
-        } else {
-            // Tall source (or exact AR): width is the constraining dimension.
-            let w = (src_w as f32 / OVERSCALE).ceil() as u32;
-            let h = (src_w as f32 / target_ar / OVERSCALE).ceil() as u32;
-            (w.min(src_w), h.min(src_h))
-        };
-        let clip_x = (src_w - clip_w) / 2;
-        let clip_y = ((src_h - clip_h) as f32 * 0.25) as u32;
+        let min_w = ((target_w as f32 * min_ratio).round() as u32).max(1);
+        let min_h = ((target_h as f32 * min_ratio).round() as u32).max(1);
 
-        let scale = (target_w as f32 / clip_w as f32).max(target_h as f32 / clip_h as f32);
-        let new_w = (clip_w as f32 * scale).ceil() as u32;
-        let new_h = (clip_h as f32 * scale).ceil() as u32;
-        // `near`: skip the resize entirely when scale is trivially close to 1.
-        // NOTE: pixel_art uses Nearest filter but still needs the actual resize.
-        let near = !pixel_art && (scale - 1.0).abs() <= 0.06 && clip_w.abs_diff(new_w) <= 8;
+        // Fit-within scale: preserves source AR, fits inside the target box.
+        // One dimension will equal target_*, the other will be <= target_*.
+        let fit_scale = (target_w as f32 / src_w as f32).min(target_h as f32 / src_h as f32);
+        let fit_w = ((src_w as f32 * fit_scale).round() as u32).clamp(1, target_w);
+        let fit_h = ((src_h as f32 * fit_scale).round() as u32).clamp(1, target_h);
+
+        // Determine (resize_w x resize_h) and the post-resize crop target.
+        // Clamped cases: source AR is outside the acceptable min-fill range.
+        // We scale up to the minimum acceptable size and crop the overflowing
+        // dimension to the canvas maximum.
+        let (resize_w, resize_h, crop_w, crop_h) = if fit_h < min_h {
+            // Extremely wide: height would fall below minimum after fit-within.
+            // Scale so height = min_h; width overflows target_w -> center-crop.
+            let s  = min_h as f32 / src_h as f32;
+            let rw = ((src_w as f32 * s).round() as u32).max(target_w);
+            (rw, min_h, target_w, min_h)
+        } else if fit_w < min_w {
+            // Extremely tall: width would fall below minimum after fit-within.
+            // Scale so width = min_w; height overflows target_h -> upper-crop.
+            let s  = min_w as f32 / src_w as f32;
+            let rh = ((src_h as f32 * s).round() as u32).max(target_h);
+            (min_w, rh, min_w, target_h)
+        } else {
+            // Normal fit-within range (not clamped by min_fill_ratio).
+            //
+            // Fill budget: scale up by at most 1/(1-fill_budget) × fit_scale,
+            // capped at fill_scale (the scale that fills the canvas on one edge).
+            //
+            //   fill_budget = 0.0  →  pure fit-within; no crop, full letterbox.
+            //   fill_budget → 1.0  →  approaches pure fill (old fill_crop style).
+            //
+            // Near-AR sources (gap < fill_budget) snap to full fill automatically.
+            // Larger mismatches get proportional blend: budget-fraction crop on
+            // the overflowing edge, reduced letterbox on the other.
+            let fill_scale     = (target_w as f32 / src_w as f32).max(target_h as f32 / src_h as f32);
+            let max_scale      = fit_scale / (1.0 - fill_budget).max(f32::EPSILON);
+            let blend          = fill_scale.min(max_scale);
+            let rw = ((src_w as f32 * blend).round() as u32).max(1);
+            let rh = ((src_h as f32 * blend).round() as u32).max(1);
+            (rw, rh, rw.min(target_w), rh.min(target_h))
+        };
+
+        let needs_resize = resize_w != src_w || resize_h != src_h;
+        let needs_crop   = crop_w != resize_w || crop_h != resize_h;
+
+        // Skip resize when scale is trivially close to 1, no crop is needed, AND
+        // the source already fits within the target bounds (upscaling / identity
+        // only).  If the source is even one pixel larger than the resize target we
+        // must resize so the content never exceeds the canvas in place_on_canvas.
+        let trivial = !pixel_art
+            && !needs_crop
+            && src_w <= resize_w && src_h <= resize_h
+            && (resize_w as f32 / src_w as f32 - 1.0).abs() <= 0.06
+            && src_w.abs_diff(resize_w) <= 8;
+
+        // Center-x, upper-quarter-y crop offset.
+        let crop_x = resize_w.saturating_sub(crop_w) / 2;
+        let crop_y = ((resize_h.saturating_sub(crop_h)) as f32 * 0.25) as u32;
+
         let filter = if pixel_art { FilterType::Nearest } else { FilterType::Triangle };
 
         let prev = std::mem::replace(&mut self.inner, BufInner::Rgb(image::RgbImage::new(0, 0)));
         self.inner = match prev {
             BufInner::Rgb(img) => {
-                let img = if clip_x > 0 || clip_y > 0 {
-                    crop_imm(&img, clip_x, clip_y, clip_w, clip_h).to_image()
-                } else { img };
-                let r = if near { img } else { resize(&img, new_w, new_h, filter) };
-                let x = r.width().saturating_sub(target_w) / 2;
-                let y = (r.height().saturating_sub(target_h) as f32 * 0.25) as u32;
-                BufInner::Rgb(crop_imm(&r, x, y, target_w, target_h).to_image())
+                let r = if trivial || !needs_resize {
+                    img
+                } else {
+                    resize(&img, resize_w, resize_h, filter)
+                };
+                let r = if needs_crop {
+                    crop_imm(&r, crop_x, crop_y, crop_w, crop_h).to_image()
+                } else {
+                    r
+                };
+                BufInner::Rgb(r)
             }
             BufInner::Rgba(img) => {
-                let img = if clip_x > 0 || clip_y > 0 {
-                    crop_imm(&img, clip_x, clip_y, clip_w, clip_h).to_image()
-                } else { img };
-                let r = if near {
+                let r = if trivial || !needs_resize {
                     img
                 } else if pixel_art {
-                    // Nearest-neighbour: no blending between pixels, premultiply not needed.
-                    resize(&img, new_w, new_h, FilterType::Nearest)
+                    // Nearest-neighbour: no blending, premultiply not needed.
+                    resize(&img, resize_w, resize_h, FilterType::Nearest)
                 } else {
                     // Triangle filter blends adjacent pixels.  Premultiplied-alpha space
-                    // prevents dark halos at the boundary of transparent regions.
+                    // prevents dark halos at transparent region boundaries.
                     let mut pm = img;
                     premultiply_rgba(&mut pm);
-                    let mut r = resize(&pm, new_w, new_h, FilterType::Triangle);
+                    let mut r = resize(&pm, resize_w, resize_h, FilterType::Triangle);
                     unpremultiply_rgba(&mut r);
                     r
                 };
-                let x = r.width().saturating_sub(target_w) / 2;
-                let y = (r.height().saturating_sub(target_h) as f32 * 0.25) as u32;
-                BufInner::Rgba(crop_imm(&r, x, y, target_w, target_h).to_image())
+                let r = if needs_crop {
+                    crop_imm(&r, crop_x, crop_y, crop_w, crop_h).to_image()
+                } else {
+                    r
+                };
+                BufInner::Rgba(r)
             }
         };
     }
 
-    /// Composite RGBA over a solid background → RGB in-place.  No-op if already RGB.
-    pub(super) fn composite_onto(&mut self, bg: [u8; 3]) {
-        let prev = std::mem::replace(&mut self.inner, BufInner::Rgb(image::RgbImage::new(0, 0)));
-        self.inner = BufInner::Rgb(match prev {
-            BufInner::Rgb(i)   => i,
-            BufInner::Rgba(rgba) => composite_rgba_over_rgb(rgba, bg),
-        });
-    }
+    /// Composite content onto a `canvas_w × canvas_h` canvas and convert to RGB.
+    ///
+    /// Content is centred on the canvas.  When content already fills the canvas
+    /// (no letterbox/pillarbox) and is RGB, the call is a zero-copy no-op.
+    ///
+    /// Background priority: `bg_image` when provided and canvas-sized, else solid `bg`.
+    pub(super) fn place_on_canvas(
+        &mut self,
+        canvas_w: u32,
+        canvas_h: u32,
+        bg: [u8; 3],
+        bg_image: Option<&image::RgbImage>,
+    ) {
+        let (content_w, content_h) = self.dimensions();
+        let ox = (canvas_w.saturating_sub(content_w)) / 2;
+        let oy = (canvas_h.saturating_sub(content_h)) / 2;
 
-    /// Composite RGBA over an RGB background image → RGB in-place.
-    /// Falls back to solid white if sizes don't match.  No-op if already RGB.
-    pub(super) fn composite_onto_image(&mut self, bg: &image::RgbImage) {
         let prev = std::mem::replace(&mut self.inner, BufInner::Rgb(image::RgbImage::new(0, 0)));
         self.inner = BufInner::Rgb(match prev {
-            BufInner::Rgb(i) => i,
+            BufInner::Rgb(src) if content_w == canvas_w && content_h == canvas_h => {
+                // Content fills canvas exactly — no background needed.
+                src
+            }
+            BufInner::Rgb(src) => {
+                let mut canvas = make_canvas(canvas_w, canvas_h, bg, bg_image);
+                blit_rgb_onto(&src, &mut canvas, ox, oy);
+                canvas
+            }
             BufInner::Rgba(rgba) => {
-                let (w, h) = rgba.dimensions();
-                if bg.dimensions() == (w, h) {
-                    composite_rgba_over_image(rgba, bg)
-                } else {
-                    composite_rgba_over_rgb(rgba, [255, 255, 255])
-                }
+                let mut canvas = make_canvas(canvas_w, canvas_h, bg, bg_image);
+                composite_rgba_onto(&rgba, &mut canvas, ox, oy);
+                canvas
             }
         });
     }
@@ -282,37 +335,47 @@ fn unpremultiply_rgba(img: &mut image::RgbaImage) {
     }
 }
 
-/// Alpha-composite RGBA onto a solid RGB background using integer arithmetic.
-fn composite_rgba_over_rgb(rgba: image::RgbaImage, bg: [u8; 3]) -> image::RgbImage {
-    let (w, h) = rgba.dimensions();
-    let mut out = image::RgbImage::new(w, h);
+/// Build a `w × h` RGB canvas: clone `bg_image` when canvas-sized, else fill with solid `bg`.
+fn make_canvas(w: u32, h: u32, bg: [u8; 3], bg_image: Option<&image::RgbImage>) -> image::RgbImage {
+    match bg_image {
+        Some(img) if img.dimensions() == (w, h) => img.clone(),
+        _ => {
+            let mut canvas = image::RgbImage::new(w, h);
+            for p in canvas.pixels_mut() { *p = image::Rgb(bg); }
+            canvas
+        }
+    }
+}
+
+/// Row-by-row blit of an RGB image onto a canvas at offset (ox, oy).
+fn blit_rgb_onto(src: &image::RgbImage, dst: &mut image::RgbImage, ox: u32, oy: u32) {
+    let (sw, sh) = src.dimensions();
+    let dw = dst.width();
+    let src_raw = src.as_raw();
+    let dst_raw: &mut [u8] = dst.as_mut();
+    for y in 0..sh {
+        let src_off = (y * sw) as usize * 3;
+        let dst_off = ((oy + y) * dw + ox) as usize * 3;
+        dst_raw[dst_off..dst_off + sw as usize * 3]
+            .copy_from_slice(&src_raw[src_off..src_off + sw as usize * 3]);
+    }
+}
+
+/// Alpha-composite an RGBA image onto an RGB canvas at offset (ox, oy).
+fn composite_rgba_onto(rgba: &image::RgbaImage, dst: &mut image::RgbImage, ox: u32, oy: u32) {
+    let (sw, sh) = rgba.dimensions();
+    let dw = dst.width();
     let src = rgba.as_raw();
-    let dst: &mut [u8] = out.as_mut();
-    for i in 0..(w * h) as usize {
-        let a  = src[i * 4 + 3] as u32;
-        let ia = 255 - a;
-        dst[i * 3]     = ((src[i*4]     as u32 * a + bg[0] as u32 * ia + 127) / 255) as u8;
-        dst[i * 3 + 1] = ((src[i*4 + 1] as u32 * a + bg[1] as u32 * ia + 127) / 255) as u8;
-        dst[i * 3 + 2] = ((src[i*4 + 2] as u32 * a + bg[2] as u32 * ia + 127) / 255) as u8;
+    let dst_raw: &mut [u8] = dst.as_mut();
+    for y in 0..sh {
+        for x in 0..sw {
+            let si = (y * sw + x) as usize;
+            let di = ((oy + y) * dw + (ox + x)) as usize;
+            let a  = src[si * 4 + 3] as u32;
+            let ia = 255 - a;
+            dst_raw[di * 3]     = ((src[si*4]     as u32 * a + dst_raw[di*3]     as u32 * ia + 127) / 255) as u8;
+            dst_raw[di * 3 + 1] = ((src[si*4 + 1] as u32 * a + dst_raw[di*3 + 1] as u32 * ia + 127) / 255) as u8;
+            dst_raw[di * 3 + 2] = ((src[si*4 + 2] as u32 * a + dst_raw[di*3 + 2] as u32 * ia + 127) / 255) as u8;
+        }
     }
-    out
 }
-
-/// Alpha-composite RGBA onto an RGB background image using integer arithmetic.
-fn composite_rgba_over_image(rgba: image::RgbaImage, bg: &image::RgbImage) -> image::RgbImage {
-    let (w, h) = rgba.dimensions();
-    let mut out = image::RgbImage::new(w, h);
-    let src  = rgba.as_raw();
-    let back = bg.as_raw();
-    let dst: &mut [u8] = out.as_mut();
-    for i in 0..(w * h) as usize {
-        let a  = src[i * 4 + 3] as u32;
-        let ia = 255 - a;
-        dst[i * 3]     = ((src[i*4]     as u32 * a + back[i*3]     as u32 * ia + 127) / 255) as u8;
-        dst[i * 3 + 1] = ((src[i*4 + 1] as u32 * a + back[i*3 + 1] as u32 * ia + 127) / 255) as u8;
-        dst[i * 3 + 2] = ((src[i*4 + 2] as u32 * a + back[i*3 + 2] as u32 * ia + 127) / 255) as u8;
-    }
-    out
-}
-
-
