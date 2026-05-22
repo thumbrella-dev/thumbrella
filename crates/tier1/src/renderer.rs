@@ -88,6 +88,11 @@ pub trait RenderCook: Send {
     fn set_media_properties(&mut self, props: serde_json::Value);
     /// Mark the cook as failed with a human-readable message.
     fn fail_cook(&mut self, msg: &str);
+    /// Report the actual bytes consumed by the renderer (e.g. AVIO bytes from
+    /// libav).  When set, this value is preferred over the `file_size` fallback
+    /// in the download counter, enabling accurate reporting for formats that
+    /// use partial reads (e.g. HEIC/AVIF with probe_limit).
+    fn set_bytes_consumed(&mut self, n: u64);
 }
 
 // RenderCook is implemented for ThumbCook in cook.rs (needs private field access).

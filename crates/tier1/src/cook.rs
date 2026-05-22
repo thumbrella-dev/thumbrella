@@ -342,6 +342,9 @@ pub struct ThumbCook<S: HttpStream> {
     pub out_duration: f64,
     /// Bytes read from the source to generate this result.
     pub out_download_bytes: u64,
+    /// Actual bytes consumed by the renderer (set via RenderCook::set_bytes_consumed).
+    /// When Some, this overrides the file_size fallback in the download counter.
+    render_bytes_consumed: Option<u64>,
 
     // ── Telemetry — per-step timing ───────────────────────────────────────────
     pub tel_connect_secs: f64,
@@ -411,6 +414,7 @@ impl<S: HttpStream> ThumbCook<S> {
             cache_hit:           None,
             out_duration:        0.0,
             out_download_bytes:  0,
+            render_bytes_consumed: None,
             tel_connect_secs:    0.0,
             tel_inspect_secs:    0.0,
             tel_shortcut_secs:   0.0,
@@ -861,8 +865,15 @@ impl<S: HttpStream> ThumbCook<S> {
                 self.out_duration = t0.elapsed().as_secs_f64();
                 return self.finish(after);
             }
+        }
 
-            // ── shortcut ──────────────────────────────────────────────────────
+        // ── shortcut ──────────────────────────────────────────────────────────
+        // Runs in both direct and handoff modes.  On a handoff, media
+        // kind/extension are already set from the tier-1 inspect, so the
+        // shortcut has all the context it needs.  Tier-2's higher
+        // ShortcutLimits (unlimited progressive pixels, 200 KiB small-file
+        // threshold, 2 MiB ZIP tail) cover cases tier-1 had to skip.
+        {
             let t_step = web_time::Instant::now();
             pipeline::shortcut(&mut self).await;
             self.tel_shortcut_secs = t_step.elapsed().as_secs_f64();
@@ -870,10 +881,12 @@ impl<S: HttpStream> ThumbCook<S> {
 
             if self.status == CookStatus::Complete {
                 self.out_duration = t0.elapsed().as_secs_f64();
-                if let Some(ref key) = self.src.cache_key.clone() {
-                    let result = self.to_result();
-                    let cost = render_cost_from_secs(self.out_duration);
-                    self.runtime.cache.store(key, &result, cost, &mut after);
+                if !self.ctx_handoff {
+                    if let Some(ref key) = self.src.cache_key.clone() {
+                        let result = self.to_result();
+                        let cost = render_cost_from_secs(self.out_duration);
+                        self.runtime.cache.store(key, &result, cost, &mut after);
+                    }
                 }
                 return self.finish(after);
             }
@@ -921,10 +934,13 @@ impl<S: HttpStream> ThumbCook<S> {
                     RenderHandler::Builtin
                 };
 
-                // The renderer consumed the full file via take_reader(); use
-                // file_size as the authoritative download byte count since the
-                // partial inspect-phase snapshot is no longer meaningful.
-                if let Some(sz) = self.media.file_size {
+                // Use the actual bytes consumed by the renderer when available
+                // (reported via RenderCook::set_bytes_consumed); fall back to
+                // file_size for formats that don't report partial reads (e.g.
+                // image-crate paths that drain the full stream).
+                if let Some(bytes) = self.render_bytes_consumed {
+                    self.out_download_bytes = bytes;
+                } else if let Some(sz) = self.media.file_size {
                     self.out_download_bytes = sz;
                 }
 
@@ -1157,5 +1173,8 @@ impl<S: HttpStream + Send + 'static> crate::renderer::RenderCook for ThumbCook<S
     }
     fn fail_cook(&mut self, msg: &str) {
         self.fail(msg);
+    }
+    fn set_bytes_consumed(&mut self, n: u64) {
+        self.render_bytes_consumed = Some(n);
     }
 }

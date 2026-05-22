@@ -4,7 +4,6 @@
 # Goals
 #  - Only built-in software decoders and demuxers  (no external codec libs)
 #  - Static archives (.a) installed to /opt/ffmpeg-static
-#  - External deps limited to: libz, libbz2, liblzma, libm, libpthread
 #  - No network protocols (we handle HTTP via reqwest)
 #  - No encoders, muxers, filters, or device APIs
 #
@@ -58,7 +57,7 @@ echo "[ffmpeg-static] Configuring..."
     \
     --enable-decoder=h264,hevc,vp8,vp9,av1,mpeg1video,mpeg2video,mpeg4,\
 msmpeg4v1,msmpeg4v2,msmpeg4v3,h263,h263p,flv1,wmv1,wmv2,wmv3,vc1,\
-mjpeg,jpeg2000,png,gif,bmp,tiff,theora,dirac,dnxhd,dnxhr,prores,\
+mjpeg,jpeg2000,png,gif,bmp,tiff,webp,theora,dirac,dnxhd,dnxhr,prores,\
 hap,svq1,svq3,rv10,rv20,rv30,rv40,indeo2,indeo3,indeo4,indeo5,\
 huffyuv,ffv1,utvideo,zlib,qtrle,rpza,smc,8bps,aura,aura2,\
 rawvideo,pam,pbm,pgm,pgmyuv,ppm,sunrast,targa,xbm,\
@@ -67,7 +66,8 @@ pcm_s32le,pcm_u8,pcm_alaw,pcm_mulaw,pcm_f32le \
     \
     --enable-demuxer=mov,mp4,m4v,matroska,webm,avi,mpegts,mpegps,mpegvideo,\
 flv,asf,rm,rmvb,ogg,mxf,gxf,lxf,yuv4mpegpipe,rawvideo,\
-image2,gif,ape,aiff,au,wav,mp3,aac,flac,ogg \
+image2,gif,image_jpeg_pipe,image_png_pipe,image_bmp_pipe,image_tiff_pipe,ico,\
+image_webp_pipe,ape,aiff,au,wav,mp3,aac,flac,ogg \
     \
     --enable-parser=h264,hevc,vp8,vp9,av1,mpeg4video,mpeg4,mpegaudio,\
 aac,flac,opus,vorbis,png,gif \

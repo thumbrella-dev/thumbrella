@@ -74,6 +74,14 @@ fn sniff(bytes: &[u8], url: &str, content_type: Option<&str>) -> (FileKind, Stri
             infer_kind = FileKind::Document;
         }
 
+        // infer classifies SVG as text/xml (MatcherType::Text); sniff the
+        // byte prefix for an <svg root element, falling back to URL extension.
+        if infer_kind == FileKind::Text {
+            if sniff_svg(bytes) || url_ext.as_deref() == Some("svg") {
+                return (FileKind::Vector, "image/svg+xml".to_string(), "svg".to_string());
+            }
+        }
+
         // When magic bytes identify a generic container, prefer a more
         // specific kind from the URL extension (e.g. USDZ, DOCX are ZIP).
         if matches!(infer_kind, FileKind::Archive | FileKind::Binary | FileKind::Unknown) {
@@ -147,6 +155,20 @@ pub(super) fn inspect_image_properties(bytes: &[u8], props: &mut serde_json::Val
 }
 
 // ── Extension helpers ─────────────────────────────────────────────────────────
+
+/// Return `true` if `bytes` contain an `<svg` opening tag (case-insensitive),
+/// indicating the content is an SVG document regardless of the MIME label.
+fn sniff_svg(bytes: &[u8]) -> bool {
+    // Match `<svg` followed by whitespace, '>', or '/' to avoid false positives
+    // on longer element names like `<svgfoo`.
+    bytes.windows(5).any(|w| {
+        w[0] == b'<'
+            && w[1].to_ascii_lowercase() == b's'
+            && w[2].to_ascii_lowercase() == b'v'
+            && w[3].to_ascii_lowercase() == b'g'
+            && matches!(w[4], b' ' | b'\t' | b'\n' | b'\r' | b'>' | b'/')
+    })
+}
 
 /// Return `true` for TIFF-container camera-raw extensions.
 /// Used to prefer URL-derived extensions over the generic `"tiff"` label

@@ -67,7 +67,10 @@ impl InProcessRenderer for Tier2Renderer {
 // ── Image decode ──────────────────────────────────────────────────────────────
 
 fn is_image_crate_format(ext: &str) -> bool {
-    matches!(ext, "jpeg" | "jpg" | "png" | "gif" | "bmp" | "tiff" | "webp" | "ico")
+    matches!(ext, "png")
+
+// image library seems to handle interlaced png more efficiently than libav.
+// but otherwise their performance is within 10%
 }
 
 
@@ -263,18 +266,18 @@ async fn render_image(
     let ext_owned = ext.to_string();
     eprintln!("[tier2] render_image: streaming reader  ext={ext}");
 
-    let result = if is_image_crate_format(ext) {
+    let (result, avio_bytes): (Option<RenderOutput>, u64) = if is_image_crate_format(ext) {
         tokio::task::spawn_blocking(move || {
-            collect_and_decode_image_crate(reader, content_length, &ext_owned)
+            (collect_and_decode_image_crate(reader, content_length, &ext_owned), 0u64)
         })
         .await
         .ok()
-        .flatten()
+        .unwrap_or((None, 0))
     } else if is_raw_format(&ext_owned) {
         // Raw format: try SubIFD JPEG preview first; fall back to libav.
         tokio::task::spawn_blocking(move || {
             match extract_raw_preview(reader) {
-                Ok(out) => Some(out),
+                Ok(out) => (Some(out), 0u64),
                 Err(reader) => {
                     // No extractable preview — some raw formats (e.g. CR3) use
                     // a MOV/ISOBMFF container that libav can handle.
@@ -286,7 +289,7 @@ async fn render_image(
         })
         .await
         .ok()
-        .flatten()
+        .unwrap_or((None, 0))
     } else {
         // Sniff container rotation inside spawn_blocking (reader may block).
         tokio::task::spawn_blocking(move || {
@@ -296,9 +299,12 @@ async fn render_image(
         })
         .await
         .ok()
-        .flatten()
+        .unwrap_or((None, 0))
     };
 
+    if avio_bytes > 0 {
+        cook.set_bytes_consumed(avio_bytes);
+    }
     apply_result(cook, result)
 }
 
@@ -311,17 +317,17 @@ async fn render_image_fallback(
     let url       = cook.input_url().to_string();
     let ext_owned = ext.to_string();
     let Some(bytes) = fetch_url(&url).await else {
-        cook.fail_cook("tier2: HTTP fallback fetch failed");
+        cook.fail_cook("fallback fetch failed (connection was not available)");
         return true;
     };
     let cl = Some(bytes.len() as u64);
-    let result = if is_image_crate_format(ext) {
+    let (result, avio_bytes): (Option<RenderOutput>, u64) = if is_image_crate_format(ext) {
         tokio::task::spawn_blocking(move || {
-            collect_and_decode_image_crate(Box::new(Cursor::new(bytes)) as Box<dyn ReadSeek + Send>, cl, &ext_owned)
+            (collect_and_decode_image_crate(Box::new(Cursor::new(bytes)) as Box<dyn ReadSeek + Send>, cl, &ext_owned), 0u64)
         })
         .await
         .ok()
-        .flatten()
+        .unwrap_or((None, 0))
     } else {
         let rotation_hint = isobmff_irot_rotation(&bytes);
         tokio::task::spawn_blocking(move || {
@@ -330,8 +336,11 @@ async fn render_image_fallback(
         })
         .await
         .ok()
-        .flatten()
+        .unwrap_or((None, 0))
     };
+    if avio_bytes > 0 {
+        cook.set_bytes_consumed(avio_bytes);
+    }
     apply_result(cook, result)
 }
 
@@ -358,13 +367,14 @@ async fn render_video(
                 return true;
             };
             let cl = Some(bytes.len() as u64);
-            let result = tokio::task::spawn_blocking(move || {
+            let (result, avio_bytes) = tokio::task::spawn_blocking(move || {
                 let reader: Box<dyn ReadSeek + Send> = Box::new(Cursor::new(bytes));
                 crate::avdecode::decode_with_libav(reader, cl, Some(ext_owned), 0, Some(VIDEO_SEEK_SECS))
             })
             .await
             .ok()
-            .flatten();
+            .unwrap_or((None, 0));
+            if avio_bytes > 0 { cook.set_bytes_consumed(avio_bytes); }
             return apply_result(cook, result);
         }
     };
@@ -372,13 +382,16 @@ async fn render_video(
     let ext_owned = ext.to_string();
     eprintln!("[tier2] render_video: streaming reader  ext={ext}  seek={VIDEO_SEEK_SECS}s");
 
-    let result = tokio::task::spawn_blocking(move || {
+    let (result, avio_bytes) = tokio::task::spawn_blocking(move || {
         crate::avdecode::decode_with_libav(reader, content_length, Some(ext_owned), 0, Some(VIDEO_SEEK_SECS))
     })
     .await
     .ok()
-    .flatten();
+    .unwrap_or((None, 0));
 
+    if avio_bytes > 0 {
+        cook.set_bytes_consumed(avio_bytes);
+    }
     apply_result(cook, result)
 }
 
@@ -517,7 +530,7 @@ fn apply_result(cook: &mut dyn RenderCook, result: Option<RenderOutput>) -> bool
     eprintln!("[tier2] result: {}", if result.is_some() { "ok" } else { "decode failed" });
     match result {
         Some(out) => apply_render_output(cook, out),
-        None      => cook.fail_cook("tier2: decode returned no image"),
+        None      => cook.fail_cook("render failed: could not decode image"),
     }
     true
 }
@@ -535,8 +548,11 @@ fn pre_scale(img: DynamicImage, target_w: u32, target_h: u32) -> DynamicImage {
     img.resize(new_w, new_h, FilterType::Lanczos3)
 }
 
-/// Fallback: fetch `url` over HTTP.
+/// Fallback: fetch `url` — supports both `http(s)://` and `file://`.
 async fn fetch_url(url: &str) -> Option<Vec<u8>> {
+    if let Some(path) = url.strip_prefix("file://") {
+        return tokio::fs::read(path).await.ok();
+    }
     reqwest::get(url).await.ok()?.bytes().await.ok().map(|b| b.to_vec())
 }
 

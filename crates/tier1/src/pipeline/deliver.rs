@@ -155,18 +155,23 @@ impl ProcessBuffer {
         } else {
             // Normal fit-within range (not clamped by min_fill_ratio).
             //
-            // Fill budget: scale up by at most 1/(1-fill_budget) × fit_scale,
-            // capped at fill_scale (the scale that fills the canvas on one edge).
+            // Sources with AR between 1:1 (1.0) and ~4:3 (1.3) snap directly to
+            // full fill — they are cropped to the canvas AR with no letterbox.
+            // 4:3 already snapped via the fill_budget gap check; this extends that
+            // behaviour down to square sources.
             //
-            //   fill_budget = 0.0  →  pure fit-within; no crop, full letterbox.
-            //   fill_budget → 1.0  →  approaches pure fill (old fill_crop style).
-            //
-            // Near-AR sources (gap < fill_budget) snap to full fill automatically.
-            // Larger mismatches get proportional blend: budget-fraction crop on
-            // the overflowing edge, reduced letterbox on the other.
-            let fill_scale     = (target_w as f32 / src_w as f32).max(target_h as f32 / src_h as f32);
-            let max_scale      = fit_scale / (1.0 - fill_budget).max(f32::EPSILON);
-            let blend          = fill_scale.min(max_scale);
+            // Wider sources (AR > 1.3, e.g. 7:5, 3:2, 16:9) use the fill budget:
+            // scale up by at most 1/(1-fill_budget) × fit_scale, capped at
+            // fill_scale.  Near-fill sources whose gap < fill_budget also snap to
+            // full fill automatically; larger mismatches get a proportional blend.
+            let src_ar     = src_w as f32 / src_h as f32;
+            let fill_scale = (target_w as f32 / src_w as f32).max(target_h as f32 / src_h as f32);
+            let max_scale  = fit_scale / (1.0 - fill_budget).max(f32::EPSILON);
+            let blend = if src_ar >= 1.0 && src_ar <= 1.3 {
+                fill_scale  // near-square (1:1 – ~4:3): snap directly to full fill
+            } else {
+                fill_scale.min(max_scale)
+            };
             let rw = ((src_w as f32 * blend).round() as u32).max(1);
             let rh = ((src_h as f32 * blend).round() as u32).max(1);
             (rw, rh, rw.min(target_w), rh.min(target_h))

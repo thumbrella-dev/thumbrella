@@ -43,7 +43,7 @@ ffmpeg-next = { version = "7.1.0", default-features = false, features = [
 
 # ── Decode / metadata ───────────────────────────────────────────────────────────
 serde_json   = "1"
-image        = { version = "0.25", default-features = false }
+image        = { version = "0.25", default-features = false, features = ["webp"] }
 # jpeg-decoder: listed directly to access scale() for DCT-level power-of-two
 # downscaling — avoids decoding the full-resolution JPEG pixel buffer when
 # only a small thumbnail is needed.

@@ -214,7 +214,8 @@ async fn try_exif_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
 
     let span = find_jpeg_exif_shortcut(&header)
         .map(|i| (i.thumb_file_offset, i.thumb_len, i.source_dims))
-        .or_else(|| find_tiff_embedded_jpeg_file_span(&header).map(|(o, l)| (o, l, None)));
+        .or_else(|| find_tiff_embedded_jpeg_file_span(&header).map(|(o, l)| (o, l, None)))
+        .or_else(|| find_png_exif_shortcut(&header).map(|i| (i.thumb_file_offset, i.thumb_len, i.source_dims)));
     let Some((thumb_offset, thumb_len, source_dims)) = span else { return };
 
     let embedded = match cook.http_read_at(thumb_offset, thumb_len).await {
@@ -275,21 +276,61 @@ async fn try_raw_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
         Err(_) => return,
     };
 
+    // Determine endianness up-front — used for the fallback span search and
+    // for the orientation correction that follows decoding.
+    let little = match header.get(0..2) {
+        Some(b"II") => true,
+        Some(b"MM") => false,
+        _ => return,
+    };
+
     let span = find_tiff_embedded_jpeg_file_span(&header);
     let (thumb_offset, thumb_len) = if let Some(s) = span {
         s
     } else {
-        let Some((little, ifd1_off)) = tiff_endian_and_ifd1_offset(&header) else { return };
-        if ifd1_off <= header.len() as u64 { return; }
-        let Ok(ifd1_data) = cook.http_fetch_range(ifd1_off, IFD1_FETCH).await else { return };
-        let Some((_, _, jpeg_off, jpeg_len)) = parse_tiff_ifd(&ifd1_data, 0, little) else { return };
-        match (jpeg_off, jpeg_len) {
-            (Some(o), Some(l)) if l >= 4 => (o as u64, l),
-            _ => return,
+        // SubIFD fallback (DNG/NEF/ARW/…): the large preview JPEG lives in a
+        // SubIFD (tag 0x014A) whose IFD table typically lies well past the
+        // RAW_HEADER_SCAN window.  Parse IFD0 to collect those offsets, then
+        // stream forward on the open connection to read each SubIFD table.
+        let ifd0_off = match read_u32(&header, 4, little) { Some(v) => v as usize, None => return };
+        let subifd_span: Option<(u64, usize)> =
+            if let Some((_, sub_ifds, _, _)) = parse_tiff_ifd(&header, ifd0_off, little) {
+                let mut best: Option<(u64, usize)> = None;
+                for sub_off in sub_ifds {
+                    if sub_off + 2 <= header.len() { continue; } // already covered
+                    let Ok(sub_data) = cook.http_read_at(sub_off as u64, IFD1_FETCH).await
+                        else { continue };
+                    let Some((_, _, jpeg_off, jpeg_len)) = parse_tiff_ifd(&sub_data, 0, little)
+                        else { continue };
+                    if let (Some(o), Some(l)) = (jpeg_off, jpeg_len) {
+                        if l >= 4 && best.is_none_or(|(_, bl)| l > bl) {
+                            best = Some((o as u64, l));
+                        }
+                    }
+                }
+                best
+            } else {
+                None
+            };
+
+        if let Some(s) = subifd_span {
+            s
+        } else {
+            // IFD1 fallback: regular TIFFs (and some CR2/NEF) store the
+            // embedded thumbnail in IFD1 using JPEGInterchangeFormat.
+            let Some((_, ifd1_off)) = tiff_endian_and_ifd1_offset(&header) else { return };
+            if ifd1_off <= header.len() as u64 { return; }
+            let Ok(ifd1_data) = cook.http_read_at(ifd1_off, IFD1_FETCH).await else { return };
+            let Some((_, _, jpeg_off, jpeg_len)) = parse_tiff_ifd(&ifd1_data, 0, little)
+                else { return };
+            match (jpeg_off, jpeg_len) {
+                (Some(o), Some(l)) if l >= 4 => (o as u64, l),
+                _ => return,
+            }
         }
     };
 
-    let embedded = match cook.http_fetch_range(thumb_offset, thumb_len).await {
+    let embedded = match cook.http_read_at(thumb_offset, thumb_len).await {
         Ok(b) => b,
         Err(_) => return,
     };
@@ -297,9 +338,19 @@ async fn try_raw_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     if embedded.len() < 4 || embedded[0] != 0xFF || embedded[1] != 0xD8 { return; }
 
     let Ok(img) = image::load_from_memory(&embedded) else { return };
-    let (thumb_w, thumb_h) = (img.width(), img.height());
     let color_type = img.color();
     let dl_bytes = cook.http_bytes_fetched();
+
+    // Apply TIFF IFD0 Orientation correction.  The embedded JPEG preview is
+    // physically stored in the sensor's capture orientation; the Orientation
+    // tag (0x0112) says how to rotate it for correct display.
+    let img = match tiff_ifd0_orientation(&header, little) {
+        3 => img.rotate180(),
+        6 => img.rotate90(),   // right-top: rotate 90° CW to display
+        8 => img.rotate270(),  // left-bottom: rotate 90° CCW to display
+        _ => img,
+    };
+    let (thumb_w, thumb_h) = (img.width(), img.height());
 
     let img = pre_scale_to_target(img, config.exact_width, config.exact_height);
     cook.http_close().await;
@@ -352,14 +403,24 @@ async fn try_zip_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
 async fn zip_extract<S: HttpStream>(
     cook: &mut ThumbCook<S>,
 ) -> Option<(Vec<u8>, u64, u64)> {
-    let file_size    = cook.http_stream_len()?;
+    let file_size      = cook.http_stream_len()?;
     let accepts_ranges = cook.http_accepts_ranges;
-    if !accepts_ranges || file_size < 22 { return None; }
+    if file_size < 22 { return None; }
 
     let tail_size  = (cook.runtime.shortcut_limits.zip_tail_size as u64).min(file_size) as usize;
     let tail_start = file_size - tail_size as u64;
 
-    let tail = cook.http_fetch_range(tail_start, tail_size).await.ok()?;
+    // When the tail window covers the entire file, reuse the already-open
+    // streaming connection rather than opening a redundant Range request.
+    // This avoids double-counting inspect-phase bytes in the download metric
+    // and eliminates a second TCP connection for small archives.
+    let tail = if tail_start == 0 {
+        cook.http_read_at(0, file_size as usize).await.ok()?
+    } else {
+        if !accepts_ranges { return None; }
+        cook.http_fetch_range(tail_start, tail_size).await.ok()?
+    };
+
     let image_bytes = zip_parse_and_extract(&tail, tail_start)?;
     let dl_bytes    = cook.http_bytes_fetched();
     Some((image_bytes, dl_bytes, tail_size as u64))
@@ -578,9 +639,17 @@ fn parse_exif_shortcut_info(
     app1_file_offset: u64,
 ) -> Option<JpegExifShortcutInfo> {
     if app1_data.len() < 6 || &app1_data[0..6] != b"Exif\0\0" { return None; }
-    let tiff = &app1_data[6..];
-    let tiff_file_offset = app1_file_offset + 6;
+    parse_tiff_exif_thumbnail(&app1_data[6..], app1_file_offset + 6)
+}
 
+/// Parse an embedded JPEG thumbnail from raw TIFF data (no `Exif\0\0` prefix).
+///
+/// Used by both the JPEG/TIFF EXIF path (which strips the APP1 `Exif\0\0`
+/// header) and the PNG `eXIf` chunk path (which stores raw TIFF directly).
+fn parse_tiff_exif_thumbnail(
+    tiff: &[u8],
+    tiff_file_offset: u64,
+) -> Option<JpegExifShortcutInfo> {
     if tiff.len() < 8 { return None; }
     let little = match &tiff[0..2] {
         b"II" => true,
@@ -676,6 +745,33 @@ fn tiff_scalar(bytes: &[u8], field_type: u16, offset: usize, little: bool) -> Op
     }
 }
 
+// ── PNG eXIf embedded thumbnail ───────────────────────────────────────────────
+
+/// Scan a file prefix for a PNG `eXIf` chunk and extract its IFD1 thumbnail.
+///
+/// The PNG `eXIf` chunk (standardised in PNG 1.6) stores raw TIFF data
+/// (no `Exif\0\0` prefix) before the first `IDAT` chunk.  For typical camera
+/// images this fits entirely within the 4 KiB `HEADER_SCAN` window.
+fn find_png_exif_shortcut(bytes: &[u8]) -> Option<JpegExifShortcutInfo> {
+    const PNG_SIG: &[u8] = b"\x89PNG\r\n\x1a\n";
+    if bytes.len() < 8 || &bytes[0..8] != PNG_SIG { return None; }
+    let mut pos = 8usize;
+    while pos + 12 <= bytes.len() {
+        let chunk_len  = u32::from_be_bytes([bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3]]) as usize;
+        let chunk_type = &bytes[pos+4..pos+8];
+        let data_start = pos + 8;
+        let data_end   = data_start.saturating_add(chunk_len).min(bytes.len());
+        if chunk_type == b"eXIf" {
+            return parse_tiff_exif_thumbnail(&bytes[data_start..data_end], data_start as u64);
+        }
+        // IDAT/IEND: metadata chunks only appear before image data.
+        if chunk_type == b"IDAT" || chunk_type == b"IEND" { break; }
+        // Chunk layout: 4 (length) + 4 (type) + chunk_len (data) + 4 (CRC)
+        pos += 8 + chunk_len + 4;
+    }
+    None
+}
+
 // ── TIFF: embedded JPEG preview ───────────────────────────────────────────────
 
 /// Return the `(file_byte_offset, byte_length)` of the best embedded JPEG
@@ -683,6 +779,22 @@ fn tiff_scalar(bytes: &[u8], field_type: u16, offset: usize, little: bool) -> Op
 fn find_tiff_embedded_jpeg_file_span(bytes: &[u8]) -> Option<(u64, usize)> {
     let (off, len) = find_tiff_embedded_jpeg_span(bytes)?;
     Some((off as u64, len))
+}
+
+/// Read the TIFF Orientation tag (0x0112) from IFD0.  Returns 1 (normal) if
+/// the tag is absent or the header is too short.
+fn tiff_ifd0_orientation(bytes: &[u8], little: bool) -> u16 {
+    let ifd0_off = match read_u32(bytes, 4, little) { Some(v) => v as usize, None => return 1 };
+    let count    = match read_u16(bytes, ifd0_off, little) { Some(v) => v as usize, None => return 1 };
+    for i in 0..count {
+        let entry = ifd0_off + 2 + i * 12;
+        if entry + 12 > bytes.len() { break; }
+        let Some(tag) = read_u16(bytes, entry, little) else { break };
+        if tag == 0x0112 {
+            return read_u16(bytes, entry + 8, little).unwrap_or(1);
+        }
+    }
+    1
 }
 
 /// Return `(little_endian, ifd1_file_offset)` by reading IFD0's next-IFD
@@ -1002,7 +1114,7 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     // than downloading the entire source file.
     let is_jpeg = matches!(ext, "jpeg");
     let is_tiff = matches!(ext, "tiff");
-    if is_jpeg || is_tiff {
+    if is_jpeg || is_tiff || ext == "png" {
         try_exif_shortcut(cook).await;
         if !cook.http_is_open() { return; }
     }
@@ -1019,7 +1131,7 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     // Keep this BEFORE the progressive JPEG path so genuinely small files
     // always use a full decode for reliability/quality.
     let is_tier1_image_format = matches!(ext,
-        "jpeg" | "png" | "gif" | "bmp" | "tiff" | "webp" | "ico"
+        "jpeg" | "png" | "gif" | "bmp" | "tiff" | "ico"
     );
     let is_small_image = cook.media.kind == Some(FileKind::Image)
         && is_tier1_image_format

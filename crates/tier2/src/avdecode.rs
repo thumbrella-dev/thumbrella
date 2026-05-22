@@ -32,6 +32,20 @@ use std::ptr;
 
 use tier1::ReadSeek;
 
+// Force the linker to include img2dec.o from libavformat.a.  LLD's
+// --gc-sections removes unreferenced data sections, so every demuxer struct
+// that must be reachable via av_find_input_format() needs an explicit
+// read_volatile reference.  All these symbols live in img2dec.o.
+unsafe extern "C" {
+    static ff_image_webp_pipe_demuxer:  u8;
+    static ff_image_png_pipe_demuxer:   u8;
+    static ff_image_jpeg_pipe_demuxer:  u8;
+    static ff_image_bmp_pipe_demuxer:   u8;
+    static ff_image_tiff_pipe_demuxer:  u8;
+    // ico demuxer lives in icodeac.o
+    static ff_ico_demuxer:              u8;
+}
+
 // ── ReaderState — type-erased I/O state for AVIO callbacks ───────────────────
 
 /// Holds the reader and its optional total length.
@@ -56,7 +70,7 @@ struct ReaderState {
 }
 
 use ffmpeg_sys_next::*;
-use image::{DynamicImage, RgbImage};
+use image::{DynamicImage, RgbImage, RgbaImage};
 use serde_json::json;
 
 use tier1::renderer::RenderOutput;
@@ -74,9 +88,9 @@ fn avio_debug_enabled() -> bool {
 /// Angles that are not a multiple of 90 are treated as 0 (no rotation).
 fn apply_rotation(img: DynamicImage, clockwise_degrees: i32) -> DynamicImage {
     match clockwise_degrees.rem_euclid(360) {
-        90  => DynamicImage::ImageRgb8(img.rotate90().into_rgb8()),
-        180 => DynamicImage::ImageRgb8(img.rotate180().into_rgb8()),
-        270 => DynamicImage::ImageRgb8(img.rotate270().into_rgb8()),
+        90  => img.rotate90(),
+        180 => img.rotate180(),
+        270 => img.rotate270(),
         _   => img,
     }
 }
@@ -217,11 +231,12 @@ unsafe fn free_avio_ctx(ctx: &mut *mut AVIOContext) {
 /// without a filename).
 fn ext_to_libav_format(ext: &str) -> Option<&'static str> {
     match ext {
-        "jpeg" | "jpg"          => Some("mjpeg"),
+        "jpeg" | "jpg"          => Some("jpeg_pipe"),
         "png"                   => Some("png_pipe"),
         "bmp"                   => Some("bmp_pipe"),
         "gif"                   => Some("gif"),
-        "tiff"                  => Some("tiff_pipe"),
+        "tiff" | "tif"          => Some("tiff_pipe"),
+        "ico"                   => Some("ico"),
         "webp"                  => Some("webp_pipe"),
         _                       => None,
     }
@@ -242,15 +257,30 @@ fn ext_to_libav_format(ext: &str) -> Option<&'static str> {
 ///   to hint the demuxer when probing an untitled stream.  Pass `None` to
 ///   rely entirely on byte-stream detection.
 ///
-/// Returns `None` on any failure (unsupported format, decode error, etc.).
+/// Returns `(result, avio_bytes)` where `avio_bytes` is the total number of
+/// bytes requested from the reader by libav's AVIO callbacks.  This value is
+/// more accurate than `content_length` for formats that use partial reads
+/// (e.g. HEIC/AVIF with probe_limit).
 pub fn decode_with_libav(
     reader: Box<dyn ReadSeek + Send>,
     content_length: Option<u64>,
     ext_hint: Option<String>,
     rotation_hint: i32,
     seek_secs: Option<f64>,
-) -> Option<RenderOutput> {
+) -> (Option<RenderOutput>, u64) {
     eprintln!("[avdecode] decode_with_libav: content_length={content_length:?}, ext_hint={ext_hint:?}, rotation_hint={rotation_hint}, seek_secs={seek_secs:?}");
+
+    // Force-retain all pipe demuxer structs from img2dec.o and icodeac.o.
+    // LLD's --gc-sections removes data sections that aren't reachable from a
+    // live root; read_volatile prevents the optimizer from removing the refs.
+    unsafe {
+        let _ = std::ptr::read_volatile(&raw const ff_image_webp_pipe_demuxer);
+        let _ = std::ptr::read_volatile(&raw const ff_image_png_pipe_demuxer);
+        let _ = std::ptr::read_volatile(&raw const ff_image_jpeg_pipe_demuxer);
+        let _ = std::ptr::read_volatile(&raw const ff_image_bmp_pipe_demuxer);
+        let _ = std::ptr::read_volatile(&raw const ff_image_tiff_pipe_demuxer);
+        let _ = std::ptr::read_volatile(&raw const ff_ico_demuxer);
+    }
 
     // Resolve the optional format hint to a *mut AVInputFormat.
     // av_find_input_format returns NULL when the name is unknown — that's fine,
@@ -267,8 +297,6 @@ pub fn decode_with_libav(
 
     if !fmt_hint_ptr.is_null() {
         eprintln!("[avdecode] using format hint for {:?}", ext_hint);
-    } else {
-        eprintln!("[avdecode] no format hint, relying on auto-probe");
     }
 
     // Box the reader state so it has a stable address.  All libav callbacks
@@ -299,12 +327,21 @@ pub fn decode_with_libav(
     let mut frame:     *mut AVFrame         = ptr::null_mut();
     let mut sws_ctx:   *mut SwsContext      = ptr::null_mut();
 
+    // Limit probe reads for HEIF-family formats.  All codec parameters are
+    // stored in the `meta` box at the file start, so a 128 KB ceiling is more
+    // than enough to identify all streams without streaming the full mdat.
+    let probe_limit: Option<i64> = match ext_hint.as_deref() {
+        Some("heic" | "heif" | "heics" | "heifs" | "avif") => Some(128 * 1024),
+        _ => None,
+    };
+
     let result = unsafe {
         decode_inner(
             opaque,
             fmt_hint_ptr,
             rotation_hint,
             seek_secs,
+            probe_limit,
             &mut avio_ctx,
             &mut fmt_ctx,
             &mut codec_ctx,
@@ -352,9 +389,10 @@ pub fn decode_with_libav(
     }
 
     // state drops here, after every libav resource that held its pointer is gone.
+    let avio_bytes = state.read_bytes;
     drop(state);
 
-    result
+    (result, avio_bytes)
 }
 
 // ── Inner decode — returns early on any failure ───────────────────────────────
@@ -364,7 +402,11 @@ unsafe fn decode_inner(
     opaque:        *mut c_void,
     fmt_hint:      *mut AVInputFormat,
     rotation_hint: i32,
-    seek_secs:  Option<f64>,
+    seek_secs:     Option<f64>,
+    // When Some(n): cap avformat_find_stream_info to n bytes.  HEIF/HEIC/AVIF
+    // store all codec parameters in the meta box at the file start (<5 KB),
+    // so a 128 KB ceiling avoids streaming the full multi-MB mdat block.
+    probe_limit:   Option<i64>,
     avio_ctx:      &mut *mut AVIOContext,
     fmt_ctx:       &mut *mut AVFormatContext,
     codec_ctx:     &mut *mut AVCodecContext,
@@ -413,6 +455,15 @@ unsafe fn decode_inner(
         return None;
     }
     eprintln!("[avdecode] avformat_open_input OK");
+
+    // Apply probe limit BEFORE find_stream_info so FFmpeg stops reading after
+    // at most `limit` bytes.  For HEIF/HEIC/AVIF the codec parameters are
+    // entirely in the meta box (first ~5 KB); limiting to 128 KB is safe and
+    // reduces HEIC downloads from ~2.7 MB to ~30 KB.
+    if let Some(limit) = probe_limit {
+        (**fmt_ctx).probesize = limit;
+        (**fmt_ctx).max_analyze_duration = 0;
+    }
 
     let info_ret = avformat_find_stream_info(*fmt_ctx, ptr::null_mut());
     if info_ret < 0 {
@@ -635,9 +686,18 @@ unsafe fn decode_inner(
         (sw, sh)
     };
 
+    // Use RGBA output when the source pixel format carries an alpha channel,
+    // RGB24 otherwise.  sws_scale handles the conversion in both cases.
+    let has_alpha = {
+        let desc = av_pix_fmt_desc_get(frame_fmt);
+        !desc.is_null() && ((*desc).flags & AV_PIX_FMT_FLAG_ALPHA as u64) != 0
+    };
+    let dst_fmt  = if has_alpha { AVPixelFormat::AV_PIX_FMT_RGBA } else { AVPixelFormat::AV_PIX_FMT_RGB24 };
+    let channels = if has_alpha { 4usize } else { 3usize };
+
     *sws_ctx = sws_getContext(
         frame_w, frame_h, frame_fmt,
-        out_w,   out_h,   AVPixelFormat::AV_PIX_FMT_RGB24,
+        out_w,   out_h,   dst_fmt,
         SWS_BILINEAR as c_int,
         ptr::null_mut(),
         ptr::null_mut(),
@@ -648,9 +708,9 @@ unsafe fn decode_inner(
         return None;
     }
 
-    let stride = (out_w as usize) * 3;
-    let mut rgb_buf = vec![0u8; stride * out_h as usize];
-    let dst_data:     [*mut u8; 4] = [rgb_buf.as_mut_ptr(), ptr::null_mut(), ptr::null_mut(), ptr::null_mut()];
+    let stride = (out_w as usize) * channels;
+    let mut buf = vec![0u8; stride * out_h as usize];
+    let dst_data:     [*mut u8; 4] = [buf.as_mut_ptr(), ptr::null_mut(), ptr::null_mut(), ptr::null_mut()];
     let dst_linesize: [c_int;   4] = [stride as c_int, 0, 0, 0];
 
     sws_scale(
@@ -664,14 +724,24 @@ unsafe fn decode_inner(
     );
 
     // ── Build RenderOutput ────────────────────────────────────────────────────
-    let img = match RgbImage::from_raw(out_w as u32, out_h as u32, rgb_buf) {
-        Some(i) => i,
-        None => {
-            eprintln!("[avdecode] FAIL: RgbImage::from_raw failed (buffer size mismatch)");
-            return None;
+    let img: DynamicImage = if has_alpha {
+        match RgbaImage::from_raw(out_w as u32, out_h as u32, buf) {
+            Some(i) => DynamicImage::ImageRgba8(i),
+            None => {
+                eprintln!("[avdecode] FAIL: RgbaImage::from_raw failed (buffer size mismatch)");
+                return None;
+            }
+        }
+    } else {
+        match RgbImage::from_raw(out_w as u32, out_h as u32, buf) {
+            Some(i) => DynamicImage::ImageRgb8(i),
+            None => {
+                eprintln!("[avdecode] FAIL: RgbImage::from_raw failed (buffer size mismatch)");
+                return None;
+            }
         }
     };
-    let img = apply_rotation(DynamicImage::ImageRgb8(img), rotation_degrees);
+    let img = apply_rotation(img, rotation_degrees);
     eprintln!("[avdecode] success: {src_w}x{src_h} codec={codec_name:?} depth={depth} rotation={rotation_degrees}°");
     Some(RenderOutput {
         image:           img,

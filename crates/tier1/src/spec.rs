@@ -138,10 +138,13 @@ impl ShortcutLimits {
     /// Progressive JPEG is effectively unbounded so tier 2 always attempts the
     /// partial-read shortcut for progressive sources before any full-file JPEG path.
     /// Small-file threshold is kept moderate for non-progressive inline decodes.
-    /// ZIP tail is raised to 2 MiB to cover large office document previews.
+    /// ZIP tail is 256 KiB — enough to cover the Central Directory plus a
+    /// 256×256 px LibreOffice thumbnail PNG (~120 KiB) sitting at the end of
+    /// the archive.  Files smaller than this threshold stream in full from the
+    /// already-open connection (no Range request).
     pub const TIER2: Self = Self {
         max_progressive_pixels: u64::MAX,
         small_file_threshold:   200 * 1024,       // 200 KiB
-        zip_tail_size:          2 * 1024 * 1024,  // 2 MiB
+        zip_tail_size:          256 * 1024,        // 256 KiB
     };
 }
