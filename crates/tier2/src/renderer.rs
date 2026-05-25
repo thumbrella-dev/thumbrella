@@ -56,7 +56,7 @@ impl InProcessRenderer for Tier2Renderer {
             match kind {
                 Some(FileKind::Image) => render_image(cook, &ext, content_length).await,
                 Some(FileKind::Video) => render_video(cook, &ext, content_length).await,
-                //       FileKind::Vector → resvg
+                Some(FileKind::Vector) => render_vector(cook, &ext, content_length).await,
                 //       FileKind::Document → pdfium first page
                 _ => false,
             }
@@ -84,6 +84,97 @@ fn is_raw_format(ext: &str) -> bool {
         "dng" | "cr2" | "nef" | "arw" | "orf" | "rw2" | "pef" | "srw" | "raf"
             | "3fr" | "fff" | "iiq" | "raw"
     )
+}
+
+/// Returns `true` for JPEG XL — decoded by the pure-Rust `jxl-oxide` crate.
+fn is_jxl_format(ext: &str) -> bool {
+    ext == "jxl"
+}
+
+/// Returns `true` for SVG — rendered by the pure-Rust `resvg` crate.
+fn is_svg_format(ext: &str) -> bool {
+    ext == "svg"
+}
+
+// ── JPEG XL decode ────────────────────────────────────────────────────────────
+
+/// Decode a JPEG XL image via the `jxl-oxide` crate.
+///
+/// Expects `reader` to have all bytes available (reads via `read_to_end`).
+/// Returns `Some(RenderOutput)` on success, `None` on decode error.
+fn decode_jxl(reader: &mut dyn ReadSeek) -> Option<RenderOutput> {
+    use jxl_oxide::JxlImage;
+
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).ok()?;
+    let image = JxlImage::builder().read(std::io::Cursor::new(&bytes)).ok()?;
+    let (width, height) = (image.width(), image.height());
+
+    let render = image.render_frame(0).ok()?;
+
+    let fb = render.image_all_channels();
+    let channels = fb.channels();
+    let buf = fb.buf();
+
+    let img: DynamicImage = match channels {
+        1 => {
+            let gray: Vec<u8> = buf.iter().map(|&v| (v.clamp(0.0, 1.0) * 255.0) as u8).collect();
+            DynamicImage::ImageLuma8(image::GrayImage::from_raw(width, height, gray)?)
+        }
+        3 => {
+            let rgb: Vec<u8> = buf.iter().map(|&v| (v.clamp(0.0, 1.0) * 255.0) as u8).collect();
+            DynamicImage::ImageRgb8(image::RgbImage::from_raw(width, height, rgb)?)
+        }
+        _ => {
+            // 4 channels (RGBA) or more — just take first 3
+            let rgb: Vec<u8> = buf.chunks(channels)
+                .flat_map(|px| px.iter().take(3).map(|&v| (v.clamp(0.0, 1.0) * 255.0) as u8))
+                .collect();
+            DynamicImage::ImageRgb8(image::RgbImage::from_raw(width, height, rgb)?)
+        }
+    };
+
+    let depth = channels as u32 * 8;
+    let cfg = ThumbnailConfig::CANONICAL;
+    let img = pre_scale(img, cfg.exact_width, cfg.exact_height);
+
+    Some(RenderOutput {
+        image:           img,
+        renderer:        Some("jxl_oxide".into()),
+        codec:           None,
+        video_seek_secs: None,
+        properties:      Some(serde_json::json!({ "width": width, "height": height, "depth": depth })),
+    })
+}
+
+// ── SVG render ────────────────────────────────────────────────────────────────
+
+/// Render an SVG to a raster image via the `resvg` crate.
+fn render_svg(reader: &mut dyn ReadSeek) -> Option<RenderOutput> {
+    let mut svg_str = String::new();
+    reader.read_to_string(&mut svg_str).ok()?;
+
+    let tree = resvg::usvg::Tree::from_str(&svg_str, &resvg::usvg::Options::default()).ok()?;
+    let size = tree.size();
+    let (w, h) = (size.width().ceil() as u32, size.height().ceil() as u32);
+    if w == 0 || h == 0 { return None; }
+
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h)?;
+    resvg::render(&tree, resvg::usvg::Transform::default(), &mut pixmap.as_mut());
+
+    let rgba = pixmap.take();
+    let img = DynamicImage::ImageRgba8(image::RgbaImage::from_raw(w, h, rgba)?);
+
+    let cfg = ThumbnailConfig::CANONICAL;
+    let img = pre_scale(img, cfg.exact_width, cfg.exact_height);
+
+    Some(RenderOutput {
+        image:           img,
+        renderer:        Some("resvg".into()),
+        codec:           None,
+        video_seek_secs: None,
+        properties:      Some(serde_json::json!({ "width": w, "height": h, "depth": 32 })),
+    })
 }
 
 // ── Raw TIFF preview extraction ───────────────────────────────────────────────
@@ -290,6 +381,24 @@ async fn render_image(
         .await
         .ok()
         .unwrap_or((None, 0))
+    } else if is_jxl_format(&ext_owned) {
+        tokio::task::spawn_blocking(move || {
+            let mut reader = reader;
+            let result = decode_jxl(&mut *reader);
+            (result, 0u64)
+        })
+        .await
+        .ok()
+        .unwrap_or((None, 0))
+    } else if is_svg_format(&ext_owned) {
+        tokio::task::spawn_blocking(move || {
+            let mut reader = reader;
+            let result = render_svg(&mut *reader);
+            (result, 0u64)
+        })
+        .await
+        .ok()
+        .unwrap_or((None, 0))
     } else {
         // Sniff container rotation inside spawn_blocking (reader may block).
         tokio::task::spawn_blocking(move || {
@@ -341,6 +450,38 @@ async fn render_image_fallback(
     if avio_bytes > 0 {
         cook.set_bytes_consumed(avio_bytes);
     }
+    apply_result(cook, result)
+}
+
+/// Render a vector image (SVG) via resvg.
+async fn render_vector(
+    cook: &mut dyn RenderCook,
+    ext: &str,
+    _content_length: Option<u64>,
+) -> bool {
+    let reader = match cook.take_reader() {
+        Some(r) => r,
+        None => {
+            cook.fail_cook("tier2: vector render requires a live connection");
+            return true;
+        }
+    };
+
+    let ext_owned = ext.to_string();
+    eprintln!("[tier2] render_vector: streaming reader  ext={ext}");
+
+    let result = if is_svg_format(&ext_owned) {
+        tokio::task::spawn_blocking(move || {
+            let mut reader = reader;
+            render_svg(&mut *reader)
+        })
+        .await
+        .ok()
+        .flatten()
+    } else {
+        None
+    };
+
     apply_result(cook, result)
 }
 

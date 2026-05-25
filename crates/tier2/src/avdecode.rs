@@ -42,6 +42,7 @@ unsafe extern "C" {
     static ff_image_jpeg_pipe_demuxer:  u8;
     static ff_image_bmp_pipe_demuxer:   u8;
     static ff_image_tiff_pipe_demuxer:  u8;
+    static ff_image_psd_pipe_demuxer:   u8;
     // ico demuxer lives in icodeac.o
     static ff_ico_demuxer:              u8;
 }
@@ -279,6 +280,7 @@ pub fn decode_with_libav(
         let _ = std::ptr::read_volatile(&raw const ff_image_jpeg_pipe_demuxer);
         let _ = std::ptr::read_volatile(&raw const ff_image_bmp_pipe_demuxer);
         let _ = std::ptr::read_volatile(&raw const ff_image_tiff_pipe_demuxer);
+        let _ = std::ptr::read_volatile(&raw const ff_image_psd_pipe_demuxer);
         let _ = std::ptr::read_volatile(&raw const ff_ico_demuxer);
     }
 
@@ -570,6 +572,9 @@ unsafe fn decode_inner(
         eprintln!("[avdecode] FAIL: avcodec_parameters_to_context failed");
         return None;
     }
+    // Auto-detect thread count (libdav1d etc. respect this).
+    // 0 = auto; decoder chooses based on available cores.
+    unsafe { (*(*codec_ctx)).thread_count = 0; }
     let open2_ret = avcodec_open2(*codec_ctx, dec, ptr::null_mut());
     if open2_ret < 0 {
         eprintln!("[avdecode] FAIL: avcodec_open2 returned {open2_ret}");

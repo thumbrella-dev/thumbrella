@@ -105,7 +105,7 @@ pub fn route(kind: FileKind, extension: Option<&str>) -> ThumbRoute {
             ThumbRoute { tier: 2 },
 
         // ── Tier 2 — libav: HDR/specialty images ──────────────────────────────
-        (FileKind::Image, Some("exr" | "hdr" | "avif" | "heic" | "heif")) =>
+        (FileKind::Image, Some("exr" | "hdr" | "avif" | "heic" | "heif" | "jxl")) =>
             ThumbRoute { tier: 2 },
 
         // ── Tier 2 — camera raw containers (tier1 may still shortcut first) ─

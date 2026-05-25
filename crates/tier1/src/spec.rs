@@ -120,6 +120,13 @@ pub struct ShortcutLimits {
     /// Larger values cover bigger office document thumbnails at the cost of
     /// fetching more data on cache miss.
     pub zip_tail_size: usize,
+
+    /// Maximum bytes to fetch for the audio cover-art shortcut.
+    ///
+    /// The ID3v2 tag (including embedded APIC image data) is fetched as a
+    /// contiguous prefix read.  Tags larger than this limit are skipped and
+    /// the shortcut falls through to the tier-2 handoff path.
+    pub audio_cover_max_fetch: usize,
 }
 
 impl ShortcutLimits {
@@ -131,6 +138,7 @@ impl ShortcutLimits {
         max_progressive_pixels: 1_000_000,       // ~1 MP — ~7 ms decode
         small_file_threshold:   80 * 1024,        // 80 KiB
         zip_tail_size:          128 * 1024,        // 128 KiB
+        audio_cover_max_fetch:  128 * 1024,        // 128 KiB
     };
 
     /// Relaxed limits for Tier 2 (native server, no Worker budget).
@@ -146,5 +154,6 @@ impl ShortcutLimits {
         max_progressive_pixels: u64::MAX,
         small_file_threshold:   200 * 1024,       // 200 KiB
         zip_tail_size:          256 * 1024,        // 256 KiB
+        audio_cover_max_fetch:  512 * 1024,        // 512 KiB
     };
 }

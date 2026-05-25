@@ -1077,6 +1077,273 @@ fn read_u32(buf: &[u8], off: usize, little: bool) -> Option<u32> {
     Some(if little { u32::from_le_bytes([b0, b1, b2, b3]) } else { u32::from_be_bytes([b0, b1, b2, b3]) })
 }
 
+// ── Audio: ID3v2 APIC cover art shortcut ────────────────────────────────────
+
+/// Attempt to extract embedded cover art from an audio file's ID3v2 tag.
+///
+/// Supports MP3 files with ID3v2.x APIC (Attached Picture) frames.
+///
+/// Strategy:
+/// - Read the ID3v2 header from the page cache (zero extra network I/O).
+/// - Read up to `audio_cover_max_fetch` bytes total starting at byte 0.
+///   Since ID3v2 tags are always at the beginning of the file, this is
+///   guaranteed to include the full tag for any reasonably-sized cover art.
+///   We read based on the file size (up to the limit) rather than trusting
+///   the ID3 header's `tag_size` field, which some encoders under-report.
+/// - Scan frames for "APIC"; extract and decode the embedded image.
+async fn try_audio_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
+    let config = &ThumbnailConfig::CANONICAL;
+
+    // Read the first few KiB — already cached from inspect, zero network I/O.
+    let header = match cook.http_read_at(0, HEADER_SCAN).await {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+
+    // Must have an ID3v2 header at byte 0.
+    let id3 = match parse_id3_header(&header) {
+        Some(h) => h,
+        None => return,
+    };
+
+    // Read enough bytes to cover the full tag.  We use the file size (up to
+    // the configured limit) rather than trusting id3.tag_size — some encoders
+    // under-report the tag size, which would truncate the APIC image data.
+    let fetch_limit = cook.runtime.shortcut_limits.audio_cover_max_fetch as u64;
+    let file_size = cook.http_stream_len().unwrap_or(u64::MAX);
+    let read_len = file_size.min(fetch_limit) as usize;
+
+    // Read the file prefix.  The ID3v2 tag is always at the beginning of an
+    // MP3 file, so this captures the full tag and any embedded cover art.
+    // When the read length falls entirely within the already-cached
+    // HEADER_SCAN pages, this is zero extra network I/O.
+    let tag_bytes = match cook.http_read_at(0, read_len).await {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+
+    // Scan frames for APIC.
+    let image_bytes = find_id3_apic(&tag_bytes, id3.version_major);
+    let Some(image_bytes) = image_bytes else { return };
+
+    let dl_bytes = cook.http_bytes_fetched();
+    cook.http_close().await;
+
+    let Ok(img) = image::load_from_memory(&image_bytes) else { return };
+    let (src_w, src_h) = (img.width(), img.height());
+    let color_type = img.color();
+
+    let img = pre_scale_to_target(img, config.exact_width, config.exact_height);
+
+    cook.render_renderer    = Some("shortcut/audio".into());
+    cook.render_handler     = RenderHandler::Builtin;
+    cook.out_download_bytes = dl_bytes;
+    if src_w > 0 && src_h > 0 {
+        cook.media.properties = Some(image_properties(src_w, src_h, color_type));
+    }
+    cook.render_image = Some(img);
+}
+
+/// Parsed ID3v2 header fields.
+struct Id3Header {
+    version_major: u8,
+    /// Total size of the tag body (frames + padding), NOT including the
+    /// 10-byte header.  Always a 28-bit synchsafe integer.
+    #[allow(dead_code)]
+    tag_size: usize,
+    /// Whether an extended header is present (flag bit 6).
+    has_extended_header: bool,
+    /// Whether a footer is present (flag bit 4, v2.4 only).
+    #[allow(dead_code)]
+    has_footer: bool,
+}
+
+/// Parse the ID3v2 header from the first bytes of a file.
+/// Returns `None` if the magic `"ID3"` is absent or the header is truncated.
+fn parse_id3_header(bytes: &[u8]) -> Option<Id3Header> {
+    if bytes.len() < 10 { return None; }
+    if &bytes[0..3] != b"ID3" { return None; }
+
+    let version_major = bytes[3];
+    let _version_minor = bytes[4];
+    let flags = bytes[5];
+
+    // ID3v2.2 is ancient; we only support ≥ v2.3.
+    if version_major < 3 { return None; }
+
+    let has_extended_header = (flags & 0x40) != 0;
+    let has_footer = version_major >= 4 && (flags & 0x10) != 0;
+
+    // All four size bytes are 28-bit synchsafe (MSB of each byte is 0).
+    let tag_size = synchsafe_u32(&bytes[6..10]) as usize;
+
+    Some(Id3Header { version_major, tag_size, has_extended_header, has_footer })
+}
+
+/// Decode a 4-byte synchsafe integer (each byte uses only 7 bits, MSB is 0).
+fn synchsafe_u32(bytes: &[u8]) -> u32 {
+    let b0 = bytes.get(0).copied().unwrap_or(0) & 0x7F;
+    let b1 = bytes.get(1).copied().unwrap_or(0) & 0x7F;
+    let b2 = bytes.get(2).copied().unwrap_or(0) & 0x7F;
+    let b3 = bytes.get(3).copied().unwrap_or(0) & 0x7F;
+    (b0 as u32) << 21 | (b1 as u32) << 14 | (b2 as u32) << 7 | b3 as u32
+}
+
+/// Decode a regular big-endian u32 from 4 bytes.
+fn be_u32(bytes: &[u8]) -> u32 {
+    let b0 = bytes.get(0).copied().unwrap_or(0) as u32;
+    let b1 = bytes.get(1).copied().unwrap_or(0) as u32;
+    let b2 = bytes.get(2).copied().unwrap_or(0) as u32;
+    let b3 = bytes.get(3).copied().unwrap_or(0) as u32;
+    b0 << 24 | b1 << 16 | b2 << 8 | b3
+}
+
+/// Scan an ID3v2 tag body (the bytes after the 10-byte header) for an APIC
+/// frame and return the embedded image bytes.
+///
+/// `bytes` starts at byte 0 of the file (including the ID3 header).
+/// `version_major` is 3 or 4 — determines whether frame sizes are synchsafe.
+///
+/// Scanning stops at the declared tag end OR when a non-ASCII-uppercase
+/// frame ID is encountered (padding or audio data), whichever comes first.
+/// This is robust against encoders that under-report the tag size.
+///
+/// # ID3v2 frame header layout (10 bytes)
+///
+/// | Offset | Size | Field |
+/// |--------|------|-------|
+/// | 0      | 4    | Frame ID (e.g. `"APIC"`) |
+/// | 4      | 4    | Size (synchsafe for v2.3, big-endian for v2.4) |
+/// | 8      | 2    | Flags |
+fn find_id3_apic(bytes: &[u8], version_major: u8) -> Option<Vec<u8>> {
+    let id3 = parse_id3_header(bytes)?;
+
+    // Start of the tag body (after the 10-byte header).
+    let mut pos: usize = 10;
+
+    // Skip extended header if present.
+    if id3.has_extended_header {
+        if pos + 4 > bytes.len() { return None; }
+        let ext_size = synchsafe_u32(&bytes[pos..pos + 4]) as usize;
+        // Extended header size includes the 4-byte size field itself.
+        pos = pos.checked_add(ext_size)?;
+    }
+
+    // Scan frames until we hit a non-valid frame ID (padding 0x00 or
+    // audio data 0xFF…) or run out of buffer.  We don't use id3.tag_size
+    // as a hard limit because some encoders under-report it.
+    while pos + 10 <= bytes.len() {
+        let frame_id = &bytes[pos..pos + 4];
+
+        // Valid ID3v2 frame IDs: [A-Z][A-Z0-9][A-Z0-9][A-Z0-9]
+        if !is_valid_frame_id(frame_id) {
+            break;
+        }
+
+        // Frame size: big-endian for v2.3, synchsafe for v2.4.
+        let frame_size: usize = if version_major >= 4 {
+            synchsafe_u32(&bytes[pos + 4..pos + 8]) as usize
+        } else {
+            be_u32(&bytes[pos + 4..pos + 8]) as usize
+        };
+
+        // Frame data starts after the 10-byte frame header.
+        let data_start = pos + 10;
+
+        if frame_id == b"APIC" {
+            let data_end = data_start.checked_add(frame_size)?.min(bytes.len());
+            let apic_data = &bytes[data_start..data_end];
+            return extract_apic_image(apic_data);
+        }
+
+        // Advance to next frame.
+        pos = data_start.checked_add(frame_size)?;
+
+        // If we've passed the declared end of the tag and haven't found
+        // APIC yet, continue scanning anyway — the tag size may have been
+        // underreported.  But don't go past the end of our buffer.
+    }
+
+    None
+}
+
+/// Check whether a 4-byte slice is a valid ID3v2 frame identifier.
+///
+/// Valid frame IDs are `[A-Z][A-Z0-9][A-Z0-9][A-Z0-9]`.
+fn is_valid_frame_id(id: &[u8]) -> bool {
+    id.len() == 4
+        && id[0].is_ascii_uppercase()
+        && id[1].is_ascii_alphanumeric() && id[1].is_ascii_uppercase()
+        && id[2].is_ascii_alphanumeric() && id[2].is_ascii_uppercase()
+        && id[3].is_ascii_alphanumeric() && id[3].is_ascii_uppercase()
+}
+
+/// Extract the raw image bytes from an APIC frame data payload.
+///
+/// APIC frame layout (ID3v2.3 §4.15 / v2.4 §4.14):
+///
+/// | Offset | Size   | Field |
+/// |--------|--------|-------|
+/// | 0      | 1      | Text encoding (0=ISO-8859-1, 3=UTF-8) |
+/// | 1      | var    | MIME type (null-terminated) |
+/// | …      | 1      | Picture type (3 = Cover (front)) |
+/// | …      | var    | Description (null-terminated) |
+/// | …      | rest   | Binary image data |
+fn extract_apic_image(apic_data: &[u8]) -> Option<Vec<u8>> {
+    if apic_data.len() < 4 { return None; }
+
+    let encoding = apic_data[0];
+
+    // Find the null terminator for the MIME type.
+    // For encoding 0 (ISO-8859-1) and 3 (UTF-8), null is a single 0x00 byte.
+    // For encoding 1/2 (UTF-16), null is two 0x00 bytes.
+    let mime_start = 1usize;
+    let mime_end = match encoding {
+        1 | 2 => {
+            // UTF-16: find double-null (0x00 0x00) at an even offset.
+            let mut i = mime_start;
+            while i + 1 < apic_data.len() {
+                if apic_data[i] == 0x00 && apic_data[i + 1] == 0x00 { break; }
+                i += 2;
+            }
+            if i + 1 >= apic_data.len() { return None; }
+            i + 2 // skip past the double null
+        }
+        _ => {
+            // ISO-8859-1 or UTF-8: single null byte.
+            let end = apic_data[mime_start..].iter().position(|&b| b == 0x00)?;
+            mime_start + end + 1 // skip past the null
+        }
+    };
+
+    if mime_end >= apic_data.len() { return None; }
+
+    // Skip picture type byte.
+    let desc_start = mime_end + 1;
+    if desc_start >= apic_data.len() { return None; }
+
+    // Find the null terminator for the description.
+    let image_start = match encoding {
+        1 | 2 => {
+            let mut i = desc_start;
+            while i + 1 < apic_data.len() {
+                if apic_data[i] == 0x00 && apic_data[i + 1] == 0x00 { break; }
+                i += 2;
+            }
+            if i + 1 >= apic_data.len() { return None; }
+            i + 2
+        }
+        _ => {
+            let end = apic_data[desc_start..].iter().position(|&b| b == 0x00)?;
+            desc_start + end + 1
+        }
+    };
+
+    if image_start >= apic_data.len() { return None; }
+
+    Some(apic_data[image_start..].to_vec())
+}
+
 // ── Public pipeline step (merged) ────────────────────────────────────────────
 
 // SMALL_FILE_THRESHOLD is now runtime-configurable via
@@ -1085,7 +1352,7 @@ fn read_u32(buf: &[u8], off: usize, little: bool) -> Option<u32> {
 
 /// Try to produce a thumbnail without a full upstream decode.
 ///
-/// Five active paths, in priority order:
+/// Six active paths, in priority order:
 ///
 /// 1. **Small image** (any `image`-supported format ≤ `SMALL_FILE_THRESHOLD`) —
 ///    read all bytes, full decode, pre-scale, set `cook.render_image`.
@@ -1194,4 +1461,9 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
         && matches!(cook.media.extension.as_deref(),
             Some("docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp"));
     if is_zip_doc { try_zip_shortcut(cook).await; }
+
+    // ── Audio: ID3v2 APIC cover art ─────────────────────────────────────
+    let is_audio = cook.media.kind == Some(FileKind::Audio)
+        && matches!(cook.media.extension.as_deref(), Some("mp3"));
+    if is_audio { try_audio_shortcut(cook).await; }
 }
