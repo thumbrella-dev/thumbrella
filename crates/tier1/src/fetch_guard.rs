@@ -95,6 +95,7 @@ pub struct OriginBackoffCache(
 );
 
 impl OriginBackoffCache {
+    #[cfg_attr(not(feature = "native"), allow(unused_variables))]
     pub fn new(ceiling_secs: u64) -> Self {
         #[cfg(feature = "native")]
         return Self(
