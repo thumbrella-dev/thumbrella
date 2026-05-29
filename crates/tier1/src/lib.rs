@@ -36,6 +36,7 @@ pub mod result;
 pub mod fetch_guard;
 pub mod source;
 pub mod tracelog;
+pub mod url_safety;
 
 // ── Native-only modules ───────────────────────────────────────────────────────
 
@@ -69,6 +70,7 @@ pub use media::{FileKind, Strategy};
 pub use request::{CallRequest, ThumbInput, ThumbObject};
 pub use result::{CallRecord, CallResponse, JobStatus, RenderHandler, ThumbResult, ThumbTrace};
 pub use source::{CacheHints, SourceRef, canonical_url};
+pub use url_safety::{is_safe_url, url_host_allowed};
 
 /// Concrete `ThumbCook` type for native server builds.
 #[cfg(feature = "native")]

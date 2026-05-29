@@ -64,6 +64,7 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 # Bytes — zero-copy buffer primitive.  WASM-compatible; used by the native
 # streaming handler and transitively by tokio/axum/reqwest.
 bytes = "1"
+url = "2"
 web-time = "1"
 parking_lot = "0.12"
 

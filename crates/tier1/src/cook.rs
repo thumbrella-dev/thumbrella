@@ -1,5 +1,10 @@
 //! Cook execution context — the central processing state for one thumbnail.
 //!
+//! Many items in this module are only used by the native HTTP server path and
+//! appear dead when building for wasm32 (without the `native` feature).
+//! Feature-gating each one would be noisy, so dead_code is suppressed globally.
+#![allow(dead_code)]
+//!
 //! # Design
 //!
 //! [`ThumbCook`] is a flat buffer of all state needed to process one thumbnail,
@@ -797,11 +802,87 @@ impl<S: HttpStream> ThumbCook<S> {
             return self.finish(after);
         }
 
+        // ── Pre-connect cache check ───────────────────────────────────────────
+        // Only run when the caller did NOT provide hints.  When the caller
+        // provides hints they already have a cached copy — they just want
+        // a freshness check via conditional headers, not our KV data.
+        //
+        // If we have a fresh KV entry we skip the HTTP request entirely.
+        // If the KV entry is stale, its freshness hints (etag / last-modified)
+        // are used to send a conditional request in connect.
+        let mut pre_cached: Option<ThumbResult> = None;
+        if !self.ctx_handoff && self.input.hints.is_none() {
+            use sha2::{Sha256, Digest};
+            use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+            use crate::source::canonical_url;
+
+            let identity = canonical_url(&self.input.url)
+                .unwrap_or_else(|| self.input.url.clone());
+
+            let key_input = format!(
+                "v{}:{}:{identity}",
+                crate::TBR_CACHE_VERSION,
+                self.ctx_customer_id.as_deref().unwrap_or("")
+            );
+            let url_hash = URL_SAFE_NO_PAD.encode(Sha256::digest(key_input.as_bytes()));
+            let account_id = self.ctx_customer_id.as_deref().unwrap_or("_");
+            let pre_key = format!("{account_id}/{url_hash}");
+
+            if let Some((cached, _backend_name)) = self.runtime.cache.check(&pre_key).await {
+                // If the cached hints say the resource is still fresh,
+                // return the cached result without any HTTP request.
+                if cached.cache.as_ref().map_or(false, |h| h.is_fresh()) {
+                    self.http_close().await;
+                    self.out_thumbnail      = cached.thumbnail;
+                    self.out_strategy       = cached.strategy;
+                    self.out_message        = cached.message.unwrap_or_default();
+                    self.out_placeholder    = cached.placeholder;
+                    self.out_download_bytes = cached.download_size;
+                    self.media.mime         = cached.mime;
+                    self.media.file_size    = cached.file_size;
+                    self.media.kind         = cached.kind;
+                    self.media.extension    = cached.extension;
+                    self.media.properties   = Some(cached.properties);
+                    self.src.cache_hints    = cached.cache.clone();
+                    self.cache_hit          = Some("workers-kv".to_string());
+                    self.status             = CookStatus::Complete;
+                    self.out_duration       = t0.elapsed().as_secs_f64();
+                    return self.finish(after);
+                }
+
+                // Stale — use the cached freshness hints as conditional
+                // request headers so connect can get a 304 instead of 200.
+                self.input.hints = cached.cache.clone();
+                pre_cached = Some(cached);
+            }
+        }
+
         // ── connect ───────────────────────────────────────────────────────────
         let t_step = web_time::Instant::now();
         pipeline::connect(&mut self).await;
         self.tel_connect_secs = t_step.elapsed().as_secs_f64();
         if !self.status.is_processing() {
+            // connect set a terminal status (failed / not_modified / unavailable).
+            if self.status == CookStatus::NotModified {
+                // When the caller provided hints they have their own cached copy;
+                // just confirm it's still valid — no thumbnail needed.
+                // When we did a KV-assisted conditional fetch, return the KV data.
+                if let Some(cached) = pre_cached {
+                    self.out_thumbnail      = cached.thumbnail;
+                    self.out_strategy       = cached.strategy;
+                    self.out_message        = cached.message.unwrap_or_default();
+                    self.out_placeholder    = cached.placeholder;
+                    self.out_download_bytes = cached.download_size;
+                    self.media.mime         = cached.mime;
+                    self.media.file_size    = cached.file_size;
+                    self.media.kind         = cached.kind;
+                    self.media.extension    = cached.extension;
+                    self.media.properties   = Some(cached.properties);
+                    self.src.cache_hints    = cached.cache;
+                    self.cache_hit          = Some("workers-kv".to_string());
+                }
+                // pre_cached is None when caller provided hints → empty not_modified.
+            }
             self.stamp_download_bytes();
             self.out_duration = t0.elapsed().as_secs_f64();
             return self.finish(after);
@@ -827,7 +908,11 @@ impl<S: HttpStream> ThumbCook<S> {
                 crate::TBR_CACHE_VERSION,
                 self.ctx_customer_id.as_deref().unwrap_or("")
             );
-            self.src.cache_key        = Some(URL_SAFE_NO_PAD.encode(Sha256::digest(key_input.as_bytes())));
+            let url_hash = URL_SAFE_NO_PAD.encode(Sha256::digest(key_input.as_bytes()));
+            // Prefix with customer_id so the KV inventory key can extract it
+            // for per-account scoping (see parse_cache_key in the API crate).
+            let account_id = self.ctx_customer_id.as_deref().unwrap_or("_");
+            self.src.cache_key        = Some(format!("{account_id}/{url_hash}"));
             self.src.cache_key_source = Some(source);
         }
 
@@ -1072,8 +1157,9 @@ impl<S: HttpStream> ThumbCook<S> {
         self.stamp_download_bytes();
 
         // Always return a thumbnail.  If the pipeline didn't produce one,
-        // fill in the appropriate placeholder JPEG.
-        if self.out_thumbnail.is_empty() {
+        // fill in the appropriate placeholder JPEG — except for NotModified,
+        // where an empty thumbnail tells the caller "use your cached copy".
+        if self.out_thumbnail.is_empty() && self.status != CookStatus::NotModified {
             if let Some(kind) = self.media.kind {
                 // Kind was identified: use the kind-specific placeholder.
                 // If the pipeline failed at the render step (e.g. unsupported
