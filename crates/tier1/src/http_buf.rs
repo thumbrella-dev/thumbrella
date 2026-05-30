@@ -306,6 +306,12 @@ impl<S: HttpStream> HttpBuffer<S> {
         self.pages.remove(&0)
     }
 
+    /// Return a clone of the first cached page (bytes 0..PAGE_SIZE) without
+    /// removing it.  Returns `None` if the page was never populated.
+    pub fn peek_page0(&self) -> Option<Vec<u8>> {
+        self.pages.get(&0).cloned()
+    }
+
     // ── Accounting ────────────────────────────────────────────────────────────
 
     /// Total bytes received from the network so far.

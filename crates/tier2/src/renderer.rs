@@ -54,7 +54,16 @@ impl InProcessRenderer for Tier2Renderer {
             eprintln!("[tier2] render: kind={kind:?}  ext={ext}  content_length={content_length:?}");
 
             match kind {
-                Some(FileKind::Image) => render_image(cook, &ext, content_length).await,
+                Some(FileKind::Image) => {
+                    // Early-exit for arithmetic JPEGs: libav's mjpeg decoder
+                    // does not support SOF9/SOF10.  Return false so tier 3
+                    // (ffmpeg CLI) can take over.
+                    if is_jpeg_format(&ext) && is_arithmetic_peek(cook) {
+                        eprintln!("[tier2] arithmetic JPEG detected — deferring to higher tier");
+                        return false;
+                    }
+                    render_image(cook, &ext, content_length).await
+                }
                 Some(FileKind::Video) => render_video(cook, &ext, content_length).await,
                 Some(FileKind::Vector) => render_vector(cook, &ext, content_length).await,
                 //       FileKind::Document → pdfium first page
@@ -91,9 +100,84 @@ fn is_jxl_format(ext: &str) -> bool {
     ext == "jxl"
 }
 
+/// Returns `true` for JPEG — decoded by libav, with arithmetic-coding
+/// detection so tier 3 can take over for unsupported variants.
+fn is_jpeg_format(ext: &str) -> bool {
+    matches!(ext, "jpeg" | "jpg")
+}
+
 /// Returns `true` for SVG — rendered by the pure-Rust `resvg` crate.
 fn is_svg_format(ext: &str) -> bool {
     ext == "svg"
+}
+
+/// Peek at the already-cached first page of a JPEG to detect arithmetic
+/// coding.  Uses [`RenderCook::peek_bytes`] so the reader is not consumed.
+///
+/// Returns `true` if an arithmetic SOF marker (0xC9 or 0xCA) is found.
+fn is_arithmetic_peek(cook: &dyn RenderCook) -> bool {
+    let Some(buf) = cook.peek_bytes(512) else { return false; };
+    if buf.len() < 4 || buf[0] != 0xFF || buf[1] != 0xD8 {
+        return false; // not JPEG
+    }
+    let mut i = 2;
+    while i + 3 < buf.len() {
+        if buf[i] == 0xFF {
+            match buf[i + 1] {
+                0x00 | 0xFF => { i += 1; continue; }
+                0xC9 | 0xCA => return true,
+                0xDA => break,
+                _ => {
+                    let seg_len = ((buf[i + 2] as usize) << 8) | (buf[i + 3] as usize);
+                    i += 2 + seg_len;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Peek at the first bytes of a JPEG stream to detect arithmetic coding.
+///
+/// Arithmetic-coded JPEGs use SOF9 (0xC9) or SOF10 (0xCA) markers.  Libav's
+/// built-in mjpeg decoder does not support these — it returns
+/// "unsupported coding type (c9)".  When detected, tier 2 returns false
+/// so the cook can fall back to tier 3's ffmpeg CLI.
+///
+/// Returns `true` if arithmetic coding is detected.
+fn detect_arithmetic_jpeg(reader: &mut dyn ReadSeek) -> bool {
+    use std::io::SeekFrom;
+
+    let mut buf = [0u8; 512];
+    let n = reader.read(&mut buf).unwrap_or(0);
+    // Always seek back — caller continues from the start regardless.
+    let _ = reader.seek(SeekFrom::Start(0));
+
+    if n < 4 || buf[0] != 0xFF || buf[1] != 0xD8 {
+        return false; // not JPEG
+    }
+
+    let mut i = 2; // skip SOI
+    while i + 3 < n {
+        if buf[i] == 0xFF {
+            let marker = buf[i + 1];
+            match marker {
+                0x00 | 0xFF => { i += 1; continue; } // stuffed byte or padding
+                0xC9 | 0xCA => return true,             // SOF9/SOF10 = arithmetic
+                0xDA => break,                           // SOS — scan data follows
+                _ => {
+                    // Segment with a length field — skip past it.
+                    let seg_len = ((buf[i + 2] as usize) << 8) | (buf[i + 3] as usize);
+                    i += 2 + seg_len;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    false
 }
 
 // ── JPEG XL decode ────────────────────────────────────────────────────────────
@@ -395,6 +479,26 @@ async fn render_image(
             let mut reader = reader;
             let result = render_svg(&mut *reader);
             (result, 0u64)
+        })
+        .await
+        .ok()
+        .unwrap_or((None, 0))
+    } else if is_jpeg_format(&ext_owned) {
+        // Check for arithmetic coding before committing to libav.
+        // Arithmetic JPEGs (SOF9) are not supported by libav's mjpeg
+        // decoder.  Return false so the cook can fall back to tier 3.
+        tokio::task::spawn_blocking(move || {
+            let mut reader = reader;
+            if detect_arithmetic_jpeg(&mut *reader) {
+                eprintln!("[tier2] arithmetic JPEG detected — deferring to tier 3");
+                // Reader is dropped here.  The renderer returns false,
+                // which tells the cook the format was not handled.
+                // The cook marks the result as Unavailable and finishes.
+                // If a tier 3 handoff is configured, the cook escalates.
+                return (None, 0u64);
+            }
+            let rotation_hint = container_rotation_hint(&mut *reader);
+            crate::avdecode::decode_with_libav(reader, content_length, Some(ext_owned), rotation_hint, None)
         })
         .await
         .ok()

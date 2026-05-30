@@ -4,6 +4,7 @@ resolver = "2"
 members = [
     "crates/tier1",
     "crates/tier2",
+    "crates/tier3",
 ]
 
 [profile.dev]

@@ -1,0 +1,65 @@
+[package]
+name = "tier3"
+version = "0.1.0"
+edition = "2024"
+description = "Thumbrella Tier 3 — full-featured thumbnail service with pluggable renderers"
+
+[[bin]]
+name = "tier3"
+path = "src/bin/tier3.rs"
+required-features = ["native"]
+
+[features]
+default = ["native"]
+
+native = [
+    "dep:tokio",
+    "dep:tracing-subscriber",
+    "dep:clap",
+    "dep:reqwest",
+    "dep:libloading",
+    "dep:which",
+    "dep:tempfile",
+    "dep:libc",
+]
+
+[dependencies]
+tier1 = { path = "../tier1" }
+tier2 = { path = "../tier2" }
+
+# ── Tier 3 extensions ──────────────────────────────────────────────────────────
+# image: used by tier-3 subprocess renderers to decode output images (JPEG,
+# PNG) produced by external tools.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+
+# ── Tier 3 extensions ──────────────────────────────────────────────────────────
+# libloading: dlopen-based detection and dispatch for optional shared libraries
+# (e.g. libpdfium, libblender, …).  Each renderer backend is probed at startup;
+# only available libraries are registered in the dispatch table.
+libloading = { version = "0.8", optional = true }
+
+# which: locate external command-line tools on $PATH (e.g. ffmpeg, inkscape,
+# blender).  Used for subprocess-based renderers.
+which = { version = "7", optional = true }
+
+# tempfile: scratch arena for subprocess renderers.  Creates temporary
+# directories that are cleaned up on drop.
+tempfile = { version = "3", optional = true }
+
+# libc: OS-level sandbox primitives (setrlimit, prctl, capset).  Used to
+# apply resource limits and drop capabilities on subprocess renderers.
+libc = { version = "0.2", optional = true }
+
+# serde: serialization for env_check reports.
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# futures: stream processing for scratch arena downloads (already a transitive
+# dep via tier1; listed explicitly for StreamExt import).
+futures = "0.3"
+
+# ── Native-only ────────────────────────────────────────────────────────────────
+tokio              = { version = "1", features = ["full"],           optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"],  optional = true }
+clap               = { version = "4",  features = ["derive"],        optional = true }
+reqwest            = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"], optional = true }

@@ -64,7 +64,7 @@ pub use cook::{CallerContext, CookStatus, InputSpec, MediaInfo, Runtime, SourceI
 #[cfg(feature = "native")]
 pub use renderer::{InProcessRenderer, RenderCook, RenderOutput, SharedRenderer, apply_render_output, with_renderer};
 pub use spec::ShortcutLimits;
-pub use dispatch::{ThumbRoute, route};
+pub use dispatch::{ThumbRoute, FormatEntry, route, format_manifest};
 pub use handoff::{HandoffResponse, ThumbHandoff};
 pub use media::{FileKind, Strategy};
 pub use request::{CallRequest, ThumbInput, ThumbObject};

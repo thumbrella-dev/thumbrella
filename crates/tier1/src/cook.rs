@@ -1245,6 +1245,13 @@ impl<S: HttpStream + Send + 'static> crate::renderer::RenderCook for ThumbCook<S
     fn take_reader(&mut self) -> Option<Box<dyn crate::http_buf::ReadSeek + Send>> {
         self.http_take_reader()
     }
+    fn peek_bytes(&self, len: usize) -> Option<Vec<u8>> {
+        let page = self.http_buf.as_ref()?.peek_page0()?;
+        if page.len() >= len { Some(page[..len].to_vec()) } else { None }
+    }
+    fn is_handoff(&self) -> bool {
+        self.ctx_handoff
+    }
     fn set_render_image(&mut self, img: image::DynamicImage) {
         self.render_image = Some(img);
     }

@@ -74,6 +74,20 @@ pub trait RenderCook: Send {
     /// Returns `None` if no connection is currently open.
     fn take_reader(&mut self) -> Option<Box<dyn ReadSeek + Send>>;
 
+    /// Peek at the first `len` bytes of the source without consuming the
+    /// reader.  Returns bytes from the already-cached first page (populated
+    /// during inspect).  Returns `None` if fewer than `len` bytes are
+    /// available or no connection is open.
+    ///
+    /// This is safe to call before `take_reader()` — the reader remains
+    /// intact for the chosen backend.
+    fn peek_bytes(&self, len: usize) -> Option<Vec<u8>>;
+
+    /// Whether this cook is serving a handoff from a lower tier.  When
+    /// true, the renderer should skip lower-tier processing (shortcut,
+    /// tier2 paths) and go directly to this tier's backends.
+    fn is_handoff(&self) -> bool;
+
     /// Store the decoded pixel buffer.  Tier 1's `deliver` step will
     /// resize and JPEG-encode this image after `render` returns.
     fn set_render_image(&mut self, img: DynamicImage);

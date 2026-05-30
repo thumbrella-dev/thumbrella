@@ -122,6 +122,44 @@ pub struct FileCheck {
 
 // ── DiagReport ────────────────────────────────────────────────────────────────
 
+/// A diagnostic section contributed by a higher tier.
+///
+/// Each tier can register sections at startup.  The `diag` command collects
+/// and prints all sections after the main tier1 report.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagSection {
+    /// Section heading (e.g. `"Tier 2 — Supported Formats"`).
+    pub heading: String,
+    /// One entry per line item.
+    pub entries: Vec<DiagEntry>,
+}
+
+/// A single line item in a diagnostic section.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagEntry {
+    /// Format / extension / name (e.g. `"glb"`, `"video/mp4"`).
+    pub label: String,
+    /// Short status string (e.g. `"available"`, `"missing"`, `"builtin"`).
+    pub status: String,
+    /// Optional detail (e.g. `"/opt/thumbrella/bin/3drender.sh"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Global registry of diagnostic sections contributed by higher tiers.
+static DIAG_SECTIONS: std::sync::RwLock<Vec<DiagSection>> = std::sync::RwLock::new(Vec::new());
+
+/// Register a diagnostic section.  Called at startup by tier2/tier3 before
+/// `collect()` runs.
+pub fn register_section(section: DiagSection) {
+    DIAG_SECTIONS.write().unwrap().push(section);
+}
+
+/// Snapshot of all registered diagnostic sections.
+pub fn collect_sections() -> Vec<DiagSection> {
+    DIAG_SECTIONS.read().unwrap().clone()
+}
+
 /// Full server diagnostic report.
 ///
 /// Collected by [`collect`] from environment variables and `AppConfig`.
@@ -209,9 +247,33 @@ pub struct DiagReport {
     /// 6. Generic `"container (unknown image)"` when any indicator fires
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container_image: Option<String>,
+
+    // ── Extension sections (tier2 / tier3 contributions) ──────────────────────
+    /// Diagnostic sections contributed by higher tiers.  Each tier registers
+    /// sections at startup describing its format support and backend status.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extensions: Vec<DiagSection>,
 }
 
 // ── Collector ────────────────────────────────────────────────────────────────
+
+/// Whether tier 2 is compiled into this binary (set at startup by tier2/tier3).
+static TIER2_BUILTIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether tier 3 is compiled into this binary (set at startup by tier3).
+static TIER3_BUILTIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Signal that tier 2 is built into this binary.  Call at startup from
+/// `tier2` or `tier3` binaries.
+pub fn mark_tier2_builtin() {
+    TIER2_BUILTIN.store(true, std::sync::atomic::Ordering::Release);
+}
+
+/// Signal that tier 3 is built into this binary.  Call at startup from
+/// `tier3` binaries.
+pub fn mark_tier3_builtin() {
+    TIER3_BUILTIN.store(true, std::sync::atomic::Ordering::Release);
+}
 
 /// Collect a diagnostic report for the current process environment.
 ///
@@ -221,16 +283,25 @@ pub struct DiagReport {
 /// are wired up.
 #[cfg(feature = "native")]
 pub fn collect(cfg: &crate::config::AppConfig) -> DiagReport {
-    // Tier 2
-    let (tier2, tier2_handoff, tier2_validation) = match cfg.tier2_url.as_ref() {
-        Some(url) => (TierStatus::Handoff, Some(url.clone()), validate_handoff_target(url, cfg.tier2_code.as_deref())),
-        None      => (TierStatus::Missing, None,              Validation::not_configured()),
+    // Tier 2 — prefer builtin when the renderer is compiled in, otherwise
+    // check for a handoff URL, otherwise missing.
+    let (tier2, tier2_handoff, tier2_validation) = if TIER2_BUILTIN.load(std::sync::atomic::Ordering::Acquire) {
+        (TierStatus::Builtin, None, Validation::ok())
+    } else {
+        match cfg.tier2_url.as_ref() {
+            Some(url) => (TierStatus::Handoff, Some(url.clone()), validate_handoff_target(url, cfg.tier2_code.as_deref())),
+            None      => (TierStatus::Missing, None,              Validation::not_configured()),
+        }
     };
 
-    // Tier 3
-    let (tier3, tier3_handoff, tier3_validation) = match cfg.tier3_url.as_ref() {
-        Some(url) => (TierStatus::Handoff, Some(url.clone()), validate_handoff_target(url, cfg.tier3_code.as_deref())),
-        None      => (TierStatus::Missing, None,              Validation::not_configured()),
+    // Tier 3 — same logic: builtin > handoff > missing.
+    let (tier3, tier3_handoff, tier3_validation) = if TIER3_BUILTIN.load(std::sync::atomic::Ordering::Acquire) {
+        (TierStatus::Builtin, None, Validation::ok())
+    } else {
+        match cfg.tier3_url.as_ref() {
+            Some(url) => (TierStatus::Handoff, Some(url.clone()), validate_handoff_target(url, cfg.tier3_code.as_deref())),
+            None      => (TierStatus::Missing, None,              Validation::not_configured()),
+        }
     };
 
     // Cache
@@ -300,6 +371,7 @@ pub fn collect(cfg: &crate::config::AppConfig) -> DiagReport {
         cache_file_check,
         healthy,
         container_image,
+        extensions: collect_sections(),
     }
 }
 
@@ -452,7 +524,7 @@ fn detect_container_image() -> Option<String> {
 impl DiagReport {
     /// Print a human-readable diagnostic report to stdout.
     pub fn print_pretty(&self) {
-        println!("Thumbrella Tier 1 — Diagnostics");
+        println!("Thumbrella — Diagnostics");
         println!("{}", "─".repeat(48));
 
         println!("  runtime         : {:?}", self.runtime);
@@ -495,6 +567,16 @@ impl DiagReport {
             }
         }
         println!();
+
+        // ── Extension sections (tier2 / tier3 contributions) ──────────────────
+        for section in &self.extensions {
+            println!("{}", section.heading);
+            for entry in &section.entries {
+                let detail = entry.detail.as_deref().unwrap_or("");
+                println!("  {:<16} {:<12} {detail}", entry.label, entry.status);
+            }
+            println!();
+        }
 
         let status = if self.healthy { "OK ✓" } else { "DEGRADED ✗" };
         println!("Overall: {status}");
