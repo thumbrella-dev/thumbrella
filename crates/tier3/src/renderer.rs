@@ -133,52 +133,40 @@ impl InProcessRenderer for Tier3Renderer {
 
 /// Render a JPEG image via tier-3-specific backends.
 ///
-/// Tier 2 handles standard Huffman-coded JPEGs via libav.  Tier 3
-/// intercepts only arithmetic-coded JPEGs (SOF9), which libav's mjpeg
-/// decoder does not support, and uses ffmpeg CLI instead.
+/// Arithmetic-coded JPEGs (SOF9) are not supported by libav's mjpeg
+/// decoder.  Tier 3 uses ImageMagick which delegates to libjpeg-turbo
+/// and handles all JPEG variants.
 async fn render_image_tier3(
     cook: &mut dyn RenderCook,
     ext: &str,
 ) -> bool {
-    // Check for arithmetic coding without consuming the reader.
     if !is_arithmetic_jpeg_peek(cook) {
-        return false; // let the caller delegate to tier2
+        return false;
     }
-
-    eprintln!("[tier3] arithmetic JPEG detected, using ffmpeg CLI");
 
     let report = crate::env_check::cached_report();
-    let has_ffmpeg_cli = report.as_ref()
-        .and_then(|r| r.backends.get("ffmpeg_cli"))
-        .map(|b| b.available)
-        .unwrap_or(false);
+    let has_magick = report.as_ref()
+        .and_then(|r| r.backends.get("magick"))
+        .map(|b| b.available).unwrap_or(false);
 
-    if !has_ffmpeg_cli {
+    if !has_magick {
         return false;
     }
 
-    let Some(mut reader) = cook.take_reader() else {
-        return false;
-    };
-
+    let Some(mut reader) = cook.take_reader() else { return false; };
     let ext_owned = ext.to_string();
+
     let result = tokio::task::spawn_blocking(move || {
-        run_ffmpeg_image_decode(&mut *reader, &ext_owned)
+        let mut buf = Vec::new();
+        use std::io::Read;
+        reader.read_to_end(&mut buf).map_err(|e| format!("read: {e}"))?;
+        run_magick_image_decode(&buf, &ext_owned)
     }).await;
 
     match result {
-        Ok(Ok(out)) => {
-            apply_render_output(cook, out);
-            true
-        }
-        Ok(Err(msg)) => {
-            cook.fail_cook(&format!("ffmpeg_cli: {msg}"));
-            true
-        }
-        Err(_) => {
-            cook.fail_cook("ffmpeg_cli panicked");
-            true
-        }
+        Ok(Ok(out)) => { apply_render_output(cook, out); true }
+        Ok(Err(msg)) => { cook.fail_cook(&msg); true }
+        Err(_) => { cook.fail_cook("magick panicked"); true }
     }
 }
 
@@ -208,58 +196,96 @@ fn is_arithmetic_jpeg_peek(cook: &dyn RenderCook) -> bool {
     false
 }
 
-/// Run ffmpeg CLI to decode an image to PNG, then load it.
+/// Run ImageMagick `convert` to decode an arithmetic JPEG to PNG, with
+/// power-of-2 downscaling when the source is large.  Uses `identify` first
+/// to get source dimensions and colour depth.
 ///
-/// `ffmpeg -i input.ext output.png -y` handles every JPEG variant including
-/// arithmetic coding (SOF9), which libav's mjpeg decoder rejects.
-fn run_ffmpeg_image_decode(
-    reader: &mut dyn tier1::ReadSeek,
+/// ImageMagick delegates to libjpeg-turbo which supports arithmetic coding.
+fn run_magick_image_decode(
+    bytes: &[u8],
     ext: &str,
 ) -> Result<RenderOutput, String> {
     use std::process::Command;
 
-    let arena = ScratchArena::new(50 * 1024 * 1024) // 50 MiB — images are small
+    let arena = ScratchArena::new(50 * 1024 * 1024)
         .map_err(|e| format!("scratch arena: {e}"))?;
 
-    let input_path = arena.stage_reader(reader, &format!("input.{ext}"))
+    let input_path = arena.stage_bytes(bytes, &format!("input.{ext}"))
         .map_err(|e| format!("stage input: {e}"))?;
 
+    // ── identify: get source dimensions and depth ──────────────────────────
+    let (src_w, src_h, src_depth) = {
+        let output = Command::new("identify")
+            .arg("-format").arg("%w %h %z")
+            .arg(&input_path)
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .map_err(|e| format!("spawn identify: {e}"))?;
+
+        if !output.status.success() {
+            return Err(format!("identify exited with {}", output.status));
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let parts: Vec<&str> = text.split_whitespace().collect();
+        if parts.len() < 3 {
+            return Err(format!("identify: unexpected output: {text}"));
+        }
+        let w: u32 = parts[0].parse().map_err(|_| format!("identify width: {text}"))?;
+        let h: u32 = parts[1].parse().map_err(|_| format!("identify height: {text}"))?;
+        let d: u32 = parts[2].parse().map_err(|_| format!("identify depth: {text}"))?;
+        (w, h, d)
+    };
+
+    // ── compute power-of-2 downscale ───────────────────────────────────────
+    // Only scale down.  Keep at least 256 px on the short side for quality.
+    // Scale factors are powers of 2 (2, 4, 8, …) for fast DCT-level resize
+    // in the deliver step.
+    let max_dim = src_w.max(src_h);
+    let scale: u32 = if max_dim > 512 {
+        let mut s = 1u32;
+        while max_dim / (s * 2) >= 256 {
+            s *= 2;
+        }
+        s
+    } else {
+        1
+    };
+    let resize_w = src_w / scale;
+    let resize_h = src_h / scale;
+
+    // ── convert: decode + resize → PNG ─────────────────────────────────────
     let output_path = arena.output_path("png");
 
-    let mut cmd = Command::new("ffmpeg");
-    cmd.arg("-i").arg(&input_path)
-       .arg(&output_path)
-       .arg("-y")
+    let mut cmd = Command::new("convert");
+    let resize_arg = format!("{}x{}", resize_w, resize_h);
+    let png_out = format!("PNG:{}", output_path.display());
+    cmd.arg(&input_path)
+       .arg("-resize").arg(&resize_arg)
+       .arg(&png_out)
        .stdout(std::process::Stdio::null())
        .stderr(std::process::Stdio::piped());
 
     crate::sandbox::apply(&mut cmd, &crate::sandbox::default_strict());
 
-    let status = cmd.status()
-        .map_err(|e| format!("spawn ffmpeg: {e}"))?;
-
+    let status = cmd.status().map_err(|e| format!("spawn convert: {e}"))?;
     if !status.success() {
-        return Err(format!("ffmpeg exited with {status}"));
+        return Err(format!("convert exited with {status}"));
     }
 
     let png_bytes = arena.read_output(&output_path)
         .map_err(|e| format!("read output: {e}"))?;
-
     let img = image::load_from_memory(&png_bytes)
         .map_err(|e| format!("decode PNG output: {e}"))?;
 
-    let (src_w, src_h) = image::GenericImageView::dimensions(&img);
-    let depth = img.color().bits_per_pixel();
-
     Ok(RenderOutput {
-        image:           img,
-        renderer:        Some("ffmpeg_cli".into()),
-        codec:           None,
+        image: img,
+        renderer: Some("magick".into()),
+        codec: None,
         video_seek_secs: None,
-        properties:      Some(serde_json::json!({
+        properties: Some(serde_json::json!({
             "width": src_w,
             "height": src_h,
-            "depth": depth,
+            "depth": src_depth,
         })),
     })
 }

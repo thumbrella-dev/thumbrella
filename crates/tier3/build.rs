@@ -16,13 +16,12 @@ fn main() {
     println!("cargo:rustc-link-search=native=/opt/ffmpeg-static/lib");
 
     let has_dav1d = std::path::Path::new("/opt/ffmpeg-static/lib/libdav1d.a").exists();
-    let static_libs = if has_dav1d {
-        "-Wl,-Bstatic,-lz,-lbz2,-llzma,-ldav1d,-Bdynamic"
-    } else {
-        "-Wl,-Bstatic,-lz,-lbz2,-llzma,-Bdynamic"
-    };
-
-    println!("cargo:rustc-link-arg={static_libs}");
+    if has_dav1d {
+        println!("cargo:rustc-link-lib=static=dav1d");
+    }
+    println!("cargo:rustc-link-lib=static=z");
+    println!("cargo:rustc-link-lib=static=bz2");
+    println!("cargo:rustc-link-lib=static=lzma");
 
     // These are glibc-provided; keep dynamic (statically linking glibc is
     // fragile and ties the binary to the build host's glibc version).

@@ -35,22 +35,16 @@ fn main() {
     // dav1d (AV1/AVIF decoder) — optional.  Only linked when the static
     // archive exists (built by scripts/build-ffmpeg-static.sh alongside FFmpeg).
     let has_dav1d = std::path::Path::new("/opt/ffmpeg-static/lib/libdav1d.a").exists();
-    let static_libs = if has_dav1d {
-        "-Wl,-Bstatic,-lz,-lbz2,-llzma,-ldav1d,-Bdynamic"
-    } else {
-        "-Wl,-Bstatic,-lz,-lbz2,-llzma,-Bdynamic"
-    };
+    if has_dav1d {
+        println!("cargo:rustc-link-lib=static=dav1d");
+    }
+    println!("cargo:rustc-link-lib=static=z");
+    println!("cargo:rustc-link-lib=static=bz2");
+    println!("cargo:rustc-link-lib=static=lzma");
 
     // These must appear *after* the FFmpeg archives on the linker command
     // line so GNU ld can resolve the forward references from libavcodec etc.
-    // into these compression libraries.  cargo:rustc-link-arg values are
-    // always appended after all cargo:rustc-link-lib values (including those
-    // emitted by ffmpeg-sys-next's build script), so this single -Wl flag
-    // lands in the right position without any --start-group tricks.
-    //
-    // -Bstatic / -Bdynamic scope the mode so only these archives are
-    // pulled as .a files; the linker reverts to shared-library search after.
-    println!("cargo:rustc-link-arg={static_libs}");
+    // into these compression libraries.
 
     // These are glibc-provided; keep dynamic (statically linking glibc is
     // fragile and ties the binary to the build host's glibc version).

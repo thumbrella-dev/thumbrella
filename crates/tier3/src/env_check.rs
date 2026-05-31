@@ -227,8 +227,7 @@ fn probe_executables(report: &mut EnvReport) {
     // Tier 3 runs them with input on stdin and captures stdout.
     let candidates: &[(&str, &str, &str, &str, &str)] = &[
         ("ffmpeg_cli", "image", "ffmpeg", "-version", "FFmpeg CLI (JPEG fallback / transcoding)"),
-        // ("inkscape", "vector", "inkscape", "--version", "Inkscape SVG renderer"),
-        // ("blender", "geometry", "blender", "--version", "Blender 3D renderer"),
+        ("magick",    "image", "convert", "--version", "ImageMagick (arithmetic JPEG, resize)"),
     ];
 
     for (name, category, binary, check_arg, desc) in candidates {
