@@ -115,7 +115,7 @@ fn register_tier3_diag(env: &tier3::env_check::EnvReport) {
 
     // General tools section — backends not tied to specific extensions.
     {
-        let general: &[&str] = &["ffmpeg_cli", "magick", "display_server"];
+        let general: &[&str] = &["ffmpeg_cli", "magick", "oiiotool", "bwrap", "display_server"];
         let entries: Vec<tier1::diag::DiagEntry> = general.iter().filter_map(|name| {
             let info = env.backends.get(*name)?;
             let status = if info.available { "available" } else { "missing" };

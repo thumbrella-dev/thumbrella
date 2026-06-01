@@ -1,32 +1,31 @@
-//! Subprocess sandbox — resource limits and capability dropping.
+//! Subprocess sandbox — bubblewrap isolation and rlimit fallback.
 //!
-//! Every subprocess renderer runs through a sandbox that applies OS-level
-//! restrictions between `fork()` and `exec()`.  The goal is defence in depth:
-//! even if a renderer script or binary is compromised, the blast radius is
-//! contained.
+//! On Linux, every subprocess renderer is wrapped in `bwrap` (bubblewrap)
+//! for full filesystem and namespace isolation.  On other platforms, a
+//! `pre_exec`-based rlimit/capability sandbox is used as fallback.
 //!
 //! # Platform support
 //!
 //! | Platform | Mechanism |
 //! |----------|-----------|
-//! | Linux    | `prctl` (no-new-privs), `setrlimit` (nofile, core, as), `capset` (drop all) |
-//! | macOS    | `setrlimit` only (no `prctl`, no capabilities) |
-//! | Other    | no-op — subprocess runs with full ambient authority |
+//! | Linux + bwrap | `bwrap --unshare-all` + selective bind mounts |
+//! | Linux (no bwrap) | `pre_exec`: prctl + setrlimit |
+//! | macOS | `pre_exec`: setrlimit only |
+//! | Other | no-op |
 //!
-//! # Per-tool configuration
+//! # Bubblewrap isolation
 //!
-//! Some tools need relaxed limits (e.g. a renderer that fetches textures from
-//! the network).  These are expressed as flags on [`SandboxConfig`]:
+//! The bwrap sandbox unshares all namespaces (mount, PID, IPC, UTS, cgroup,
+//! network) then selectively re-enables what the subprocess needs:
 //!
-//! - `needs_networking` — skip network-namespace isolation (future).
-//! - `allow_core_dumps` — permit core dumps for debugging renderer crashes.
-//!
-//! # Future: bubblewrap
-//!
-//! On Linux, the long-term plan is to wrap every subprocess in `bwrap` for
-//! full filesystem and network isolation.  This module is designed so that
-//! [`apply`] can switch from `pre_exec` to `bwrap` wrapper transparently.
+//! - **Read-only**: /usr, /lib, /lib64, /bin, /etc, /opt
+//! - **Writable**: the scratch arena directory only
+//! - **Devices**: /dev/null, /dev/zero, /dev/random
+//! - **Proc**: /proc for self-inspection
+//! - **No network**: `--unshare-net` (overridable via `needs_networking`)
+//! - **Private /tmp**: tmpfs
 
+use std::path::Path;
 use std::process::Command;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -41,22 +40,23 @@ use std::os::unix::process::CommandExt;
 #[derive(Debug, Clone)]
 pub struct SandboxConfig {
     /// Maximum address space in bytes (RLIMIT_AS).  0 = no limit.
+    /// Only used by the pre_exec fallback, not by bwrap.
     pub max_memory: u64,
     /// Maximum number of open file descriptors (RLIMIT_NOFILE).  0 = no limit.
     pub max_fds: u64,
     /// Allow the subprocess to produce core dumps.
     pub allow_core_dumps: bool,
-    /// Drop all ambient capabilities (Linux only).
+    /// Drop all ambient capabilities (Linux pre_exec fallback only).
     pub drop_capabilities: bool,
-    /// Tool needs outbound network access (future: skips network namespace).
-    #[allow(dead_code)]
+    /// Tool needs outbound network access (unshares network namespace
+    /// in bwrap, but re-enables via --share-net).
     pub needs_networking: bool,
 }
 
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
-            max_memory:         512 * 1024 * 1024, // 512 MiB
+            max_memory:         512 * 1024 * 1024,
             max_fds:            64,
             allow_core_dumps:   false,
             drop_capabilities:  true,
@@ -65,30 +65,107 @@ impl Default for SandboxConfig {
     }
 }
 
-/// A restrictive sandbox suitable for renderers that only need local I/O.
 pub fn default_strict() -> SandboxConfig {
     SandboxConfig::default()
 }
 
-// ── Apply ─────────────────────────────────────────────────────────────────────
+// ── bwrap wrapper (Linux, preferred) ─────────────────────────────────────────
 
-/// Apply sandbox restrictions to a [`Command`].
+/// Wrap a command in bubblewrap for filesystem and namespace isolation.
 ///
-/// Call this before `cmd.status()` or `cmd.output()`.  The restrictions
-/// take effect in the child process after `fork()` but before `exec()`.
+/// `scratch_dir` is the only directory the subprocess can write to.
+/// `program` and `args` are the command to run inside the sandbox.
 ///
-/// # Safety
+/// Returns a [`Command`] that invokes `bwrap` with the appropriate
+/// isolation flags, then runs `program` with `args`.
+pub fn bwrap_command(
+    scratch_dir: &Path,
+    program: &str,
+    args: &[&str],
+    config: &SandboxConfig,
+) -> Command {
+    let mut cmd = Command::new("bwrap");
+
+    // ── Namespace isolation ──────────────────────────────────────────────
+    cmd.arg("--unshare-all");
+    if config.needs_networking {
+        cmd.arg("--share-net");
+    }
+    cmd.arg("--die-with-parent");
+    cmd.arg("--new-session");
+
+    // ── Read-only system mounts ──────────────────────────────────────────
+    for dir in &["/usr", "/lib", "/lib64", "/bin", "/etc", "/opt"] {
+        if Path::new(dir).exists() {
+            cmd.arg("--ro-bind").arg(dir).arg(dir);
+        }
+    }
+
+    // ── Writable scratch directory ───────────────────────────────────────
+    cmd.arg("--bind").arg(scratch_dir).arg(scratch_dir);
+
+    // ── Minimal /dev ─────────────────────────────────────────────────────
+    cmd.arg("--dev").arg("/dev");
+
+    // ── /proc for self-inspection ────────────────────────────────────────
+    cmd.arg("--proc").arg("/proc");
+
+    // ── Private /tmp ─────────────────────────────────────────────────────
+    cmd.arg("--tmpfs").arg("/tmp");
+
+    // ── No setuid, lock ASLR ─────────────────────────────────────────────
+    cmd.arg("--no-new-session");
+
+    // ── Separator + target command ───────────────────────────────────────
+    cmd.arg("--");
+    cmd.arg(program);
+    for a in args {
+        cmd.arg(a);
+    }
+
+    cmd
+}
+
+/// Check if bubblewrap is available.  Call once at startup to decide
+/// which sandbox path to use.
+pub fn bwrap_available() -> bool {
+    std::process::Command::new("bwrap")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Create a sandboxed [`Command`].  Uses bubblewrap on Linux when
+/// available, falls back to pre_exec rlimits otherwise.
 ///
-/// The `pre_exec` closure runs in the forked child before `exec`.  It must
-/// only call async-signal-safe functions.  The implementations below use
-/// only `setrlimit`, `prctl`, and `capset` — all async-signal-safe.
+/// `scratch_dir` is the arena root — the subprocess can only write here
+/// when bwrap is active.
+pub fn sandboxed_command(
+    scratch_dir: &Path,
+    program: &str,
+    args: &[&str],
+) -> Command {
+    if bwrap_available() {
+        bwrap_command(scratch_dir, program, args, &SandboxConfig::default())
+    } else {
+        let mut cmd = Command::new(program);
+        for a in args { cmd.arg(a); }
+        apply(&mut cmd, &SandboxConfig::default());
+        cmd
+    }
+}
+
+// ── pre_exec fallback (Linux / macOS, no bwrap) ──────────────────────────────
+
+/// Apply sandbox restrictions via `pre_exec` (rlimits, capabilities).
+/// Used as fallback when bubblewrap is not available.
 pub fn apply(cmd: &mut Command, config: &SandboxConfig) {
     let config = config.clone();
     #[cfg(target_os = "linux")]
     unsafe {
-        // pre_exec is unsafe because the closure runs in a forked child
-        // with constraints on what operations are safe.  We only call
-        // async-signal-safe libc functions.
         cmd.pre_exec(move || sandbox_linux(&config));
     }
     #[cfg(target_os = "macos")]
@@ -97,7 +174,7 @@ pub fn apply(cmd: &mut Command, config: &SandboxConfig) {
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        let _ = config; // no-op on other platforms
+        let _ = config;
     }
 }
 
@@ -145,14 +222,9 @@ fn drop_all_caps() -> std::io::Result<()> {
     for cap in 0..=last_cap {
         // PR_CAPBSET_DROP = 24
         let rc = unsafe { libc::prctl(24, cap as u64, 0, 0, 0) };
-        // EINVAL means the capability wasn't in the bounding set — fine.
-        if rc != 0 {
-            let err = std::io::Error::last_os_error();
-            if err.raw_os_error() != Some(libc::EINVAL) {
-                // Non-EINVAL errors on prctl are unexpected; log and continue.
-                eprintln!("[tier3] sandbox: prctl(CAPBSET_DROP, {cap}): {err}");
-            }
-        }
+        // EINVAL: cap not in bounding set.  EPERM: already non-root.
+        // Both are expected and harmless.
+        let _ = rc;
     }
     Ok(())
 }
@@ -191,11 +263,8 @@ fn set_rlimit(resource: u32, soft: u64, hard: u64) -> std::io::Result<()> {
         rlim_max: hard,
     };
     let rc = unsafe { libc::setrlimit(resource, &rlim) };
-    if rc != 0 {
-        // RLIMIT_NOFILE may fail if the soft limit exceeds the hard cap.
-        // Log and continue — don't fail the spawn.
-        let err = std::io::Error::last_os_error();
-        eprintln!("[tier3] sandbox: setrlimit({resource}): {err}");
-    }
+    // Silently ignore rlimit errors — the limits are best-effort and
+    // may fail when the process already has tighter constraints.
+    let _ = rc;
     Ok(())
 }

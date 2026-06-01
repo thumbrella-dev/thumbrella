@@ -55,9 +55,15 @@ impl InProcessRenderer for Tier2Renderer {
 
             match kind {
                 Some(FileKind::Image) => {
+                    // Formats tier2's libav can't decode — return false
+                    // immediately so tier3's oiiotool / ffmpeg CLI can
+                    // take over without the reader being consumed.
+                    if !tier2_handles_image(&ext) {
+                        eprintln!("[tier2] unsupported image format {ext} — deferring to higher tier");
+                        return false;
+                    }
                     // Early-exit for arithmetic JPEGs: libav's mjpeg decoder
-                    // does not support SOF9/SOF10.  Return false so tier 3
-                    // (ffmpeg CLI) can take over.
+                    // does not support SOF9/SOF10.
                     if is_jpeg_format(&ext) && is_arithmetic_peek(cook) {
                         eprintln!("[tier2] arithmetic JPEG detected — deferring to higher tier");
                         return false;
@@ -77,9 +83,20 @@ impl InProcessRenderer for Tier2Renderer {
 
 fn is_image_crate_format(ext: &str) -> bool {
     matches!(ext, "png")
+    // image library seems to handle interlaced png more efficiently than libav.
+    // but otherwise their performance is within 10%
+}
 
-// image library seems to handle interlaced png more efficiently than libav.
-// but otherwise their performance is within 10%
+/// Returns `true` for image formats that tier2's libav can decode.
+/// Studio formats (EXR, HDR, DPX, …) and esoteric formats are handled by
+/// tier3's oiiotool / ffmpeg CLI.
+fn tier2_handles_image(ext: &str) -> bool {
+    matches!(ext,
+        "jpeg" | "jpg" | "png" | "webp" | "bmp" | "tiff" | "tif"
+        | "gif" | "ico" | "psd" | "avif" | "heic" | "heif"
+        | "dng" | "cr2" | "nef" | "arw" | "orf" | "rw2"
+        | "pef" | "srw" | "raf" | "3fr" | "fff" | "iiq" | "raw"
+    )
 }
 
 

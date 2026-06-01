@@ -264,12 +264,16 @@ fn mime_to_kind(mime: &str, ext: &str) -> FileKind {
 fn ext_to_kind(ext: &str) -> FileKind {
     match ext {
         "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff"
-        | "avif" | "heic" | "heif" | "exr" | "hdr"
+        | "avif" | "heic" | "heif" | "exr" | "hdr" | "rgbe"
         | "apng" | "ico" | "xcf"                           => FileKind::Image,
+        // Studio / VFX image formats (via oiiotool).
+        "sxr" | "mxr" | "dpx" | "cin" | "dds" | "fits"
+        | "iff" | "pic" | "rla" | "sgi" | "rgb" | "rgba"
+        | "int" | "inta" | "zfile"                         => FileKind::Image,
         // Camera-raw formats (TIFF-based containers).
         "dng" | "cr2" | "nef" | "arw" | "orf" | "rw2"
         | "pef" | "srw" | "3fr" | "mef" | "rwl"          => FileKind::Image,
-        "svg"                                               => FileKind::Vector,
+        "svg" | "emf" | "wmf"                              => FileKind::Vector,
         "mp4" | "mov" | "mkv" | "avi" | "webm" | "mpeg"
         | "ogv"                                            => FileKind::Video,
         "mp3" | "ogg" | "flac" | "wav" | "m4a"
@@ -294,6 +298,7 @@ fn mime_to_extension(mime: &str) -> &'static str {
         "image/bmp"        => "bmp",  "image/tiff"       => "tiff",
         "image/avif"       => "avif", "image/heic"       => "heic",
         "image/heif"       => "heif", "image/svg+xml"    => "svg",
+        "image/emf"        => "emf",
         "image/x-xcf"      => "xcf",
         "image/apng"       => "apng", "image/vnd.microsoft.icon" => "ico",
         "video/mp4"        => "mp4",  "video/quicktime"  => "mov",
@@ -343,7 +348,8 @@ fn ext_to_mime(ext: &str) -> &'static str {
         "rw2"  => "image/x-panasonic-rw2", "pef" => "image/x-pentax-pef",
         "srw"  => "image/x-samsung-srw", "3fr"  => "image/x-hasselblad-3fr",
         "mef"  => "image/x-mamiya-mef",  "rwl"  => "image/x-leica-rwl",
-        "svg"  => "image/svg+xml",
+        "svg"  => "image/svg+xml",    "emf"  => "image/emf",
+        "wmf"  => "image/wmf",
         "apng" => "image/apng",   "ico"  => "image/vnd.microsoft.icon",
         "mp4"  => "video/mp4",    "mov"  => "video/quicktime",
         "mkv"  => "video/x-matroska", "avi" => "video/x-msvideo",
