@@ -19,6 +19,7 @@ Icons: Heroicons v2 outline — MIT licence
 import argparse
 import io
 import os
+import struct
 import sys
 
 import cairosvg
@@ -247,7 +248,7 @@ def build_svg(color: str, label: str, icon: str, fg: str = "white") -> str:
 
 
 def render_jpeg(svg_text: str, quality: int) -> bytes:
-    """Render SVG → PNG via Cairo → JPEG via Pillow."""
+    """Render SVG → PNG via Cairo → JPEG via Pillow, then inject EXIF comment."""
     png = cairosvg.svg2png(
         bytestring=svg_text.encode(),
         output_width=W,
@@ -260,7 +261,63 @@ def render_jpeg(svg_text: str, quality: int) -> bytes:
     img = img.filter(ImageFilter.UnsharpMask(radius=8, percent=80, threshold=1))
     buf = io.BytesIO()
     img.save(buf, "JPEG", quality=quality, optimize=True, subsampling=0)
-    return buf.getvalue()
+    return inject_exif_comment(buf.getvalue(), "thumbrella.dev")
+
+
+def inject_exif_comment(jpeg: bytes, description: str) -> bytes:
+    """Splice an EXIF APP1 segment with metadata into the JPEG stream
+    immediately after SOI (FFD8).
+
+    Tags written (all in IFD0, big-endian):
+      Software, Orientation=Normal, XResolution=72, YResolution=72,
+      ResolutionUnit=inches.
+    """
+    sw = b"thumbrella.dev\x00"
+
+    # ── TIFF header (big-endian) ───────────────────────────────────────────
+    tiff = bytearray()
+    tiff += b"MM"
+    tiff += struct.pack(">H", 0x002A)  # magic
+    tiff += struct.pack(">I", 8)       # offset to 0th IFD
+
+    # ── IFD0: 4 entries ───────────────────────────────────────────────────
+    tiff += struct.pack(">H", 4)
+
+    # Offsets for value data living past the IFD table
+    # header(8) + count(2) + 4*12(48) + next_ifd(4) = 62
+    data_base = 8 + 2 + 4 * 12 + 4
+    sw_off = data_base
+    xres_off = sw_off + len(sw)
+    yres_off = xres_off + 8  # two LONGs
+
+    # Software          tag=0x0131  type=ASCII(2)
+    tiff += struct.pack(">HHII", 0x0131, 2, len(sw), sw_off)
+    # XResolution       tag=0x011A  type=RATIONAL(5)  72/1
+    tiff += struct.pack(">HHII", 0x011A, 5, 1, xres_off)
+    # YResolution       tag=0x011B  type=RATIONAL(5)  72/1
+    tiff += struct.pack(">HHII", 0x011B, 5, 1, yres_off)
+    # ResolutionUnit    tag=0x0128  type=SHORT(3)  val=2 (inches, inline)
+    tiff += struct.pack(">HHII", 0x0128, 3, 1, 2 << 16)
+
+    # Next IFD
+    tiff += struct.pack(">I", 0)
+
+    # ── Value data ─────────────────────────────────────────────────────────
+    tiff += sw
+    tiff += struct.pack(">II", 72, 1)  # XResolution 72/1
+    tiff += struct.pack(">II", 72, 1)  # YResolution 72/1
+
+    # ── APP1 wrapper ───────────────────────────────────────────────────────
+    payload = 6 + len(tiff)
+    app1 = b"\xff\xe1"
+    app1 += struct.pack(">H", payload)
+    app1 += b"Exif\x00\x00"
+    app1 += bytes(tiff)
+
+    # ── Splice ─────────────────────────────────────────────────────────────
+    if len(jpeg) < 2 or jpeg[:2] != b"\xff\xd8":
+        return jpeg
+    return jpeg[:2] + app1 + jpeg[2:]
 
 
 def main() -> None:

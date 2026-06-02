@@ -300,8 +300,8 @@ fn run_magick_image_decode(
         codec: None,
         video_seek_secs: None,
         properties: Some(serde_json::json!({
-            "width": src_w,
-            "height": src_h,
+            "width_pixels": src_w,
+            "height_pixels": src_h,
         })),
     })
 }
@@ -334,13 +334,13 @@ fn run_ffmpeg_decode(
     let input_path = arena.stage_bytes(bytes, &format!("input.{ext}"))
         .map_err(|e| format!("stage input: {e}"))?;
 
-    // ── ffprobe: get dimensions ────────────────────────────────────────────
-    let (src_w, src_h) = {
+    // ── ffprobe: get dimensions, colour depth, duration, audio channels ──
+    let (src_w, src_h, bits_per_pixel, duration_secs, channel_count) = {
         let output = Command::new("ffprobe")
             .arg("-v").arg("quiet")
             .arg("-print_format").arg("json")
             .arg("-show_streams")
-            .arg("-select_streams").arg("v:0")
+            .arg("-show_format")
             .arg(&input_path)
             .output()
             .map_err(|e| format!("spawn ffprobe: {e}"))?;
@@ -349,16 +349,34 @@ fn run_ffmpeg_decode(
             .map_err(|e| format!("ffprobe json: {e}"))?;
         let streams = json["streams"].as_array()
             .ok_or_else(|| "ffprobe: no streams".to_string())?;
-        if streams.is_empty() {
+
+        // ── video stream ──────────────────────────────────────────────────
+        let vs = streams.iter().find(|s| s["codec_type"] == "video");
+        let (w, h, bpp) = if let Some(s) = vs {
+            let w = s["width"].as_u64().unwrap_or(0) as u32;
+            let h = s["height"].as_u64().unwrap_or(0) as u32;
+            if w == 0 || h == 0 {
+                return Err("ffprobe: zero dimensions".into());
+            }
+            let bpp = s["pix_fmt"].as_str()
+                .map(pix_fmt_bits_per_pixel)
+                .unwrap_or(0);
+            (w, h, bpp)
+        } else {
             return Err("ffprobe: no video stream".into());
-        }
-        let s = &streams[0];
-        let w = s["width"].as_u64().unwrap_or(0) as u32;
-        let h = s["height"].as_u64().unwrap_or(0) as u32;
-        if w == 0 || h == 0 {
-            return Err("ffprobe: zero dimensions".into());
-        }
-        (w, h)
+        };
+
+        // ── audio streams ─────────────────────────────────────────────────
+        let chan = streams.iter()
+            .filter(|s| s["codec_type"] == "audio")
+            .filter_map(|s| s["channels"].as_u64())
+            .sum::<u64>() as u32;
+
+        // ── duration ──────────────────────────────────────────────────────
+        let dur = json["format"]["duration"].as_str()
+            .and_then(|s| s.parse::<f64>().ok());
+
+        (w, h, bpp, dur, chan)
     };
 
     // ── power-of-2 downscale ──────────────────────────────────────────────
@@ -419,11 +437,58 @@ fn run_ffmpeg_decode(
         renderer: Some("ffmpeg_cli".into()),
         codec: None,
         video_seek_secs: if is_video { Some(1.0) } else { None },
-        properties: Some(serde_json::json!({
-            "width": src_w,
-            "height": src_h,
-        })),
+        properties: Some(build_video_properties(src_w, src_h, bits_per_pixel, duration_secs, channel_count)),
     })
+}
+
+/// Build a properties object for video/image content.  Fields are omitted
+/// when the value is unknown (0 for integers, `None` for duration).
+fn build_video_properties(
+    w: u32, h: u32,
+    bits_per_pixel: u32,
+    duration_secs: Option<f64>,
+    channel_count: u32,
+) -> serde_json::Value {
+    let mut props = serde_json::json!({
+        "width_pixels": w,
+        "height_pixels": h,
+    });
+    if bits_per_pixel > 0 {
+        props["bits_per_pixel"] = serde_json::json!(bits_per_pixel);
+    }
+    if let Some(d) = duration_secs {
+        props["duration_seconds"] = serde_json::json!(d);
+    }
+    // channel_count is always written — 0 means "known to be silent".
+    props["channel_count"] = serde_json::json!(channel_count);
+    props
+}
+
+/// Approximate bits-per-pixel for a given ffmpeg `pix_fmt` string.
+fn pix_fmt_bits_per_pixel(pix_fmt: &str) -> u32 {
+    // Common 8-bit YUV subsampled formats.
+    if pix_fmt.starts_with("yuv420") && !pix_fmt.contains("p10") && !pix_fmt.contains("p12") && !pix_fmt.contains("p16") { return 12; }
+    if pix_fmt.starts_with("yuv422") && !pix_fmt.contains("p10") && !pix_fmt.contains("p12") && !pix_fmt.contains("p16") { return 16; }
+    if pix_fmt.starts_with("yuv444") && !pix_fmt.contains("p10") && !pix_fmt.contains("p12") && !pix_fmt.contains("p16") { return 24; }
+    // 10-bit YUV: multiply 8-bit value by 1.25.
+    if pix_fmt.starts_with("yuv420p10") { return 15; }
+    if pix_fmt.starts_with("yuv422p10") { return 20; }
+    if pix_fmt.starts_with("yuv444p10") { return 30; }
+    // 12-bit YUV.
+    if pix_fmt.starts_with("yuv420p12") { return 18; }
+    if pix_fmt.starts_with("yuv422p12") { return 24; }
+    if pix_fmt.starts_with("yuv444p12") { return 36; }
+    // RGB, BGR, GBR — 24 bits/pixel (8-bit) or more.
+    if matches!(pix_fmt, "rgb24" | "bgr24" | "gbrp" | "gbrp9") { return 24; }
+    if matches!(pix_fmt, "rgb48" | "bgr48") { return 48; }
+    // Gray.
+    if pix_fmt.starts_with("gray") {
+        if pix_fmt.contains("10") { return 10; }
+        if pix_fmt.contains("12") { return 12; }
+        if pix_fmt.contains("16") { return 16; }
+        return 8;
+    }
+    0
 }
 
 /// Tier-3 CLI fallback for image formats.  One tool per format — no
@@ -597,8 +662,8 @@ fn run_oiiotool_decode(
         codec: None,
         video_seek_secs: None,
         properties: Some(serde_json::json!({
-            "width": src_w,
-            "height": src_h,
+            "width_pixels": src_w,
+            "height_pixels": src_h,
         })),
     })
 }

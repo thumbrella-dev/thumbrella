@@ -55,6 +55,7 @@ pub async fn deliver<S: HttpStream>(cook: &mut ThumbCook<S>) {
         Ok(j) => j,
         Err(_) => return,
     };
+    let jpeg = inject_exif_comment(&jpeg);
     drop(buf);
 
     let deliver_secs    = t0.elapsed().as_secs_f64();
@@ -326,6 +327,74 @@ fn premultiply_rgba(img: &mut image::RgbaImage) {
         pixel[1] = ((pixel[1] as u32 * a + 127) / 255) as u8;
         pixel[2] = ((pixel[2] as u32 * a + 127) / 255) as u8;
     }
+}
+
+// ── EXIF comment injection ────────────────────────────────────────────────────
+
+/// Splice an EXIF APP1 segment containing metadata (`Software`,
+/// resolution, orientation) into the JPEG stream immediately after the
+/// SOI marker (`FFD8`).
+///
+/// Mozjpeg-rs does not expose `jpeg_write_marker`, so we must splice
+/// post-encode.  This is safe because JPEG parsing is marker-relative — no
+/// internal offset depends on absolute byte positions.
+pub fn inject_exif_comment(jpeg: &[u8]) -> Vec<u8> {
+    use exif::experimental::Writer;
+    use exif::{Field, In, Rational, Tag, Value};
+
+    // ── Build EXIF TIFF blob ──────────────────────────────────────────────
+    let fields = [
+        Field {
+            tag: Tag::Software,
+            ifd_num: In::PRIMARY,
+            value: Value::Ascii(vec![b"thumbrella.dev".to_vec()]),
+        },
+        Field {
+            tag: Tag::XResolution,
+            ifd_num: In::PRIMARY,
+            value: Value::Rational(vec![Rational { num: 72, denom: 1 }]),
+        },
+        Field {
+            tag: Tag::YResolution,
+            ifd_num: In::PRIMARY,
+            value: Value::Rational(vec![Rational { num: 72, denom: 1 }]),
+        },
+        Field {
+            tag: Tag::ResolutionUnit,
+            ifd_num: In::PRIMARY,
+            value: Value::Short(vec![2]), // inches
+        },
+    ];
+    let mut writer = Writer::new();
+    for f in &fields {
+        writer.push_field(f);
+    }
+    let mut tiff = std::io::Cursor::new(Vec::new());
+    if writer.write(&mut tiff, false).is_err() {
+        return jpeg.to_vec();
+    }
+    let tiff = tiff.into_inner();
+
+    // ── Prepend APP1 wrapper ──────────────────────────────────────────────
+    // APP1 structure:  FF E1  len16  "Exif\0\0"  [TIFF]
+    let payload = 6 + tiff.len() as u16; // "Exif\0\0" + TIFF (len includes itself)
+    let mut app1 = Vec::with_capacity(2 + 2 + payload as usize);
+    app1.push(0xFF);
+    app1.push(0xE1);
+    app1.extend_from_slice(&payload.to_be_bytes());
+    app1.extend_from_slice(b"Exif\x00\x00");
+    app1.extend_from_slice(&tiff);
+
+    // ── Splice after SOI ──────────────────────────────────────────────────
+    if jpeg.len() < 2 || jpeg[0] != 0xFF || jpeg[1] != 0xD8 {
+        return jpeg.to_vec();
+    }
+
+    let mut out = Vec::with_capacity(jpeg.len() + app1.len());
+    out.extend_from_slice(&jpeg[..2]); // SOI
+    out.extend_from_slice(&app1);      // APP1 EXIF
+    out.extend_from_slice(&jpeg[2..]); // rest of JPEG (JFIF, tables, data, …)
+    out
 }
 
 /// Convert premultiplied-alpha RGBA back to straight-alpha in-place.

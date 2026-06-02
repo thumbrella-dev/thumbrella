@@ -44,6 +44,7 @@ base64      = "0.22"
 sha2        = "0.10"
 infer       = "0.16"
 mozjpeg-rs  = "0.9"
+kamadak-exif = "0.6"
 
 # Image decode/encode — pure-Rust decoders used here are WASM-compatible.
 # heavy native decoders (e.g. mozjpeg) belong in a higher tier or a

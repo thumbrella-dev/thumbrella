@@ -8,10 +8,11 @@
 //!
 //! | Variable                   | Default | Description                                      |
 //! |----------------------------|---------|--------------------------------------------------|
-//! | `TBR_PORT`                 | 8000    | HTTP listener port                               |
+//! | `TBR_PORT`                 | 3114    | HTTP listener port                               |
 //! | `TBR_SERVER`               | —       | Short server/colo identifier for traces          |
 //! | `TBR_DEVELOPER_MODE`       | false   | Verbose debug output in API responses            |
 //! | `TBR_ALLOW_FILES`          | false   | Accept `file://` URLs and bare absolute paths    |
+//! | `TBR_SCRATCH`              | $TMPDIR/thumbrella | Scratch root for tier3 CLI tool staging   |
 //! | `TBR_TIER2`                | —       | Tier-2 URL with optional `#code` handoff secret  |
 //! | `TBR_TIER3`                | —       | Tier-3 URL with optional `#code` handoff secret  |
 //! | `TBR_HANDOFF`              | —       | Shared secret this server accepts on `/handoff`  |
@@ -47,6 +48,9 @@ pub struct AppConfig {
     /// the local filesystem.  **Only enable in trusted environments** — any
     /// caller can read any file the server process has permission to open.
     pub allow_local: bool,
+    /// Root directory for temporary scratch space used by tier3 CLI tool
+    /// staging.  Defaults to `$TMPDIR/thumbrella` (or `/tmp/thumbrella`).
+    pub scratch_dir: String,
 
     // ── Handoff tiers ─────────────────────────────────────────────────────────
     /// URL of the tier-2 handoff server (`TBR_TIER2`).
@@ -88,10 +92,11 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            port: 8000,
+            port: 3114,
             server: None,
             developer_mode: false,
             allow_local: false,
+            scratch_dir: default_scratch_dir(),
             tier2_url: None,
             tier2_code: None,
             tier3_url: None,
@@ -113,10 +118,11 @@ impl AppConfig {
         let (tier2_url, tier2_code) = parse_handoff_target(env_opt_string("TBR_TIER2"));
         let (tier3_url, tier3_code) = parse_handoff_target(env_opt_string("TBR_TIER3"));
         Self {
-            port:                 env_u16("TBR_PORT", 8000),
+            port:                 env_u16("TBR_PORT", 3114),
             server:               std::env::var("TBR_SERVER").ok(),
             developer_mode:       env_bool("TBR_DEVELOPER_MODE", false),
             allow_local:          env_bool("TBR_ALLOW_FILES", false),
+            scratch_dir:          env_scratch("TBR_SCRATCH"),
             tier2_url,
             tier2_code,
             tier3_url,
@@ -170,4 +176,20 @@ fn parse_handoff_target(raw: Option<String>) -> (Option<String>, Option<String>)
     let url = if base.is_empty() { None } else { Some(base.to_string()) };
     let code = code.and_then(|c| if c.is_empty() { None } else { Some(c.to_string()) });
     (url, code)
+}
+
+fn default_scratch_dir() -> String {
+    let tmp = std::env::var("TMPDIR")
+        .or_else(|_| std::env::var("TMP"))
+        .or_else(|_| std::env::var("TEMP"))
+        .unwrap_or_else(|_| "/tmp".to_string());
+    format!("{}/thumbrella", tmp.trim_end_matches('/'))
+}
+
+fn env_scratch(name: &str) -> String {
+    std::env::var(name)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(default_scratch_dir)
 }

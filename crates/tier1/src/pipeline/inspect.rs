@@ -22,7 +22,7 @@ const SNIFF_LEN: usize = 4 * 1024;
 /// - `cook.media.mime`         — sniffed MIME type string
 /// - `cook.media.kind`         — coarse `FileKind` category
 /// - `cook.media.extension`    — canonical extension (no dot)
-/// - `cook.media.properties`   — `{width, height}` for `Image` kind (best-effort)
+/// - `cook.media.properties`   — `{width_pixels, height_pixels, bits_per_pixel}` for `Image` kind
 pub async fn inspect<S: HttpStream>(cook: &mut ThumbCook<S>) {
     if !cook.http_is_open() { return; }
 
@@ -146,12 +146,19 @@ pub(super) fn inspect_image_properties(bytes: &[u8], props: &mut serde_json::Val
     let Ok(decoder) = reader.into_decoder() else { return };
     let (w, h) = decoder.dimensions();
     let ct = decoder.color_type();
-    let ch = ct.channel_count() as u32;
-    let color_depth = if ch > 0 { ct.bits_per_pixel() as u32 / ch } else { ct.bits_per_pixel() as u32 };
+    let per_channel = ct.bits_per_pixel() as u32 / ct.channel_count() as u32;
+    // Count only colour channels, skipping alpha.  For RGB8 this is 24,
+    // for RGBA8 it is still 24, for Gray8 it is 8.
+    let color_channels = if ct.has_alpha() {
+        ct.channel_count() as u32 - 1
+    } else {
+        ct.channel_count() as u32
+    };
+    let bits_per_pixel = per_channel * color_channels;
     let obj = props.as_object_mut().expect("properties is always a JSON object");
-    obj.insert("width".into(),       w.into());
-    obj.insert("height".into(),      h.into());
-    obj.insert("color_depth".into(), color_depth.into());
+    obj.insert("width_pixels".into(),  w.into());
+    obj.insert("height_pixels".into(), h.into());
+    obj.insert("bits_per_pixel".into(), bits_per_pixel.into());
 }
 
 // ── Extension helpers ─────────────────────────────────────────────────────────

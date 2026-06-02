@@ -6,6 +6,7 @@
 //! ```text
 //! <binary> serve              # start the HTTP server
 //! <binary> thumb <url>...     # thumbnail one or more URLs
+//! <binary> render <src> <dst> # thumbnail a local file to disk
 //! <binary> diag               # print config and validate services
 //! <binary> batch-dir <dir>    # thumbnail every file in a directory
 //! ```
@@ -60,6 +61,19 @@ enum Command {
         /// Show internal trace fields (download metrics, render path, IDs, …).
         #[arg(long)]
         trace: bool,
+    },
+
+    /// Render a single local file to a thumbnail JPEG and write it to disk.
+    ///
+    /// Input must be a local path or `file://` URL.  Output is the path where
+    /// the 250×200 JPEG thumbnail will be written.  Local filesystem access
+    /// is enabled automatically for this command.
+    Render {
+        /// Path to the source file to thumbnail.
+        src: String,
+
+        /// Path where the thumbnail JPEG will be written.
+        dst: String,
     },
 
     /// Print server configuration and validate connected services.
@@ -155,6 +169,7 @@ where
     match cli.command {
         Command::Serve                                   => run_server(runtime.unwrap()).await,
         Command::Thumb { urls, hints, json, trace }      => run_thumb(urls, hints, json, trace, runtime.unwrap()).await,
+        Command::Render { src, dst }                     => run_render(src, dst, runtime.unwrap()).await,
         Command::Diag { json }                           => run_diag(json),
         Command::BatchDir { dir, output }               => run_batch_dir(dir, output, runtime.unwrap()).await,
         Command::StreamBatch { server, args, hints } => {
@@ -283,6 +298,34 @@ async fn run_thumb(urls: Vec<String>, hints_json: Option<String>, json: bool, sh
     } else {
         print_thumb_items(&items, show_trace);
     }
+}
+
+// ── render (CLI) ──────────────────────────────────────────────────────────────
+
+async fn run_render(src: String, dst: String, runtime: Arc<Runtime>) {
+    use crate::{ThumbCook, cook::InputSpec};
+
+    let url = promote_url(&src);
+    let input = InputSpec { url, hints: None, allow_local: true };
+    let (result, _trace, mut after) = ThumbCook::from_input(input, runtime).run().await;
+    after.drain_spawn();
+
+    if result.thumbnail.is_empty() {
+        let reason = result.message.as_deref().filter(|m| !m.is_empty());
+        if let Some(msg) = reason {
+            eprintln!("render: no thumbnail produced ({msg})");
+        } else {
+            eprintln!("render: no thumbnail produced");
+        }
+        return;
+    }
+
+    if let Err(e) = std::fs::write(&dst, &result.thumbnail) {
+        eprintln!("render: failed to write {}: {e}", dst);
+        return;
+    }
+
+    println!("wrote {} bytes to {}", result.thumbnail.len(), dst);
 }
 
 async fn run_stream_batch(server: String, urls: Vec<String>, hints_json: Option<String>) {

@@ -78,7 +78,7 @@ impl ThumbnailConfig {
         exact_height: 200,
         min_fill_ratio: 0.6,
         fill_budget: 0.10,
-        jpeg_quality: 66,
+        jpeg_quality: 64,
         pixel_art_quality: 18,
         background_rgb: [255, 255, 255],
         vignette_strength: 0.25,

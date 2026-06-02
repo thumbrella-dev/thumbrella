@@ -97,8 +97,8 @@ fn jpeg_source_dimensions(data: &[u8]) -> (Option<u32>, Option<u32>) {
     let mut props = serde_json::json!({});
     super::inspect::inspect_image_properties(data, &mut props);
     let obj = props.as_object().unwrap();
-    let w = obj.get("width").and_then(|v| v.as_u64()).map(|n| n as u32);
-    let h = obj.get("height").and_then(|v| v.as_u64()).map(|n| n as u32);
+    let w = obj.get("width_pixels").and_then(|v| v.as_u64()).map(|n| n as u32);
+    let h = obj.get("height_pixels").and_then(|v| v.as_u64()).map(|n| n as u32);
     (w, h)
 }
 
@@ -265,7 +265,7 @@ const IFD1_FETCH: usize = 512;
 ///   JPEG — typically the full-resolution preview, not the small IFD1 thumbnail.
 /// - Issue one Range request for those exact bytes, then close the connection.
 ///
-/// `properties.width/height` reports the sensor resolution from IFD0
+/// `properties.width_pixels`/`height_pixels` reports the sensor resolution from IFD0
 /// `ImageWidth`/`ImageLength` when available (native pixel count), falling
 /// back to the embedded-preview dimensions for cameras that omit those tags.
 async fn try_raw_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
@@ -1052,12 +1052,17 @@ fn box_half(img: DynamicImage) -> DynamicImage {
 /// the original file, not any intermediate scaling done before this call.
 /// `color_type` should be captured from `img.color()` before any pre-scaling.
 fn image_properties(src_w: u32, src_h: u32, color_type: image::ColorType) -> serde_json::Value {
-    let ch = color_type.channel_count() as u32;
-    let color_depth = if ch > 0 { color_type.bits_per_pixel() as u32 / ch } else { color_type.bits_per_pixel() as u32 };
+    let per_channel = color_type.bits_per_pixel() as u32 / color_type.channel_count() as u32;
+    let color_channels = if color_type.has_alpha() {
+        color_type.channel_count() as u32 - 1
+    } else {
+        color_type.channel_count() as u32
+    };
+    let bits_per_pixel = per_channel * color_channels;
     serde_json::json!({
-        "width":       src_w,
-        "height":      src_h,
-        "color_depth": color_depth,
+        "width_pixels":  src_w,
+        "height_pixels": src_h,
+        "bits_per_pixel": bits_per_pixel,
     })
 }
 
@@ -1094,37 +1099,61 @@ fn read_u32(buf: &[u8], off: usize, little: bool) -> Option<u32> {
 async fn try_audio_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     let config = &ThumbnailConfig::CANONICAL;
 
-    // Read the first few KiB — already cached from inspect, zero network I/O.
-    let header = match cook.http_read_at(0, HEADER_SCAN).await {
-        Ok(b) => b,
-        Err(_) => return,
-    };
-
-    // Must have an ID3v2 header at byte 0.
-    let id3 = match parse_id3_header(&header) {
-        Some(h) => h,
-        None => return,
-    };
-
-    // Read enough bytes to cover the full tag.  We use the file size (up to
-    // the configured limit) rather than trusting id3.tag_size — some encoders
-    // under-report the tag size, which would truncate the APIC image data.
+    // Read enough bytes to cover metadata.  Use the file size (up to the
+    // configured limit) rather than trusting the ID3 tag size.
     let fetch_limit = cook.runtime.shortcut_limits.audio_cover_max_fetch as u64;
     let file_size = cook.http_stream_len().unwrap_or(u64::MAX);
     let read_len = file_size.min(fetch_limit) as usize;
 
-    // Read the file prefix.  The ID3v2 tag is always at the beginning of an
-    // MP3 file, so this captures the full tag and any embedded cover art.
-    // When the read length falls entirely within the already-cached
-    // HEADER_SCAN pages, this is zero extra network I/O.
     let tag_bytes = match cook.http_read_at(0, read_len).await {
         Ok(b) => b,
         Err(_) => return,
     };
 
-    // Scan frames for APIC.
-    let image_bytes = find_id3_apic(&tag_bytes, id3.version_major);
-    let Some(image_bytes) = image_bytes else { return };
+    // ── Detect ID3v2 header (optional) ────────────────────────────────────
+    let id3 = parse_id3_header(&tag_bytes);
+
+    // ── Locate the first MPEG audio frame ─────────────────────────────────
+    // With ID3: starts 10 + tag_size bytes in.  Without: starts at byte 0.
+    let audio_body_offset = id3.as_ref()
+        .map(|h| 10usize + h.tag_size)
+        .unwrap_or(0);
+
+    let (channel_count, duration_secs) = if tag_bytes.len() > audio_body_offset + 4 {
+        parse_first_mp3_frame(&tag_bytes[audio_body_offset..])
+            .map(|frame| {
+                let chan = frame.channel_count() as u32;
+                let dur = if frame.bitrate > 0 {
+                    let audio_bytes = file_size.saturating_sub(audio_body_offset as u64);
+                    Some((audio_bytes * 8) as f64 / frame.bitrate as f64)
+                } else {
+                    None
+                };
+                (chan, dur)
+            })
+            .unwrap_or((0, None))
+    } else {
+        (0, None)
+    };
+
+    let mut props = serde_json::json!({});
+    if channel_count > 0 {
+        props["channel_count"] = serde_json::json!(channel_count);
+    }
+    if let Some(d) = duration_secs {
+        props["duration_seconds"] = serde_json::json!(d);
+    }
+
+    // ── Scan ID3v2 frames for APIC cover art ──────────────────────────────
+    let image_bytes = id3.and_then(|h| find_id3_apic(&tag_bytes, h.version_major));
+
+    let Some(image_bytes) = image_bytes else {
+        // No cover art, but we still have audio metadata.
+        if channel_count > 0 || duration_secs.is_some() {
+            cook.media.properties = Some(props);
+        }
+        return;
+    };
 
     let dl_bytes = cook.http_bytes_fetched();
     cook.http_close().await;
@@ -1135,12 +1164,17 @@ async fn try_audio_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
 
     let img = pre_scale_to_target(img, config.exact_width, config.exact_height);
 
+    if src_w > 0 && src_h > 0 {
+        let img_props = image_properties(src_w, src_h, color_type);
+        if let (Some(obj), Some(img_obj)) = (props.as_object_mut(), img_props.as_object()) {
+            for (k, v) in img_obj { obj.insert(k.clone(), v.clone()); }
+        }
+    }
+    cook.media.properties = Some(props);
+
     cook.render_renderer    = Some("shortcut/audio".into());
     cook.render_handler     = RenderHandler::Builtin;
     cook.out_download_bytes = dl_bytes;
-    if src_w > 0 && src_h > 0 {
-        cook.media.properties = Some(image_properties(src_w, src_h, color_type));
-    }
     cook.render_image = Some(img);
 }
 
@@ -1467,3 +1501,96 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
         && matches!(cook.media.extension.as_deref(), Some("mp3"));
     if is_audio { try_audio_shortcut(cook).await; }
 }
+
+// ── MP3 frame header parser ──────────────────────────────────────────────────
+
+/// Parsed first MPEG audio frame header (4 bytes after sync).
+#[derive(Debug)]
+struct Mp3FrameInfo {
+    /// Bitrate in bits per second.
+    bitrate: u32,
+    /// Sample rate in Hz.
+    #[allow(dead_code)]
+    sample_rate: u32,
+    /// Channel mode: 0=stereo, 1=joint, 2=dual, 3=mono.
+    channel_mode: u8,
+}
+
+impl Mp3FrameInfo {
+    fn channel_count(&self) -> u8 {
+        match self.channel_mode {
+            3 => 1, // mono
+            _ => 2, // stereo / joint / dual
+        }
+    }
+}
+
+/// Attempt to parse the first MPEG audio frame from `bytes`, which should
+/// start at the first byte after the ID3v2 tag (i.e. at the sync word).
+///
+/// Returns `None` if no valid MPEG frame header is found within the first
+/// 2 KiB (should be immediate for standard MP3 files).
+fn parse_first_mp3_frame(bytes: &[u8]) -> Option<Mp3FrameInfo> {
+    // Search for a sync word within the first 2 KiB.
+    let limit = bytes.len().min(2048);
+    for i in 0..limit.saturating_sub(1) {
+        if bytes[i] == 0xFF && (bytes[i + 1] & 0xE0) == 0xE0 {
+            if let Some(info) = parse_mp3_frame_header(&bytes[i..]) {
+                return Some(info);
+            }
+        }
+    }
+    None
+}
+
+/// Parse a single MPEG audio frame header starting at `bytes[0]`.
+fn parse_mp3_frame_header(bytes: &[u8]) -> Option<Mp3FrameInfo> {
+    if bytes.len() < 4 { return None; }
+
+    let hdr = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+
+    // Sync: 11 bits of 1.
+    if (hdr >> 21) != 0x7FF { return None; }
+
+    let version = (hdr >> 19) & 0x3;  // 00=MPEG2.5, 10=MPEG2, 11=MPEG1
+    let layer = (hdr >> 17) & 0x3;    // 01=Layer3, 10=Layer2, 11=Layer1
+    let bitrate_idx = ((hdr >> 12) & 0xF) as usize;
+    let sample_rate_idx = ((hdr >> 10) & 0x3) as usize;
+    let channel_mode = ((hdr >> 6) & 0x3) as u8;
+
+    // Only Layer III is common for MP3 files.
+    if layer != 0x01 { return None; }
+
+    let bitrate = match version {
+        3 => MPEG1_LAYER3_BITRATE.get(bitrate_idx).copied()?, // MPEG1
+        2 => MPEG2_LAYER3_BITRATE.get(bitrate_idx).copied()?, // MPEG2
+        _ => MPEG25_LAYER3_BITRATE.get(bitrate_idx).copied()?, // MPEG2.5
+    };
+    let sample_rate = match version {
+        3 => MPEG1_SAMPLE_RATE.get(sample_rate_idx).copied()?,
+        2 => MPEG2_SAMPLE_RATE.get(sample_rate_idx).copied()?,
+        _ => MPEG25_SAMPLE_RATE.get(sample_rate_idx).copied()?,
+    };
+
+    if bitrate == 0 { return None; } // "free" bitrate — can't estimate
+
+    Some(Mp3FrameInfo { bitrate: bitrate * 1000, sample_rate, channel_mode })
+}
+
+// Bitrate tables in kbps, index 0 = free (invalid for estimation).
+
+const MPEG1_LAYER3_BITRATE: [u32; 16] = [
+    0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0,
+];
+
+const MPEG2_LAYER3_BITRATE: [u32; 16] = [
+    0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0,
+];
+
+const MPEG25_LAYER3_BITRATE: [u32; 16] = [
+    0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0,
+];
+
+const MPEG1_SAMPLE_RATE: [u32; 4] = [44100, 48000, 32000, 0];
+const MPEG2_SAMPLE_RATE: [u32; 4] = [22050, 24000, 16000, 0];
+const MPEG25_SAMPLE_RATE: [u32; 4] = [11025, 12000, 8000, 0];
