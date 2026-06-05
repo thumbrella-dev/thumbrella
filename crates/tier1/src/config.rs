@@ -13,9 +13,9 @@
 //! | `TBR_DEVELOPER_MODE`       | false   | Verbose debug output in API responses            |
 //! | `TBR_ALLOW_FILES`          | false   | Accept `file://` URLs and bare absolute paths    |
 //! | `TBR_SCRATCH`              | $TMPDIR/thumbrella | Scratch root for tier3 CLI tool staging   |
-//! | `TBR_TIER2`                | —       | Tier-2 URL with optional `#code` handoff secret  |
-//! | `TBR_TIER3`                | —       | Tier-3 URL with optional `#code` handoff secret  |
-//! | `TBR_HANDOFF`              | —       | Shared secret this server accepts on `/handoff`  |
+//! | `TBR_TIER2`                | —       | Tier-2 URL with optional `#handshake` secret |
+//! | `TBR_TIER3`                | —       | Tier-3 URL with optional `#handshake` secret |
+//! | `TBR_HANDSHAKE`           | —       | Shared secret required on all endpoints       |
 //! | `TBR_CACHE`                | —       | Cache backend DSN — `sqlite:<path>`, …          |
 //! | `TBR_CACHE_MAX_ITEMS`      | —       | Max cache entries (backend-specific meaning)     |
 //! | `TBR_TRACE`                | —       | Trace sink DSN — `ndjson:<path>`, …             |
@@ -55,15 +55,15 @@ pub struct AppConfig {
     // ── Handoff tiers ─────────────────────────────────────────────────────────
     /// URL of the tier-2 handoff server (`TBR_TIER2`).
     pub tier2_url: Option<String>,
-    /// Optional per-tier handoff code parsed from `TBR_TIER2` URL fragment.
-    pub tier2_code: Option<String>,
+    /// Per-tier handshake parsed from `TBR_TIER2` URL fragment.
+    pub tier2_handshake: Option<String>,
     /// URL of the tier-3 handoff server (`TBR_TIER3`).
     pub tier3_url: Option<String>,
-    /// Optional per-tier handoff code parsed from `TBR_TIER3` URL fragment.
-    pub tier3_code: Option<String>,
-    /// Shared secret accepted in `x-tbr-handoff-code` for `/handoff` calls.
-    /// If `None`, this server does not accept handoff requests.
-    pub handoff_accept: Option<String>,
+    /// Per-tier handshake parsed from `TBR_TIER3` URL fragment.
+    pub tier3_handshake: Option<String>,
+    /// Shared secret required on all endpoints when set.
+    /// If `None`, the server is publicly accessible.
+    pub handshake: Option<String>,
 
     // ── Cache ────────────────────────────────────────────────────────────────
     /// Cache backend DSN (`TBR_CACHE`).  Scheme determines backend type:
@@ -98,10 +98,10 @@ impl Default for AppConfig {
             allow_local: false,
             scratch_dir: default_scratch_dir(),
             tier2_url: None,
-            tier2_code: None,
+            tier2_handshake: None,
             tier3_url: None,
-            tier3_code: None,
-            handoff_accept: None,
+            tier3_handshake: None,
+            handshake: None,
             cache_url: None,
             cache_max_items: None,
             trace_url: None,
@@ -115,8 +115,8 @@ impl Default for AppConfig {
 impl AppConfig {
     /// Build config from environment variables, falling back to defaults.
     pub fn from_env() -> Self {
-        let (tier2_url, tier2_code) = parse_handoff_target(env_opt_string("TBR_TIER2"));
-        let (tier3_url, tier3_code) = parse_handoff_target(env_opt_string("TBR_TIER3"));
+        let (tier2_url, tier2_handshake) = parse_handoff_target(env_opt_string("TBR_TIER2"));
+        let (tier3_url, tier3_handshake) = parse_handoff_target(env_opt_string("TBR_TIER3"));
         Self {
             port:                 env_u16("TBR_PORT", 3114),
             server:               std::env::var("TBR_SERVER").ok(),
@@ -124,10 +124,10 @@ impl AppConfig {
             allow_local:          env_bool("TBR_ALLOW_FILES", false),
             scratch_dir:          env_scratch("TBR_SCRATCH"),
             tier2_url,
-            tier2_code,
+            tier2_handshake,
             tier3_url,
-            tier3_code,
-            handoff_accept:       env_opt_string("TBR_HANDOFF"),
+            tier3_handshake,
+            handshake:          env_opt_string("TBR_HANDSHAKE"),
             cache_url:            std::env::var("TBR_CACHE").ok(),
             cache_max_items:      env_opt_u32("TBR_CACHE_MAX_ITEMS"),
             trace_url:            std::env::var("TBR_TRACE").ok(),

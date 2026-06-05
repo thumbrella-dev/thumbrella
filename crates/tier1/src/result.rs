@@ -40,11 +40,24 @@ pub enum RenderHandler {
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {
     Success,
-    NotModified,
     #[default]
     Failed,
-    Unavailable,
-    Rendering,
+    Overloaded,
+    Intermediate,
+}
+
+// ── Thumb source ──────────────────────────────────────────────────────────────
+
+/// How the thumbnail was produced.  ``null`` when status is not ``"success"``.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThumbSource {
+    /// Full compute render for this media type.
+    Render,
+    /// Embedded thumbnail extracted without a full render.
+    Shortcut,
+    /// Served from server-side cache.
+    Cache,
 }
 
 // ── Call record ───────────────────────────────────────────────────────────────
@@ -73,8 +86,8 @@ pub struct ThumbResult {
     pub url: String,
     pub status: JobStatus,
     /// HTTP status code returned by the upstream source fetch.
-    /// `None` when no network request was made (cache hit, client-side freshness).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// `null` when no network request was made (cache hit, client-side freshness).
+    #[serde(default)]
     pub source_status: Option<u16>,
     pub duration: f64,
     pub download_size: u64,
@@ -89,12 +102,17 @@ pub struct ThumbResult {
     /// Format-specific properties (dimensions, color depth, …).  Always present;
     /// empty object `{}` when no properties were extracted.
     pub properties: Value,
-    /// Structured cache freshness hints from the upstream response.
+    /// Opaque cache token for round-tripping on subsequent requests.
     ///
-    /// Round-trip this field back as `ThumbObject.hints` on subsequent requests
-    /// to enable server-side conditional fetches and client-side freshness checks.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Format: `hex_epoch:base64_blob`.  Clients can check freshness by
+    /// comparing the hex prefix (Unix seconds) against the current time.
+    /// The blob is private server state — do not parse it.
+    #[serde(default, with = "crate::source::cache_wire")]
     pub cache: Option<CacheHints>,
+    /// Where the thumbnail data came from.
+    /// `null` for fresh renders, ``\"hit\"`` for server-cache hits.
+    #[serde(default)]
+    pub cache_source: Option<ThumbSource>,
     #[serde(with = "base64_bytes")]
     pub thumbnail: Vec<u8>,
 }
@@ -116,6 +134,7 @@ impl Default for ThumbResult {
             source_status: None,
             properties:    Value::Object(Default::default()),
             cache:         None,
+            cache_source:  None,
             thumbnail:     Vec::new(),
         }
     }

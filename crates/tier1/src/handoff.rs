@@ -40,8 +40,8 @@ use serde::{Deserialize, Serialize};
 use crate::cook::{InputSpec, MediaInfo, SourceIdentity};
 use crate::result::{ThumbResult, ThumbTrace};
 
-/// Shared secret header name for tier-to-tier handoff requests.
-pub const HANDOFF_CODE_HEADER: &str = "x-tbr-handoff-code";
+/// Shared secret header name for server-to-server requests.
+pub const HANDSHAKE_HEADER: &str = "x-tbr-handshake";
 
 /// Serialisable bundle forwarded to a higher-tier renderer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,25 +105,25 @@ pub fn register_handoff_fn(f: Box<HandoffFn>) {
 /// 3. Error — non-native build with no registered implementation.
 pub async fn post_handoff(
     base_url: &str,
-    handoff_code: Option<&str>,
+    handshake: Option<&str>,
     payload: &ThumbHandoff,
 ) -> Result<HandoffResponse, String> {
     if let Some(f) = HANDOFF_IMPL.get() {
         return f(
             base_url.to_string(),
-            handoff_code.map(str::to_string),
+            handshake.map(str::to_string),
             payload.clone(),
         )
         .await;
     }
-    native_post_handoff(base_url, handoff_code, payload).await
+    native_post_handoff(base_url, handshake, payload).await
 }
 
 /// Reqwest-based handoff — used in native builds when no custom fn is registered.
 #[cfg(feature = "native")]
 async fn native_post_handoff(
     base_url: &str,
-    handoff_code: Option<&str>,
+    handshake: Option<&str>,
     payload: &ThumbHandoff,
 ) -> Result<HandoffResponse, String> {
     let endpoint = format!("{}/handoff", base_url.trim_end_matches('/'));
@@ -134,8 +134,8 @@ async fn native_post_handoff(
         .map_err(|e| format!("handoff client init failed: {e}"))?;
 
     let mut req = client.post(&endpoint).json(payload);
-    if let Some(code) = handoff_code {
-        req = req.header(HANDOFF_CODE_HEADER, code);
+    if let Some(h) = handshake {
+        req = req.header(HANDSHAKE_HEADER, h);
     }
 
     let resp = req
@@ -158,7 +158,7 @@ async fn native_post_handoff(
 #[cfg(not(feature = "native"))]
 async fn native_post_handoff(
     _base_url: &str,
-    _handoff_code: Option<&str>,
+    _handshake: Option<&str>,
     _payload: &ThumbHandoff,
 ) -> Result<HandoffResponse, String> {
     Err(

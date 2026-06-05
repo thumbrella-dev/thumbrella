@@ -37,7 +37,7 @@ pub async fn connect<S: HttpStream>(cook: &mut ThumbCook<S>) {
     options.headers.push(("User-Agent".to_string(), cook.runtime.user_agent.clone()));
 
     // Apply conditional request headers from caller's prior cache hints.
-    if let Some(ref hints) = cook.input.hints {
+    if let Some(ref hints) = cook.input.cache {
         if let Some((name, value)) = hints.to_conditional() {
             options.headers.push((name.to_string(), value.to_string()));
         }
@@ -53,7 +53,7 @@ pub async fn connect<S: HttpStream>(cook: &mut ThumbCook<S>) {
     let origin = origin_of(&cook.input.url);
     if let Some(cached_status) = cook.runtime.origin_backoff.check(origin).await {
         cook.http_status = cached_status;
-        cook.status = CookStatus::Unavailable;
+        cook.status = CookStatus::Overloaded;
         return;
     }
 
@@ -86,14 +86,14 @@ pub async fn connect<S: HttpStream>(cook: &mut ThumbCook<S>) {
         cook.runtime.origin_backoff
             .record(origin_of(&cook.input.url).to_string(), buf.status, ttl)
             .await;
-        cook.status = CookStatus::Unavailable;
+        cook.status = CookStatus::Overloaded;
         return;
     }
 
     // Classify remaining non-2xx responses; record them in the URL failure cache.
     let fail_msg: Option<Arc<str>> = match buf.status {
         304 => {
-            cook.status = CookStatus::NotModified;
+            cook.status = CookStatus::Fresh;
             return;
         }
         401 | 403 => Some(Arc::from("permission denied")),

@@ -6,14 +6,21 @@
 //! - `GET  /thumb?url=<url>`       — same handler; alias without extension
 //! - `POST /handoff`               — trusted tier-to-tier thumbnail handoff
 //! - `POST /batch`                 — batch thumbnail + describe; waits for all items, returns one JSON object
+//!
+//! # Server token
+//!
+//! When `TBR_HANDSHAKE` is set, all endpoints require the
+//! `x-tbr-handshake` header.  Use [`require_handshake`] as an axum
+//! middleware layer to enforce this uniformly.
 
 use std::{convert::Infallible, sync::Arc};
 
 use axum::{
     body::Body,
     Json,
-    extract::{Query, State},
+    extract::{Query, Request, State},
     http::{HeaderMap, StatusCode, header},
+    middleware::Next,
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
@@ -24,7 +31,7 @@ use tokio::{sync::mpsc, task::JoinSet};
 use crate::cook::{InputSpec, Runtime, ThumbCook};
 use crate::cache::CacheStore;
 use crate::http_buf::PlatformStream;
-use crate::handoff::{HANDOFF_CODE_HEADER, HandoffResponse, ThumbHandoff};
+use crate::handoff::{HANDSHAKE_HEADER, HandoffResponse, ThumbHandoff};
 use crate::request::CallRequest;
 use crate::result::JobStatus;
 use crate::source::CacheHints;
@@ -85,16 +92,16 @@ pub async fn thumb(
         Err(msg) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response(),
     };
 
-    let hints: Option<CacheHints> = headers
+    let cache: Option<CacheHints> = headers
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
         .map(|etag| CacheHints { etag: Some(etag.to_owned()), ..Default::default() });
 
-    let input = InputSpec { url, hints, allow_local: runtime.allow_local };
+    let input = InputSpec { url, cache, allow_local: runtime.allow_local };
     let (result, _trace, mut after) = ThumbCook::<PlatformStream>::from_input(input, runtime).run().await;
     after.drain_spawn();
 
-    if result.status == JobStatus::NotModified {
+    if result.status == JobStatus::Success {
         return StatusCode::NOT_MODIFIED.into_response();
     }
 
@@ -127,12 +134,12 @@ pub async fn batch(
 
     let mut jobs = Vec::with_capacity(req.items.len());
     for (idx, input) in req.items.into_iter().enumerate() {
-        let (url, hints) = input.into_parts();
+        let (url, cache) = input.into_parts();
         let url = match normalize_url(url, runtime.allow_local) {
             Ok(u)    => u,
             Err(msg) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response(),
         };
-        jobs.push((idx, InputSpec { url, hints, allow_local: runtime.allow_local }));
+        jobs.push((idx, InputSpec { url, cache, allow_local: runtime.allow_local }));
     }
     let count = jobs.len();
 
@@ -268,28 +275,13 @@ fn as_ndjson_line(value: Value) -> Bytes {
 /// Accepts a serialized [`ThumbHandoff`] payload from another tier, rebuilds a
 /// cook, reconnects to the source URL, and runs render+deliver with cache
 /// lookup/store disabled on this receiving side.
+///
+/// Handshake auth is enforced by the [`require_handshake`] middleware
+/// layer; this handler does not perform its own auth check.
 pub async fn handoff(
     State(runtime): State<Arc<Runtime>>,
-    headers: HeaderMap,
     Json(payload): Json<ThumbHandoff>,
 ) -> axum::response::Response {
-    let Some(expected_code) = runtime.handoff_accept.as_deref() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "error": "handoff is not configured on this server" })),
-        ).into_response();
-    };
-
-    let provided_code = headers
-        .get(HANDOFF_CODE_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if provided_code != expected_code {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "invalid handoff credentials" })),
-        ).into_response();
-    }
 
     // Handoff cooks do not own cache reads/writes or trace emission.
     // The entry tier is the authority for cache + trace in this request chain.
@@ -308,4 +300,47 @@ pub async fn handoff(
 
     let body = HandoffResponse { result, trace };
     (StatusCode::OK, Json(body)).into_response()
+}
+
+// ── Server-token middleware ───────────────────────────────────────────────────
+
+/// Axum middleware that enforces `TBR_HANDSHAKE` on every endpoint.
+///
+/// When [`Runtime::handshake`] is `None` (the default), all requests pass
+/// through unauthenticated.  When set, every request must include a matching
+/// `x-tbr-handshake` header or receive a 401 response.
+///
+/// Apply as a layer in `run_server`:
+/// ```ignore
+/// let app = Router::new()
+///     .route(…)
+///     .layer(axum::middleware::from_fn_with_state(
+///         runtime.clone(),
+///         routes::require_handshake,
+///     ))
+///     .with_state(runtime);
+/// ```
+pub async fn require_handshake(
+    State(runtime): State<Arc<Runtime>>,
+    headers: HeaderMap,
+    request: Request,
+    next: Next,
+) -> Response {
+    let Some(expected) = runtime.handshake.as_deref() else {
+        return next.run(request).await;
+    };
+
+    let provided = headers
+        .get(HANDSHAKE_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if provided != expected {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "invalid handshake"})),
+        ).into_response();
+    }
+
+    next.run(request).await
 }

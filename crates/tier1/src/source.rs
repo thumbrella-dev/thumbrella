@@ -325,3 +325,218 @@ fn unix_now_secs() -> u64 {
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
+
+// ── Wire format: <hex_epoch>:<base64_blob> ────────────────────────────────────
+
+/// Serde module for the opaque `cache` field on the wire.
+///
+/// Format: `hex_expires_at:base64(binary_blob)`
+///
+/// The hex prefix is a Unix timestamp (seconds).  Clients check freshness by
+/// comparing to `now()` — no decoding needed.  The blob is a compact binary
+/// encoding of the remaining [`CacheHints`] fields; it is private server state
+/// and must be round-tripped unchanged.
+///
+/// # Binary blob layout
+///
+/// One header byte per field, in fixed order:
+///
+/// | Offset | Field                   | Header          | Data                        |
+/// |--------|-------------------------|-----------------|-----------------------------|
+/// | 0      | stale_while_revalidate  | 4 or 0          | u32 big-endian seconds      |
+/// | 1/5    | immutable               | 1 or 0          | (presence only, no data)    |
+/// | 2/6    | etag                    | len or 0        | ASCII bytes                 |
+/// | 3/7+   | last_modified           | len or 0        | ASCII bytes                 |
+///
+/// A header of `0` means the field is absent; any non-zero value is the byte
+/// length of the data that follows.  The decoder stops after 4 fields and
+/// ignores trailing bytes — forward-compatible with future field additions.
+///
+/// Examples:
+/// ```text
+/// "0:"                                    — no cache hints at all
+/// "6a2120c9:AAABDgAAAA5hYmMxMjNkZWY0NTY=" — fresh, swr=1, etag=abc123def456
+/// ```
+///
+/// Use with `#[serde(with = "cache_wire")]` on `Option<CacheHints>` fields.
+pub mod cache_wire {
+    use base64::Engine;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    const SEP: char = ':';
+
+    pub fn serialize<S>(value: &Option<super::CacheHints>, s: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let Some(hints) = value else {
+            return s.serialize_none();
+        };
+
+        let epoch = hints.expires_at.unwrap_or(0);
+
+        let mut buf = Vec::with_capacity(32);
+
+        // Field 0: stale_while_revalidate (u32)
+        if let Some(swr) = hints.stale_while_revalidate {
+            buf.push(4);
+            buf.extend_from_slice(&swr.to_be_bytes());
+        } else {
+            buf.push(0);
+        }
+
+        // Field 1: immutable (bool, presence-only)
+        buf.push(if hints.immutable { 1 } else { 0 });
+
+        // Field 2: etag
+        push_str_field(&mut buf, hints.etag.as_deref());
+
+        // Field 3: last_modified
+        push_str_field(&mut buf, hints.last_modified.as_deref());
+
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&buf);
+        s.serialize_str(&format!("{epoch:x}{SEP}{b64}"))
+    }
+
+    pub fn deserialize<'de, D>(d: D) -> Result<Option<super::CacheHints>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let Some(wire) = Option::<String>::deserialize(d)? else {
+            return Ok(None);
+        };
+        let (epoch_hex, blob) = wire
+            .split_once(SEP)
+            .ok_or_else(|| serde::de::Error::custom("invalid cache format: missing ':' separator"))?;
+        if blob.is_empty() {
+            return Ok(None);
+        }
+
+        let epoch = u64::from_str_radix(epoch_hex, 16)
+            .map_err(|_| serde::de::Error::custom("invalid cache format: bad hex epoch"))?;
+        let buf = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(blob)
+            .map_err(serde::de::Error::custom)?;
+
+        let mut pos = 0;
+        let mut hints = super::CacheHints { expires_at: Some(epoch), ..Default::default() };
+        if epoch == 0 {
+            hints.expires_at = None;
+        }
+
+        // Field 0: stale_while_revalidate
+        if pos < buf.len() {
+            let hdr = buf[pos]; pos += 1;
+            if hdr == 4 && pos + 4 <= buf.len() {
+                let arr: [u8; 4] = buf[pos..pos + 4].try_into().unwrap();
+                hints.stale_while_revalidate = Some(u32::from_be_bytes(arr));
+                pos += 4;
+            }
+        }
+
+        // Field 1: immutable
+        if pos < buf.len() {
+            hints.immutable = buf[pos] != 0;
+            pos += 1;
+        }
+
+        // Field 2: etag
+        hints.etag = take_str_field(&buf, &mut pos).map_err(serde::de::Error::custom)?;
+
+        // Field 3: last_modified
+        hints.last_modified = take_str_field(&buf, &mut pos).map_err(serde::de::Error::custom)?;
+
+        Ok(Some(hints))
+    }
+
+    fn push_str_field(buf: &mut Vec<u8>, s: Option<&str>) {
+        match s {
+            Some(v) if !v.is_empty() => {
+                let len = v.len().min(255);
+                buf.push(len as u8);
+                buf.extend_from_slice(&v.as_bytes()[..len]);
+            }
+            _ => buf.push(0),
+        }
+    }
+
+    fn take_str_field(buf: &[u8], pos: &mut usize) -> Result<Option<String>, &'static str> {
+        if *pos >= buf.len() {
+            return Ok(None);
+        }
+        let len = buf[*pos] as usize;
+        *pos += 1;
+        if len == 0 {
+            return Ok(None);
+        }
+        if *pos + len > buf.len() {
+            return Err("truncated cache blob");
+        }
+        let s = String::from_utf8_lossy(&buf[*pos..*pos + len]).into_owned();
+        *pos += len;
+        Ok(Some(s))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use serde::{Deserialize, Serialize};
+        use super::super::CacheHints;
+
+        #[derive(Debug, Serialize, Deserialize)]
+        struct TestWrapper {
+            #[serde(default, with = "super", skip_serializing_if = "Option::is_none")]
+            cache: Option<CacheHints>,
+        }
+
+        fn round_trip(hints: CacheHints) -> CacheHints {
+            let wrapper = TestWrapper { cache: Some(hints) };
+            let json = serde_json::to_value(&wrapper).unwrap();
+            let obj = json.as_object().unwrap();
+            if obj.is_empty() {
+                // None serialized to nothing
+                return CacheHints::default();
+            }
+            let wire = obj["cache"].as_str().expect("cache should be a string");
+            eprintln!("wire: {wire}");
+            let back: TestWrapper = serde_json::from_value(json).unwrap();
+            back.cache.unwrap_or_default()
+        }
+
+        #[test]
+        fn round_trip_full() {
+            let orig = CacheHints {
+                expires_at: Some(1780007113),
+                stale_while_revalidate: Some(3600),
+                immutable: true,
+                etag: Some("\"abc123\"".into()),
+                last_modified: Some("Thu, 01 Jan 2026 00:00:00 GMT".into()),
+            };
+            let back = round_trip(orig.clone());
+            assert_eq!(back.expires_at, orig.expires_at);
+            assert_eq!(back.stale_while_revalidate, orig.stale_while_revalidate);
+            assert_eq!(back.immutable, orig.immutable);
+            assert_eq!(back.etag, orig.etag);
+            assert_eq!(back.last_modified, orig.last_modified);
+        }
+
+        #[test]
+        fn round_trip_etag_only() {
+            let orig = CacheHints {
+                etag: Some("\"xyz789\"".into()),
+                ..Default::default()
+            };
+            let back = round_trip(orig.clone());
+            assert_eq!(back.etag, orig.etag);
+            assert_eq!(back.expires_at, None);
+        }
+
+        #[test]
+        fn round_trip_none() {
+            let wrapper = TestWrapper { cache: None };
+            let json = serde_json::to_value(&wrapper).unwrap();
+            assert!(json.as_object().unwrap().is_empty(), "None should serialize to absent field");
+            let back: TestWrapper = serde_json::from_value(json).unwrap();
+            assert!(back.cache.is_none());
+        }
+    }
+}

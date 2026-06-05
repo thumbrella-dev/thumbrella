@@ -66,7 +66,7 @@ use crate::fetch_guard::{OriginBackoffCache, UrlFailureCache};
 use crate::handoff::{HandoffInflight, HandoffResponse};
 use crate::http_buf::{HttpBuffer, HttpStream};
 use crate::media::{FileKind, Strategy};
-use crate::result::{JobStatus, RenderHandler, ThumbResult, ThumbTrace};
+use crate::result::{JobStatus, RenderHandler, ThumbResult, ThumbSource, ThumbTrace};
 use crate::source::CacheHints;
 use crate::spec::ShortcutLimits;
 use crate::tracelog::TraceStore;
@@ -89,13 +89,13 @@ pub enum CookStatus {
     /// Thumbnail produced successfully.
     Complete,
     /// Conditional request; source unchanged since caller's supplied validator.
-    NotModified,
+    Fresh,
     /// Terminal failure — message is in `out_message`.
     Failed,
     /// No higher-tier renderer is configured or available.
-    Unavailable,
+    Overloaded,
     /// Handed off to a higher-tier renderer; streaming result pending.
-    Rendering,
+    Intermediate,
 }
 
 impl CookStatus {
@@ -150,14 +150,15 @@ pub struct Runtime {
     pub renderer: Option<SharedRenderer>,
     /// Tier-2 handoff server base URL (e.g. `http://tier2:8000`).
     pub handoff_tier2_url: Option<String>,
-    /// Per-tier secret used when calling tier-2 `/handoff`.
-    pub handoff_tier2_code: Option<String>,
+    /// Per-tier handshake sent when calling tier-2 `/handoff`.
+    pub handoff_tier2_handshake: Option<String>,
     /// Tier-3 handoff server base URL (e.g. `http://tier3:8000`).
     pub handoff_tier3_url: Option<String>,
-    /// Per-tier secret used when calling tier-3 `/handoff`.
-    pub handoff_tier3_code: Option<String>,
-    /// Shared secret this server accepts on `/handoff`.
-    pub handoff_accept: Option<String>,
+    /// Per-tier handshake sent when calling tier-3 `/handoff`.
+    pub handoff_tier3_handshake: Option<String>,
+    /// Shared secret required on all endpoints when set.
+    /// If `None`, the server is publicly accessible.
+    pub handshake: Option<String>,
     /// Allow `file://` URLs and bare absolute paths in HTTP endpoint requests.
     ///
     /// Set from [`AppConfig::allow_local`] (`TBR_ALLOW_FILES`).  Propagated
@@ -188,10 +189,10 @@ impl Runtime {
         server: Option<String>,
         background_image: Option<RgbImage>,
         handoff_tier2_url: Option<String>,
-        handoff_tier2_code: Option<String>,
+        handoff_tier2_handshake: Option<String>,
         handoff_tier3_url: Option<String>,
-        handoff_tier3_code: Option<String>,
-        handoff_accept: Option<String>,
+        handoff_tier3_handshake: Option<String>,
+        handshake: Option<String>,
         allow_local: bool,
         failure_ttl: u64,
         backoff_default: u64,
@@ -206,10 +207,10 @@ impl Runtime {
             #[cfg(feature = "native")]
             renderer: None,
             handoff_tier2_url,
-            handoff_tier2_code,
+            handoff_tier2_handshake,
             handoff_tier3_url,
-            handoff_tier3_code,
-            handoff_accept,
+            handoff_tier3_handshake,
+            handshake,
             allow_local,
             shortcut_limits: ShortcutLimits::TIER1,
             user_agent: format!("Thumbrella/{}", env!("CARGO_PKG_VERSION")),
@@ -233,7 +234,7 @@ pub struct InputSpec {
     /// Source URL to fetch and thumbnail.
     pub url: String,
     /// Caller's prior cache hints for conditional fetch and client-side freshness.
-    pub hints: Option<CacheHints>,
+    pub cache: Option<CacheHints>,
     /// Allow `file://` URLs.  Only the CLI sets this to `true`.
     pub allow_local: bool,
 }
@@ -588,10 +589,10 @@ impl<S: HttpStream> ThumbCook<S> {
     pub fn to_result(&self) -> ThumbResult {
         let status = match self.status {
             CookStatus::Processing | CookStatus::Complete => JobStatus::Success,
-            CookStatus::NotModified => JobStatus::NotModified,
+            CookStatus::Fresh => JobStatus::Success,
             CookStatus::Failed      => JobStatus::Failed,
-            CookStatus::Unavailable => JobStatus::Unavailable,
-            CookStatus::Rendering   => JobStatus::Rendering,
+            CookStatus::Overloaded => JobStatus::Overloaded,
+            CookStatus::Intermediate   => JobStatus::Intermediate,
         };
         ThumbResult {
             url:           self.input.url.clone(),
@@ -609,6 +610,13 @@ impl<S: HttpStream> ThumbCook<S> {
             extension:     self.media.extension.clone(),
             properties:    self.media.properties.clone().unwrap_or_else(|| Value::Object(Default::default())),
             cache:         self.src.cache_hints.clone(),
+            cache_source:  if self.status == CookStatus::Fresh {
+                Some(ThumbSource::Cache)
+            } else if matches!(self.out_strategy, Some(Strategy::Embedded)) {
+                Some(ThumbSource::Shortcut)
+            } else {
+                Some(ThumbSource::Render)
+            },
         }
     }
 
@@ -619,7 +627,7 @@ impl<S: HttpStream> ThumbCook<S> {
     pub fn to_progress_result(&self, duration: f64) -> ThumbResult {
         ThumbResult {
             url:           self.input.url.clone(),
-            status:        JobStatus::Rendering,
+            status:        JobStatus::Intermediate,
             source_status: None,
             duration,
             download_size: self.out_download_bytes.max(self.http_bytes_fetched()),
@@ -637,6 +645,7 @@ impl<S: HttpStream> ThumbCook<S> {
             extension:     self.media.extension.clone(),
             properties:    self.media.properties.clone().unwrap_or_else(|| Value::Object(Default::default())),
             cache:         self.src.cache_hints.clone(),
+            cache_source:  None,
         }
     }
 
@@ -654,10 +663,10 @@ impl<S: HttpStream> ThumbCook<S> {
 
         let status = match self.status {
             CookStatus::Processing | CookStatus::Complete => JobStatus::Success,
-            CookStatus::NotModified => JobStatus::NotModified,
+            CookStatus::Fresh => JobStatus::Success,
             CookStatus::Failed      => JobStatus::Failed,
-            CookStatus::Unavailable => JobStatus::Unavailable,
-            CookStatus::Rendering   => JobStatus::Rendering,
+            CookStatus::Overloaded => JobStatus::Overloaded,
+            CookStatus::Intermediate   => JobStatus::Intermediate,
         };
 
         #[cfg(feature = "native")]
@@ -793,11 +802,12 @@ impl<S: HttpStream> ThumbCook<S> {
         let mut after = AfterResponse::new();
         let t0 = web_time::Instant::now();
 
-        // ── Level 2 fast path (client-side freshness) ─────────────────────────
+        // ── Client-side freshness fast path ───────────────────────────────────
         // If the caller's cache hints say the resource is still fresh, skip
-        // the upstream fetch entirely and return NotModified immediately.
-        if self.input.hints.as_ref().map_or(false, |h| h.is_fresh()) {
-            self.status = CookStatus::NotModified;
+        // the upstream fetch entirely.  The client sent cache hints — it
+        // declares it has the cached data and only wants a freshness check.
+        if self.input.cache.as_ref().map_or(false, |h| h.is_fresh()) {
+            self.status = CookStatus::Fresh;
             self.out_duration = t0.elapsed().as_secs_f64();
             return self.finish(after);
         }
@@ -811,14 +821,13 @@ impl<S: HttpStream> ThumbCook<S> {
         // If the KV entry is stale, its freshness hints (etag / last-modified)
         // are used to send a conditional request in connect.
         let mut pre_cached: Option<ThumbResult> = None;
-        if !self.ctx_handoff && self.input.hints.is_none() {
+        if !self.ctx_handoff && self.input.cache.is_none() {
             use sha2::{Sha256, Digest};
             use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
             use crate::source::canonical_url;
 
             let identity = canonical_url(&self.input.url)
                 .unwrap_or_else(|| self.input.url.clone());
-
             let key_input = format!(
                 "v{}:{}:{identity}",
                 crate::TBR_CACHE_VERSION,
@@ -852,7 +861,7 @@ impl<S: HttpStream> ThumbCook<S> {
 
                 // Stale — use the cached freshness hints as conditional
                 // request headers so connect can get a 304 instead of 200.
-                self.input.hints = cached.cache.clone();
+                self.input.cache = cached.cache.clone();
                 pre_cached = Some(cached);
             }
         }
@@ -863,7 +872,7 @@ impl<S: HttpStream> ThumbCook<S> {
         self.tel_connect_secs = t_step.elapsed().as_secs_f64();
         if !self.status.is_processing() {
             // connect set a terminal status (failed / not_modified / unavailable).
-            if self.status == CookStatus::NotModified {
+            if self.status == CookStatus::Fresh {
                 // When the caller provided hints they have their own cached copy;
                 // just confirm it's still valid — no thumbnail needed.
                 // When we did a KV-assisted conditional fetch, return the KV data.
@@ -1046,7 +1055,7 @@ impl<S: HttpStream> ThumbCook<S> {
             }
             // Renderer returned false (format not recognised).
             // It must not have called take_reader() in this case.
-            self.status = CookStatus::Unavailable;
+            self.status = CookStatus::Overloaded;
             self.out_message = "format not handled by the registered renderer".to_string();
             self.out_duration = t0.elapsed().as_secs_f64();
             return self.finish(after);
@@ -1071,9 +1080,9 @@ impl<S: HttpStream> ThumbCook<S> {
             } else {
                 routed_tier
             };
-            let (target_url, target_code) = match target_tier {
-                2 => (self.runtime.handoff_tier2_url.clone(), self.runtime.handoff_tier2_code.clone()),
-                3 => (self.runtime.handoff_tier3_url.clone(), self.runtime.handoff_tier3_code.clone()),
+            let (target_url, target_handshake) = match target_tier {
+                2 => (self.runtime.handoff_tier2_url.clone(), self.runtime.handoff_tier2_handshake.clone()),
+                3 => (self.runtime.handoff_tier3_url.clone(), self.runtime.handoff_tier3_handshake.clone()),
                 _ => (None, None),
             };
 
@@ -1123,7 +1132,7 @@ impl<S: HttpStream> ThumbCook<S> {
                         // JSON is serialised for the outbound HTTP request.
                         let payload = self.take_handoff().await;
                         let shared = Arc::new(
-                            crate::handoff::post_handoff(url, target_code.as_deref(), &payload).await,
+                            crate::handoff::post_handoff(url, target_handshake.as_deref(), &payload).await,
                         );
                         // Notify joiners before applying to self so they unblock ASAP.
                         self.runtime.handoff_inflight.complete(&hkey, Arc::clone(&shared));
@@ -1145,7 +1154,7 @@ impl<S: HttpStream> ThumbCook<S> {
         }
 
         self.http_close().await;
-        self.status = CookStatus::Unavailable;
+        self.status = CookStatus::Overloaded;
         self.out_message = "no higher-tier renderer is configured".to_string();
         self.out_duration = t0.elapsed().as_secs_f64();
         self.finish(after)
@@ -1159,14 +1168,14 @@ impl<S: HttpStream> ThumbCook<S> {
         // Always return a thumbnail.  If the pipeline didn't produce one,
         // fill in the appropriate placeholder JPEG — except for NotModified,
         // where an empty thumbnail tells the caller "use your cached copy".
-        if self.out_thumbnail.is_empty() && self.status != CookStatus::NotModified {
+        if self.out_thumbnail.is_empty() && self.status != CookStatus::Fresh {
             if let Some(kind) = self.media.kind {
                 // Kind was identified: use the kind-specific placeholder.
                 // If the pipeline failed at the render step (e.g. unsupported
                 // codec, EXR, SVG) promote the status to Unavailable — we know
                 // what the file is, we just can't render it yet.
                 if self.status == CookStatus::Failed {
-                    self.status = CookStatus::Unavailable;
+                    self.status = CookStatus::Overloaded;
                 }
                 let slug = kind_slug(kind);
                 self.out_thumbnail   = crate::assets::placeholder_for_kind(kind).to_vec();
@@ -1215,10 +1224,9 @@ fn kind_slug(kind: crate::media::FileKind) -> &'static str {
 fn cook_status_from_job(status: JobStatus) -> CookStatus {
     match status {
         JobStatus::Success => CookStatus::Complete,
-        JobStatus::NotModified => CookStatus::NotModified,
         JobStatus::Failed => CookStatus::Failed,
-        JobStatus::Unavailable => CookStatus::Unavailable,
-        JobStatus::Rendering => CookStatus::Rendering,
+        JobStatus::Overloaded => CookStatus::Overloaded,
+        JobStatus::Intermediate => CookStatus::Intermediate,
     }
 }
 

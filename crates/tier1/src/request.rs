@@ -27,24 +27,21 @@ pub struct ThumbObject {
     /// Source URL.
     pub url: String,
 
-    /// Cache hints from a prior `ThumbResult.hints`.
+    /// Opaque cache token from a prior `ThumbResult.cache`.
     ///
-    /// When supplied, the service:
-    /// - Returns `not_modified` immediately if the hints say the resource is
-    ///   still fresh (no upstream fetch needed).
-    /// - Issues a conditional fetch (`If-None-Match` / `If-Modified-Since`)
-    ///   when the resource is stale.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hints: Option<CacheHints>,
+    /// Round-trip this value unchanged.  The server uses it for conditional
+    /// fetches and client-side freshness checks.
+    #[serde(default, with = "crate::source::cache_wire", skip_serializing_if = "Option::is_none")]
+    pub cache: Option<CacheHints>,
 
 }
 
 impl ThumbInput {
-    /// Extract the URL and hints without allocating an intermediate struct.
+    /// Extract the URL and cache hints without allocating an intermediate struct.
     pub fn into_parts(self) -> (String, Option<CacheHints>) {
         match self {
             Self::Url(url) => (url, None),
-            Self::Object(obj) => (obj.url, obj.hints),
+            Self::Object(obj) => (obj.url, obj.cache),
         }
     }
 }

@@ -1,7 +1,7 @@
 [package]
 name = "tier3"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "Thumbrella Tier 3 — full-featured thumbnail service with pluggable renderers"
 
 [[bin]]

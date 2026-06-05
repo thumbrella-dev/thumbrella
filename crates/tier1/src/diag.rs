@@ -195,8 +195,8 @@ pub struct DiagReport {
     /// uses a file-backed scheme such as `ndjson:`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_file_check: Option<FileCheck>,
-    /// Whether this server accepts handoff requests (`TBR_HANDOFF`).
-    pub handoff_accept_set: bool,
+    /// Whether this server requires a handshake on all endpoints (`TBR_HANDSHAKE`).
+    pub handshake_set: bool,
 
 
     // ── Tier 1 ────────────────────────────────────────────────────────────────
@@ -289,7 +289,7 @@ pub fn collect(cfg: &crate::config::AppConfig) -> DiagReport {
         (TierStatus::Builtin, None, Validation::ok())
     } else {
         match cfg.tier2_url.as_ref() {
-            Some(url) => (TierStatus::Handoff, Some(url.clone()), validate_handoff_target(url, cfg.tier2_code.as_deref())),
+            Some(url) => (TierStatus::Handoff, Some(url.clone()), validate_handoff_target(url, cfg.tier2_handshake.as_deref())),
             None      => (TierStatus::Missing, None,              Validation::not_configured()),
         }
     };
@@ -299,7 +299,7 @@ pub fn collect(cfg: &crate::config::AppConfig) -> DiagReport {
         (TierStatus::Builtin, None, Validation::ok())
     } else {
         match cfg.tier3_url.as_ref() {
-            Some(url) => (TierStatus::Handoff, Some(url.clone()), validate_handoff_target(url, cfg.tier3_code.as_deref())),
+            Some(url) => (TierStatus::Handoff, Some(url.clone()), validate_handoff_target(url, cfg.tier3_handshake.as_deref())),
             None      => (TierStatus::Missing, None,              Validation::not_configured()),
         }
     };
@@ -358,7 +358,7 @@ pub fn collect(cfg: &crate::config::AppConfig) -> DiagReport {
         trace_url,
         trace_validation,
         trace_file_check,
-        handoff_accept_set: cfg.handoff_accept.is_some(),
+        handshake_set: cfg.handshake.is_some(),
         tier1: TierStatus::Builtin,
         tier2,
         tier2_handoff,
@@ -548,7 +548,7 @@ impl DiagReport {
         if let Some(ref fc) = self.trace_file_check {
             print_file_check("trace_file", fc);
         }
-        println!("  handoff_accept  : {}", if self.handoff_accept_set { "set" } else { "—" });
+        println!("  handshake       : {}", if self.handshake_set { "set" } else { "—" });
         println!();
 
         println!("Tiers");
@@ -585,12 +585,12 @@ impl DiagReport {
 
 /// Validate an external handoff target URL and local handoff secret config.
 #[cfg(feature = "native")]
-fn validate_handoff_target(url: &str, handoff_code: Option<&str>) -> Validation {
+fn validate_handoff_target(url: &str, handshake: Option<&str>) -> Validation {
     use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
     use std::time::Duration;
 
-    if handoff_code.is_none() {
-        return Validation::error("missing handoff code fragment in tier URL (expected .../#code)");
+    if handshake.is_none() {
+        return Validation::error("missing handshake fragment in tier URL (expected .../#handshake)");
     }
 
     let parsed = match reqwest::Url::parse(url) {
