@@ -7,6 +7,10 @@ members = [
     "crates/tier3",
 ]
 
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
 [profile.dev]
 opt-level = 0      # no optimizations — required for reliable variable inspection
 debug = 2          # full debug info (variables, types, not just line tables)

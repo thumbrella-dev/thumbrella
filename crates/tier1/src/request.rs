@@ -31,8 +31,8 @@ pub struct ThumbObject {
     ///
     /// Round-trip this value unchanged.  The server uses it for conditional
     /// fetches and client-side freshness checks.
-    #[serde(default, with = "crate::source::cache_wire", skip_serializing_if = "Option::is_none")]
-    pub cache: Option<CacheHints>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<String>,
 
 }
 
@@ -41,7 +41,7 @@ impl ThumbInput {
     pub fn into_parts(self) -> (String, Option<CacheHints>) {
         match self {
             Self::Url(url) => (url, None),
-            Self::Object(obj) => (obj.url, obj.cache),
+            Self::Object(obj) => (obj.url, obj.cache.as_deref().and_then(CacheHints::decode)),
         }
     }
 }

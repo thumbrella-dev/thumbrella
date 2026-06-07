@@ -8,7 +8,6 @@
 //! <binary> thumb <url>...     # thumbnail one or more URLs
 //! <binary> render <src> <dst> # thumbnail a local file to disk
 //! <binary> diag               # print config and validate services
-//! <binary> batch-dir <dir>    # thumbnail every file in a directory
 //! ```
 
 use clap::{Parser, Subcommand};
@@ -87,20 +86,6 @@ enum Command {
         json: bool,
     },
 
-    /// Thumbnail every file in a directory and write an HTML report.
-    ///
-    /// Processes files concurrently.  Writes `report.html` in the current
-    /// working directory (or the path given with --output).
-    #[command(name = "batch-dir")]
-    BatchDir {
-        /// Directory to scan.
-        dir: String,
-
-        /// Output HTML file path (default: report.html).
-        #[arg(long, default_value = "report.html")]
-        output: String,
-    },
-
     /// Submit a batch request in streaming mode and print result events as they arrive.
     ///
     /// Sends `Accept: application/x-ndjson` and prints one JSON line per
@@ -171,7 +156,6 @@ where
         Command::Thumb { urls, cache, json, trace }      => run_thumb(urls, cache, json, trace, runtime.unwrap()).await,
         Command::Render { src, dst }                     => run_render(src, dst, runtime.unwrap()).await,
         Command::Diag { json }                           => run_diag(json),
-        Command::BatchDir { dir, output }               => run_batch_dir(dir, output, runtime.unwrap()).await,
         Command::StreamBatch { server, args, cache } => {
             let (server, urls) = normalize_stream_batch_args(server, args);
             run_stream_batch(server, urls, cache).await;
@@ -298,16 +282,12 @@ pub fn promote_url(raw: &str) -> String {
     format!("file://{}", abs.display())
 }
 
-async fn run_thumb(urls: Vec<String>, cache_json: Option<String>, json: bool, show_trace: bool, runtime: Arc<Runtime>) {
+async fn run_thumb(urls: Vec<String>, cache_str: Option<String>, json: bool, show_trace: bool, runtime: Arc<Runtime>) {
     use futures::stream::{FuturesUnordered, StreamExt};
     use crate::{ThumbCook, cook::InputSpec};
+    use crate::source::CacheHints;
 
-    let cache = cache_json.as_deref().and_then(|s| {
-        match serde_json::from_str(s) {
-            Ok(h) => Some(h),
-            Err(e) => { eprintln!("warning: could not parse --cache JSON: {e}"); None }
-        }
-    });
+    let cache = cache_str.as_deref().and_then(CacheHints::decode);
 
     let mut pool = FuturesUnordered::new();
     for raw in urls {
@@ -352,7 +332,8 @@ async fn run_render(src: String, dst: String, runtime: Arc<Runtime>) {
     let (result, _trace, mut after) = ThumbCook::from_input(input, runtime).run().await;
     after.drain_spawn();
 
-    if result.thumbnail.is_empty() {
+    let thumb_empty = result.media.as_ref().map_or(true, |m| m.thumbnail.is_empty());
+    if thumb_empty {
         let reason = result.message.as_deref().filter(|m| !m.is_empty());
         if let Some(msg) = reason {
             eprintln!("render: no thumbnail produced ({msg})");
@@ -362,37 +343,31 @@ async fn run_render(src: String, dst: String, runtime: Arc<Runtime>) {
         return;
     }
 
-    if let Err(e) = std::fs::write(&dst, &result.thumbnail) {
+    let thumb = &result.media.as_ref().unwrap().thumbnail;
+    if let Err(e) = std::fs::write(&dst, thumb) {
         eprintln!("render: failed to write {}: {e}", dst);
         return;
     }
 
-    println!("wrote {} bytes to {}", result.thumbnail.len(), dst);
+    println!("wrote {} bytes to {}", thumb.len(), dst);
 }
 
-async fn run_stream_batch(server: String, urls: Vec<String>, cache_json: Option<String>) {
+async fn run_stream_batch(server: String, urls: Vec<String>, cache: Option<String>) {
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD;
     use futures::StreamExt;
     use reqwest::header;
     use tokio::time::Instant;
 
-    let cache: Option<crate::source::CacheHints> = cache_json.as_deref().and_then(|s| {
-        match serde_json::from_str(s) {
-            Ok(h) => Some(h),
-            Err(e) => { eprintln!("warning: could not parse --cache JSON: {e}"); None }
-        }
-    });
-
     let endpoint = format!("{}/batch", server.trim_end_matches('/'));
     let request = crate::CallRequest {
         items: urls
             .into_iter()
             .map(|url| {
-                if let Some(ref h) = cache {
+                if let Some(ref c) = cache {
                     crate::ThumbInput::Object(crate::ThumbObject {
                         url,
-                        cache: Some(h.clone()),
+                        cache: Some(c.clone()),
                     })
                 } else {
                     crate::ThumbInput::Url(url)
@@ -508,49 +483,51 @@ pub fn print_thumb_items(items: &[(crate::ThumbResult, crate::ThumbTrace)], show
 
         {
             let kind = get_str(&result_json, "kind");
-            let ext  = result.extension.as_deref().unwrap_or("").to_string();
-            let mime = result.mime.as_deref().unwrap_or("").to_string();
-            let size = result.file_size.map(fmt_bytes).unwrap_or_default();
-            let parts: Vec<&str> = [kind.as_str(), ext.as_str(), mime.as_str(), size.as_str()]
+            let media = result.media.as_ref();
+            let ext  = media.map(|m| m.extension.as_str()).unwrap_or("");
+            let mime = media.map(|m| m.mime.as_str()).unwrap_or("");
+            let size = media.map(|m| fmt_bytes(m.file_size)).unwrap_or_default();
+            let parts: Vec<&str> = [kind.as_str(), ext, mime, size.as_str()]
                 .iter().copied().filter(|s| !s.is_empty()).collect();
             if !parts.is_empty() {
                 println!("  format    : {}", parts.join("  "));
             }
         }
 
-        if let Some(obj) = result.properties.as_object() {
-            let pairs: Vec<String> = obj.iter()
-                .map(|(k, v)| {
-                    if let Some(s) = v.as_str() { format!("{k}={s}") }
-                    else { format!("{k}={v}") }
-                })
-                .collect();
-            if !pairs.is_empty() {
-                println!("  properties: {}", pairs.join("  "));
+        if let Some(ref media) = result.media {
+            if let Some(obj) = media.properties.as_object() {
+                let pairs: Vec<String> = obj.iter()
+                    .map(|(k, v)| {
+                        if let Some(s) = v.as_str() { format!("{k}={s}") }
+                        else { format!("{k}={v}") }
+                    })
+                    .collect();
+                if !pairs.is_empty() {
+                    println!("  properties: {}", pairs.join("  "));
+                }
             }
         }
 
-        if !result.thumbnail.is_empty() {
-            println!("  thumbnail : <binary image data>  (250×200  {})",
-                fmt_bytes(result.thumbnail.len() as u64));
+        if let Some(ref media) = result.media {
+            if !media.thumbnail.is_empty() {
+                println!("  thumbnail : <binary image data>  (250×200  {})",
+                    fmt_bytes(media.thumbnail.len() as u64));
+            }
         }
 
-        let strategy = get_str(&result_json, "strategy");
-        if !strategy.is_empty() {
-            println!("  strategy  : {strategy}");
-        }
-
-        if let Some(ref cache_hints) = result.cache {
-            if let Ok(val) = serde_json::to_value(cache_hints) {
-                if let Some(obj) = val.as_object() {
-                    let pairs: Vec<String> = obj.iter()
-                        .map(|(k, v)| {
-                            if let Some(s) = v.as_str() { format!("{k}={s}") }
-                            else { format!("{k}={v}") }
-                        })
-                        .collect();
-                    if !pairs.is_empty() {
-                        println!("  cache     : {}", pairs.join("  "));
+        if let Some(ref cache_str) = result.media.as_ref().and_then(|m| m.cache.as_deref()) {
+            if let Some(hints) = crate::source::CacheHints::decode(cache_str) {
+                if let Ok(val) = serde_json::to_value(&hints) {
+                    if let Some(obj) = val.as_object() {
+                        let pairs: Vec<String> = obj.iter()
+                            .map(|(k, v)| {
+                                if let Some(s) = v.as_str() { format!("{k}={s}") }
+                                else { format!("{k}={v}") }
+                            })
+                            .collect();
+                        if !pairs.is_empty() {
+                            println!("  cache     : {}", pairs.join("  "));
+                        }
                     }
                 }
             }
@@ -627,216 +604,6 @@ pub fn print_thumb_items(items: &[(crate::ThumbResult, crate::ThumbTrace)], show
     }
 }
 
-// ── batch-dir ─────────────────────────────────────────────────────────────────
-
-async fn run_batch_dir(dir: String, output: String, runtime: Arc<Runtime>) {
-    use base64::Engine as _;
-    use std::fs;
-    use crate::{ThumbCook, cook::InputSpec};
-
-    let entries: Vec<std::path::PathBuf> = {
-        let mut v: Vec<_> = match fs::read_dir(&dir) {
-            Ok(rd) => rd
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| p.is_file())
-                .collect(),
-            Err(e) => {
-                eprintln!("error: cannot read directory '{}': {e}", dir);
-                std::process::exit(1);
-            }
-        };
-        v.sort();
-        v
-    };
-
-    if entries.is_empty() {
-        eprintln!("warning: no files found in '{dir}'");
-    }
-
-    let mut results: Vec<(usize, crate::ThumbResult, crate::ThumbTrace)> =
-        Vec::with_capacity(entries.len());
-
-    for (i, path) in entries.iter().enumerate() {
-        let abs = if path.is_absolute() {
-            path.clone()
-        } else {
-            std::env::current_dir().unwrap_or_default().join(path)
-        };
-        let url = format!("file://{}", abs.display());
-        let input = InputSpec { url, cache: None, allow_local: true };
-
-        let (result, trace, mut after) =
-            ThumbCook::from_input(input, Arc::clone(&runtime)).run().await;
-        after.drain_spawn();
-
-        let done = results.len() + 1;
-        let total = entries.len();
-        let filename = entries[i]
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        eprintln!("[{done}/{total}] {filename}");
-        results.push((i, result, trace));
-    }
-
-    let mut html = String::with_capacity(256 * 1024);
-    html.push_str(r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>Thumbrella batch report</title>
-<style>
-  body { font-family: sans-serif; background: #f5f5f5; color: #222; margin: 0; padding: 16px; }
-  h1   { font-size: 1.1rem; color: #555; margin-bottom: 16px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
-  .card { background: #fff; border: 1px solid #ddd; border-radius: 6px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
-  .thumb-wrap { background: #e8e8e8; display: flex; align-items: center; justify-content: center; height: 200px; }
-  .thumb-wrap img { max-width: 100%; max-height: 200px; object-fit: contain; }
-  .thumb-missing { color: #999; font-size: 0.8rem; }
-  .info  { padding: 10px 12px; }
-  .filename { font-size: 0.78rem; color: #555; word-break: break-all; margin-bottom: 6px; }
-  details { margin-top: 6px; }
-  summary { font-size: 0.72rem; color: #777; cursor: pointer; user-select: none; }
-  pre { font-size: 0.68rem; background: #f0f0f0; border: 1px solid #ddd; border-radius: 4px; padding: 8px;
-        overflow-x: auto; white-space: pre-wrap; word-break: break-all; color: #333;
-        margin: 6px 0 0; max-height: 260px; overflow-y: auto; }
-  .status-success { color: #2a7d2a; font-weight: bold; }
-  .status-cached  { color: #2a7d2a; }
-  .status-failed  { color: #c0392b; font-weight: bold; }
-  .status-other   { color: #b07a00; }
-  .thumb-size     { color: #888; font-size: 0.72rem; font-weight: normal; }
-</style>
-</head>
-<body>
-"#);
-
-    html.push_str(&format!(
-        "<h1>Thumbrella batch &mdash; <code>{}</code> &mdash; {} file(s)</h1>\n<div class=\"grid\">\n",
-        html_escape(&dir),
-        results.len()
-    ));
-
-    for (i, result, trace) in &results {
-        let path = &entries[*i];
-        let filename = path.file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
-
-        let thumb_b64 = if result.thumbnail.is_empty() {
-            None
-        } else {
-            Some(base64::engine::general_purpose::STANDARD.encode(&result.thumbnail))
-        };
-
-        let mut result_val = serde_json::to_value(result).unwrap_or_default();
-        if let Some(obj) = result_val.as_object_mut() {
-            obj.remove("thumbnail");
-        }
-        let trace_val = serde_json::to_value(trace).unwrap_or_default();
-
-        let status_str = result_val
-            .get("status")
-            .and_then(|v| v.as_str())
-            .unwrap_or("failed");
-        let status_class = match status_str {
-            "success" => "status-success",
-            "cached"  => "status-cached",
-            "failed"  => "status-failed",
-            _         => "status-other",
-        };
-
-        html.push_str("  <div class=\"card\">\n");
-
-        html.push_str("    <div class=\"thumb-wrap\">");
-        if let Some(b64) = &thumb_b64 {
-            html.push_str(&format!(
-                "<img src=\"data:image/jpeg;base64,{}\" alt=\"{}\">",
-                b64,
-                html_escape(&filename)
-            ));
-        } else {
-            html.push_str("<span class=\"thumb-missing\">no thumbnail</span>");
-        }
-        html.push_str("</div>\n");
-
-        html.push_str("    <div class=\"info\">\n");
-        {
-            let size_str = result.file_size
-                .map(|n| format!(" &nbsp;<span class=\"thumb-size\">{}</span>", fmt_bytes(n)))
-                .unwrap_or_default();
-            let res_str = {
-                let w = result.properties.get("width").and_then(|v| v.as_u64());
-                let h = result.properties.get("height").and_then(|v| v.as_u64());
-                match (w, h) {
-                    (Some(w), Some(h)) => format!(
-                        " &nbsp;<span class=\"thumb-size\">{w}\u{d7}{h}</span>"
-                    ),
-                    _ => String::new(),
-                }
-            };
-            html.push_str(&format!(
-                "      <div class=\"filename\">{}{}{}</div>\n",
-                html_escape(&filename),
-                size_str,
-                res_str,
-            ));
-        }
-        // ── caption line: status • thumb-size • download • cpu ────────────
-        html.push_str(&format!(
-            "      <span class=\"{}\">&#9679; {}</span>",
-            status_class,
-            html_escape(status_str)
-        ));
-        if let Some(b64) = &thumb_b64 {
-            let jpeg_bytes = (b64.len() * 3 / 4) as u64;
-            html.push_str(&format!(
-                " &nbsp;<span class=\"thumb-size\">{}</span>",
-                fmt_bytes(jpeg_bytes)
-            ));
-        }
-        if result.download_size > 0 {
-            html.push_str(&format!(
-                " &nbsp;<span class=\"thumb-size\">&#8595;{}</span>",
-                fmt_bytes(result.download_size)
-            ));
-        }
-        {
-            // CPU time = total - connect - io  (all in the trace)
-            let cpu = (result.duration - trace.io_secs).max(0.0);
-            if cpu > 0.0 {
-                html.push_str(&format!(
-                    " &nbsp;<span class=\"thumb-size\">&#128336;{}</span>",
-                    fmt_secs(cpu)
-                ));
-            }
-        }
-        html.push('\n');
-
-        let result_pretty = serde_json::to_string_pretty(&result_val).unwrap_or_default();
-        html.push_str("      <details><summary>result</summary><pre>");
-        html.push_str(&html_escape(&result_pretty));
-        html.push_str("</pre></details>\n");
-
-        let trace_pretty = serde_json::to_string_pretty(&trace_val).unwrap_or_default();
-        html.push_str("      <details><summary>trace</summary><pre>");
-        html.push_str(&html_escape(&trace_pretty));
-        html.push_str("</pre></details>\n");
-
-        html.push_str("    </div>\n  </div>\n");
-    }
-
-    html.push_str("</div>\n</body>\n</html>\n");
-
-    match fs::write(&output, &html) {
-        Ok(()) => println!("wrote {output}  ({} items)", results.len()),
-        Err(e) => {
-            eprintln!("error: cannot write '{output}': {e}");
-            std::process::exit(1);
-        }
-    }
-}
-
 // ── diag ──────────────────────────────────────────────────────────────────────
 
 fn run_diag(json: bool) {
@@ -870,11 +637,4 @@ pub fn fmt_secs(s: f64) -> String {
     else if s >= 0.001 { format!("{:.1} ms", s * 1_000.0) }
     else if s >= 0.000_001 { format!("{:.0} µs", s * 1_000_000.0) }
     else { format!("{:.0} ns", s * 1_000_000_000.0) }
-}
-
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-     .replace('<', "&lt;")
-     .replace('>', "&gt;")
-     .replace('"', "&quot;")
 }

@@ -33,7 +33,7 @@ use crate::cache::CacheStore;
 use crate::http_buf::PlatformStream;
 use crate::handoff::{HANDSHAKE_HEADER, HandoffResponse, ThumbHandoff};
 use crate::request::CallRequest;
-use crate::result::JobStatus;
+use crate::result::ResultSource;
 use crate::source::CacheHints;
 use crate::tracelog::TraceStore;
 
@@ -66,7 +66,7 @@ pub async fn health() -> Json<Value> {
 ///
 /// # Response
 ///
-/// | Status | Body                | Meaning                            |
+/// | ResultStatus | Body                | Meaning                            |
 /// |--------|---------------------|------------------------------------|
 /// | 200    | JPEG bytes          | Thumbnail produced                 |
 /// | 304    | empty               | Source unchanged (etag matched)    |
@@ -101,11 +101,12 @@ pub async fn thumb(
     let (result, _trace, mut after) = ThumbCook::<PlatformStream>::from_input(input, runtime).run().await;
     after.drain_spawn();
 
-    if result.status == JobStatus::Success {
+    if result.source == Some(ResultSource::NotModified) {
         return StatusCode::NOT_MODIFIED.into_response();
     }
 
-    if result.thumbnail.is_empty() {
+    let thumb = result.media.as_ref().map(|m| &m.thumbnail);
+    if thumb.map_or(true, |t| t.is_empty()) {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": result.message.unwrap_or_default() })))
             .into_response();
     }
@@ -113,7 +114,7 @@ pub async fn thumb(
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "image/jpeg")],
-        Bytes::from(result.thumbnail),
+        Bytes::from(thumb.unwrap().clone()),
     )
         .into_response()
 }
@@ -295,7 +296,9 @@ pub async fn handoff(
 
     // Save bandwidth on tier-to-tier responses: send placeholder token only.
     if result.placeholder.is_some() {
-        result.thumbnail.clear();
+        if let Some(ref mut media) = result.media {
+            media.thumbnail.clear();
+        }
     }
 
     let body = HandoffResponse { result, trace };

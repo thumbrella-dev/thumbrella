@@ -2,7 +2,7 @@
 //!
 //! # Key types
 //!
-//! - [`JobStatus`] — high-level per-item outcome returned to the client.
+//! - [`ResultStatus`] — high-level per-item outcome returned to the client.
 //! - [`ThumbResult`] — the per-item result materialised from [`ThumbCook`] at
 //!   the end of processing.  This is what gets serialised to the client, stored
 //!   in cache, and returned verbatim on a cache hit.
@@ -16,8 +16,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use crate::cook::CallerContext;
-use crate::media::{FileKind, Strategy};
-use crate::source::CacheHints;
+use crate::media::FileKind;
 
 // ── Render handler ────────────────────────────────────────────────────────────
 
@@ -38,26 +37,34 @@ pub enum RenderHandler {
 /// High-level outcome of processing a single item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum JobStatus {
+pub enum ResultStatus {
     Success,
     #[default]
     Failed,
     Overloaded,
     Intermediate,
+
 }
 
-// ── Thumb source ──────────────────────────────────────────────────────────────
+// ── Source ────────────────────────────────────────────────────────────────────
 
-/// How the thumbnail was produced.  ``null`` when status is not ``"success"``.
+/// How the thumbnail was produced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ThumbSource {
+pub enum ResultSource {
     /// Full compute render for this media type.
     Render,
     /// Embedded thumbnail extracted without a full render.
     Shortcut,
     /// Served from server-side cache.
     Cache,
+    /// Client cache hints were valid; upstream resource unchanged.
+    /// `media.thumbnail` is empty — the client should use its cached copy.
+    NotModified,
+    /// Server could not render this media; a placeholder icon was used.
+    Fallback,
+    /// Not used by server, but defined and reserved for client handling.
+    Client,
 }
 
 // ── Call record ───────────────────────────────────────────────────────────────
@@ -74,6 +81,49 @@ pub struct CallRecord {
     pub duration_secs: Option<f64>,
 }
 
+// ── ThumbMedia ────────────────────────────────────────────────────────────────
+
+/// Stable media identity — the reusable, cacheable payload.
+///
+/// Two results for the same file have the same `ThumbMedia`.  Clients can
+/// compare `media` values to deduplicate across requests; the server uses
+/// `media` as the unit of cache storage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThumbMedia {
+    pub url: String,
+    #[serde(with = "base64_bytes")]
+    pub thumbnail: Vec<u8>,
+    pub mime: String,
+    pub file_size: u64,
+    pub kind: FileKind,
+    pub extension: String,
+    /// Format-specific properties (dimensions, color depth, …).
+    #[serde(default)]
+    pub properties: Value,
+    /// Opaque cache token for round-tripping on subsequent requests.
+    ///
+    /// Format: `hex_epoch:base64_blob`.  Clients can check freshness by
+    /// comparing the hex prefix (Unix seconds) against the current time.
+    /// The blob is private server state — do not parse it.
+    #[serde(default)]
+    pub cache: Option<String>,
+}
+
+impl Default for ThumbMedia {
+    fn default() -> Self {
+        Self {
+            url:        String::new(),
+            thumbnail:  Vec::new(),
+            mime:       String::new(),
+            file_size:  0,
+            kind:       FileKind::Unknown,
+            extension:  String::new(),
+            properties: Value::Object(Default::default()),
+            cache:      None,
+        }
+    }
+}
+
 // ── ThumbResult ───────────────────────────────────────────────────────────────
 
 /// Per-item result — the public API output, cache object, and client response.
@@ -81,61 +131,39 @@ pub struct CallRecord {
 /// Materialised from [`ThumbCook`] by [`ThumbCook::to_result`] at the end of
 /// processing.  Stored in cache on `success` and returned verbatim on a cache
 /// hit (with `status` overridden to `success`).
+///
+/// The top-level fields describe *this invocation* (status, timing, source).
+/// The [`media`](ThumbMedia) sub-struct is the stable, reusable payload — two
+/// results for the same file share the same media identity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThumbResult {
     pub url: String,
-    pub status: JobStatus,
-    /// HTTP status code returned by the upstream source fetch.
-    /// `null` when no network request was made (cache hit, client-side freshness).
-    #[serde(default)]
-    pub source_status: Option<u16>,
-    pub duration: f64,
-    pub download_size: u64,
+    pub status: ResultStatus,
     /// Human-readable error/status detail; `None` on clean success.
     pub message: Option<String>,
-    pub strategy: Option<Strategy>,
-    pub placeholder: Option<String>,
-    pub mime: Option<String>,
-    pub file_size: Option<u64>,
-    pub kind: Option<FileKind>,
-    pub extension: Option<String>,
-    /// Format-specific properties (dimensions, color depth, …).  Always present;
-    /// empty object `{}` when no properties were extracted.
-    pub properties: Value,
-    /// Opaque cache token for round-tripping on subsequent requests.
-    ///
-    /// Format: `hex_epoch:base64_blob`.  Clients can check freshness by
-    /// comparing the hex prefix (Unix seconds) against the current time.
-    /// The blob is private server state — do not parse it.
-    #[serde(default, with = "crate::source::cache_wire")]
-    pub cache: Option<CacheHints>,
-    /// Where the thumbnail data came from.
-    /// `null` for fresh renders, ``\"hit\"`` for server-cache hits.
+    /// How the thumbnail was produced.
     #[serde(default)]
-    pub cache_source: Option<ThumbSource>,
-    #[serde(with = "base64_bytes")]
-    pub thumbnail: Vec<u8>,
+    pub source: Option<ResultSource>,
+    pub duration: f64,
+    pub download_size: u64,
+    /// Placeholder token; `Some` when a fallback icon is used.
+    pub placeholder: Option<String>,
+    /// Stable media payload; `None` on total failure.
+    #[serde(default)]
+    pub media: Option<ThumbMedia>,
 }
 
 impl Default for ThumbResult {
     fn default() -> Self {
         Self {
             url:           String::new(),
-            status:        JobStatus::Failed,
+            status:        ResultStatus::Failed,
+            message:       None,
+            source:        None,
             duration:      0.0,
             download_size: 0,
-            message:       None,
-            strategy:      None,
             placeholder:   None,
-            mime:          None,
-            file_size:     None,
-            kind:          None,
-            extension:     None,
-            source_status: None,
-            properties:    Value::Object(Default::default()),
-            cache:         None,
-            cache_source:  None,
-            thumbnail:     Vec::new(),
+            media:         None,
         }
     }
 }
@@ -152,9 +180,7 @@ pub struct ThumbTrace {
     /// RFC 3339 timestamp of when the trace was materialised.
     pub timestamp:    String,
     /// Outcome of the job, mirroring [`ThumbResult::status`].
-    pub status:       JobStatus,
-    /// Rendering strategy used (mirrors [`ThumbResult::strategy`]).
-    pub strategy:     Option<Strategy>,
+    pub status:       ResultStatus,
     /// Media kind detected (mirrors [`ThumbResult::kind`]).
     pub kind:         Option<FileKind>,
     /// File extension detected (mirrors [`ThumbResult::extension`]).
@@ -165,10 +191,6 @@ pub struct ThumbTrace {
     pub cache_key:        Option<String>,
     pub cache_key_source: Option<String>,
     pub source_etag:      Option<String>,
-    /// HTTP status code returned by the upstream source fetch.
-    /// `None` when no network request was made.
-    pub source_status:    Option<u16>,
-
     // ── Download metrics ──────────────────────────────────────────────────────
     pub download_bytes:      u64,
     pub download_tail_bytes: u64,

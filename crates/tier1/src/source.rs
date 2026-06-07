@@ -317,6 +317,24 @@ impl CacheHints {
     pub fn is_fresh(&self) -> bool {
         self.expires_at.map_or(false, |exp| unix_now_secs() < exp)
     }
+
+    /// Create hints that expire in `secs` seconds from now, with no other data.
+    pub fn expiring_in(secs: u64) -> Self {
+        Self {
+            expires_at: Some(unix_now_secs() + secs),
+            ..Default::default()
+        }
+    }
+
+    /// Ensure `expires_at` is at least `secs` from now.  Leaves existing expiry
+    /// unchanged if it is already further out.
+    pub fn with_min_expiry(mut self, secs: u64) -> Self {
+        let floor = unix_now_secs() + secs;
+        if self.expires_at.map_or(true, |e| e < floor) {
+            self.expires_at = Some(floor);
+        }
+        self
+    }
 }
 
 fn unix_now_secs() -> u64 {
@@ -328,57 +346,29 @@ fn unix_now_secs() -> u64 {
 
 // ── Wire format: <hex_epoch>:<base64_blob> ────────────────────────────────────
 
-/// Serde module for the opaque `cache` field on the wire.
-///
-/// Format: `hex_expires_at:base64(binary_blob)`
-///
-/// The hex prefix is a Unix timestamp (seconds).  Clients check freshness by
-/// comparing to `now()` — no decoding needed.  The blob is a compact binary
-/// encoding of the remaining [`CacheHints`] fields; it is private server state
-/// and must be round-tripped unchanged.
-///
-/// # Binary blob layout
-///
-/// One header byte per field, in fixed order:
-///
-/// | Offset | Field                   | Header          | Data                        |
-/// |--------|-------------------------|-----------------|-----------------------------|
-/// | 0      | stale_while_revalidate  | 4 or 0          | u32 big-endian seconds      |
-/// | 1/5    | immutable               | 1 or 0          | (presence only, no data)    |
-/// | 2/6    | etag                    | len or 0        | ASCII bytes                 |
-/// | 3/7+   | last_modified           | len or 0        | ASCII bytes                 |
-///
-/// A header of `0` means the field is absent; any non-zero value is the byte
-/// length of the data that follows.  The decoder stops after 4 fields and
-/// ignores trailing bytes — forward-compatible with future field additions.
-///
-/// Examples:
-/// ```text
-/// "0:"                                    — no cache hints at all
-/// "6a2120c9:AAABDgAAAA5hYmMxMjNkZWY0NTY=" — fresh, swr=1, etag=abc123def456
-/// ```
-///
-/// Use with `#[serde(with = "cache_wire")]` on `Option<CacheHints>` fields.
-pub mod cache_wire {
-    use base64::Engine;
-    use serde::{Deserialize, Deserializer, Serializer};
+impl CacheHints {
+    /// Encode to the opaque wire string for `ThumbResult.cache`.
+    ///
+    /// Format: `hex_expires_at:base64(binary_blob)`
+    ///
+    /// Returns `None` when there are no hints worth encoding (no etag,
+    /// no last_modified, no expiry, no swr, no immutable flag).
+    pub fn encode(&self) -> Option<String> {
+        let has_meaningful = self.etag.is_some()
+            || self.last_modified.is_some()
+            || self.expires_at.is_some()
+            || self.stale_while_revalidate.is_some()
+            || self.immutable;
+        if !has_meaningful {
+            return None;
+        }
 
-    const SEP: char = ':';
-
-    pub fn serialize<S>(value: &Option<super::CacheHints>, s: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let Some(hints) = value else {
-            return s.serialize_none();
-        };
-
-        let epoch = hints.expires_at.unwrap_or(0);
+        let epoch = self.expires_at.unwrap_or(0);
 
         let mut buf = Vec::with_capacity(32);
 
         // Field 0: stale_while_revalidate (u32)
-        if let Some(swr) = hints.stale_while_revalidate {
+        if let Some(swr) = self.stale_while_revalidate {
             buf.push(4);
             buf.extend_from_slice(&swr.to_be_bytes());
         } else {
@@ -386,40 +376,38 @@ pub mod cache_wire {
         }
 
         // Field 1: immutable (bool, presence-only)
-        buf.push(if hints.immutable { 1 } else { 0 });
+        buf.push(if self.immutable { 1 } else { 0 });
 
         // Field 2: etag
-        push_str_field(&mut buf, hints.etag.as_deref());
+        Self::push_str_field(&mut buf, self.etag.as_deref());
 
         // Field 3: last_modified
-        push_str_field(&mut buf, hints.last_modified.as_deref());
+        Self::push_str_field(&mut buf, self.last_modified.as_deref());
 
-        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&buf);
-        s.serialize_str(&format!("{epoch:x}{SEP}{b64}"))
+        let b64 = base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            &buf,
+        );
+        Some(format!("{epoch:x}:{b64}"))
     }
 
-    pub fn deserialize<'de, D>(d: D) -> Result<Option<super::CacheHints>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let Some(wire) = Option::<String>::deserialize(d)? else {
-            return Ok(None);
-        };
-        let (epoch_hex, blob) = wire
-            .split_once(SEP)
-            .ok_or_else(|| serde::de::Error::custom("invalid cache format: missing ':' separator"))?;
+    /// Decode the opaque wire string produced by [`encode`](Self::encode).
+    ///
+    /// Returns `None` when the string is empty or the separator is missing.
+    pub fn decode(wire: &str) -> Option<Self> {
+        let (epoch_hex, blob) = wire.split_once(':')?;
         if blob.is_empty() {
-            return Ok(None);
+            return None;
         }
 
-        let epoch = u64::from_str_radix(epoch_hex, 16)
-            .map_err(|_| serde::de::Error::custom("invalid cache format: bad hex epoch"))?;
-        let buf = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(blob)
-            .map_err(serde::de::Error::custom)?;
+        let epoch = u64::from_str_radix(epoch_hex, 16).ok()?;
+        let buf = base64::Engine::decode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            blob,
+        ).ok()?;
 
         let mut pos = 0;
-        let mut hints = super::CacheHints { expires_at: Some(epoch), ..Default::default() };
+        let mut hints = Self { expires_at: Some(epoch), ..Default::default() };
         if epoch == 0 {
             hints.expires_at = None;
         }
@@ -441,12 +429,12 @@ pub mod cache_wire {
         }
 
         // Field 2: etag
-        hints.etag = take_str_field(&buf, &mut pos).map_err(serde::de::Error::custom)?;
+        hints.etag = Self::take_str_field(&buf, &mut pos);
 
         // Field 3: last_modified
-        hints.last_modified = take_str_field(&buf, &mut pos).map_err(serde::de::Error::custom)?;
+        hints.last_modified = Self::take_str_field(&buf, &mut pos);
 
-        Ok(Some(hints))
+        Some(hints)
     }
 
     fn push_str_field(buf: &mut Vec<u8>, s: Option<&str>) {
@@ -460,83 +448,67 @@ pub mod cache_wire {
         }
     }
 
-    fn take_str_field(buf: &[u8], pos: &mut usize) -> Result<Option<String>, &'static str> {
+    fn take_str_field(buf: &[u8], pos: &mut usize) -> Option<String> {
         if *pos >= buf.len() {
-            return Ok(None);
+            return None;
         }
         let len = buf[*pos] as usize;
         *pos += 1;
         if len == 0 {
-            return Ok(None);
+            return None;
         }
         if *pos + len > buf.len() {
-            return Err("truncated cache blob");
+            return None;
         }
         let s = String::from_utf8_lossy(&buf[*pos..*pos + len]).into_owned();
         *pos += len;
-        Ok(Some(s))
+        Some(s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CacheHints;
+
+    #[test]
+    fn round_trip_full() {
+        let orig = CacheHints {
+            expires_at: Some(1780007113),
+            stale_while_revalidate: Some(3600),
+            immutable: true,
+            etag: Some("\"abc123\"".into()),
+            last_modified: Some("Thu, 01 Jan 2026 00:00:00 GMT".into()),
+        };
+        let wire = orig.encode().expect("should encode");
+        eprintln!("wire: {wire}");
+        let back = CacheHints::decode(&wire).expect("should decode");
+        assert_eq!(back.expires_at, orig.expires_at);
+        assert_eq!(back.stale_while_revalidate, orig.stale_while_revalidate);
+        assert_eq!(back.immutable, orig.immutable);
+        assert_eq!(back.etag, orig.etag);
+        assert_eq!(back.last_modified, orig.last_modified);
     }
 
-    #[cfg(test)]
-    mod tests {
-        use serde::{Deserialize, Serialize};
-        use super::super::CacheHints;
+    #[test]
+    fn round_trip_etag_only() {
+        let orig = CacheHints {
+            etag: Some("\"xyz789\"".into()),
+            ..Default::default()
+        };
+        let wire = orig.encode().expect("should encode");
+        let back = CacheHints::decode(&wire).expect("should decode");
+        assert_eq!(back.etag, orig.etag);
+        assert_eq!(back.expires_at, None);
+    }
 
-        #[derive(Debug, Serialize, Deserialize)]
-        struct TestWrapper {
-            #[serde(default, with = "super", skip_serializing_if = "Option::is_none")]
-            cache: Option<CacheHints>,
-        }
+    #[test]
+    fn encode_none_when_empty() {
+        let hints = CacheHints::default();
+        assert!(hints.encode().is_none());
+    }
 
-        fn round_trip(hints: CacheHints) -> CacheHints {
-            let wrapper = TestWrapper { cache: Some(hints) };
-            let json = serde_json::to_value(&wrapper).unwrap();
-            let obj = json.as_object().unwrap();
-            if obj.is_empty() {
-                // None serialized to nothing
-                return CacheHints::default();
-            }
-            let wire = obj["cache"].as_str().expect("cache should be a string");
-            eprintln!("wire: {wire}");
-            let back: TestWrapper = serde_json::from_value(json).unwrap();
-            back.cache.unwrap_or_default()
-        }
-
-        #[test]
-        fn round_trip_full() {
-            let orig = CacheHints {
-                expires_at: Some(1780007113),
-                stale_while_revalidate: Some(3600),
-                immutable: true,
-                etag: Some("\"abc123\"".into()),
-                last_modified: Some("Thu, 01 Jan 2026 00:00:00 GMT".into()),
-            };
-            let back = round_trip(orig.clone());
-            assert_eq!(back.expires_at, orig.expires_at);
-            assert_eq!(back.stale_while_revalidate, orig.stale_while_revalidate);
-            assert_eq!(back.immutable, orig.immutable);
-            assert_eq!(back.etag, orig.etag);
-            assert_eq!(back.last_modified, orig.last_modified);
-        }
-
-        #[test]
-        fn round_trip_etag_only() {
-            let orig = CacheHints {
-                etag: Some("\"xyz789\"".into()),
-                ..Default::default()
-            };
-            let back = round_trip(orig.clone());
-            assert_eq!(back.etag, orig.etag);
-            assert_eq!(back.expires_at, None);
-        }
-
-        #[test]
-        fn round_trip_none() {
-            let wrapper = TestWrapper { cache: None };
-            let json = serde_json::to_value(&wrapper).unwrap();
-            assert!(json.as_object().unwrap().is_empty(), "None should serialize to absent field");
-            let back: TestWrapper = serde_json::from_value(json).unwrap();
-            assert!(back.cache.is_none());
-        }
+    #[test]
+    fn decode_none_on_empty_blob() {
+        assert!(CacheHints::decode("0:").is_none());
     }
 }

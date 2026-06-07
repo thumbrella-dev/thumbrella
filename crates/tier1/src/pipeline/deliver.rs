@@ -11,7 +11,6 @@ use image::DynamicImage;
 
 use crate::cook::{CookStatus, ThumbCook};
 use crate::http_buf::HttpStream;
-use crate::media::Strategy;
 use crate::spec::ThumbnailConfig;
 
 // ── Pipeline entry point ──────────────────────────────────────────────────────
@@ -19,7 +18,7 @@ use crate::spec::ThumbnailConfig;
 /// Encode `cook.render_image` into the final thumbnail JPEG.
 ///
 /// Assumes `cook.render_image.is_some()` — called only when shortcut has populated it.
-/// Sets `cook.out_thumbnail`, `status = Complete`, and `out_strategy = Render`.
+/// Sets `cook.out_thumbnail` and `status = Complete`.
 pub async fn deliver<S: HttpStream>(cook: &mut ThumbCook<S>) {
     let Some(img) = cook.render_image.take() else { return };
     cook.render_resolution = Some([img.width(), img.height()]);
@@ -61,7 +60,6 @@ pub async fn deliver<S: HttpStream>(cook: &mut ThumbCook<S>) {
     let deliver_secs    = t0.elapsed().as_secs_f64();
     let thumbnail_bytes = jpeg.len() as u64;
     cook.out_thumbnail        = jpeg;
-    cook.out_strategy         = Some(Strategy::Render);
     cook.tel_deliver_secs     = deliver_secs;
     cook.tel_thumbnail_bytes  = Some(thumbnail_bytes);
     cook.status               = CookStatus::Complete;

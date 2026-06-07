@@ -66,9 +66,9 @@ pub use renderer::{InProcessRenderer, RenderCook, RenderOutput, SharedRenderer, 
 pub use spec::ShortcutLimits;
 pub use dispatch::{ThumbRoute, FormatEntry, route, format_manifest};
 pub use handoff::{HandoffResponse, ThumbHandoff};
-pub use media::{FileKind, Strategy};
+pub use media::FileKind;
 pub use request::{CallRequest, ThumbInput, ThumbObject};
-pub use result::{CallRecord, CallResponse, JobStatus, RenderHandler, ThumbResult, ThumbTrace};
+pub use result::{CallRecord, CallResponse, ResultStatus, RenderHandler, ResultSource, ThumbMedia, ThumbResult, ThumbTrace};
 pub use source::{CacheHints, SourceRef, canonical_url};
 pub use url_safety::{is_safe_url, url_host_allowed};
 

@@ -65,8 +65,8 @@ use crate::cache::{CacheStore, render_cost_from_secs};
 use crate::fetch_guard::{OriginBackoffCache, UrlFailureCache};
 use crate::handoff::{HandoffInflight, HandoffResponse};
 use crate::http_buf::{HttpBuffer, HttpStream};
-use crate::media::{FileKind, Strategy};
-use crate::result::{JobStatus, RenderHandler, ThumbResult, ThumbSource, ThumbTrace};
+use crate::media::FileKind;
+use crate::result::{ResultStatus, RenderHandler, ResultSource, ThumbMedia, ThumbResult, ThumbTrace};
 use crate::source::CacheHints;
 use crate::spec::ShortcutLimits;
 use crate::tracelog::TraceStore;
@@ -80,7 +80,7 @@ use crate::renderer::{RenderCook, SharedRenderer};
 /// to decide whether to continue.  Any step that hits a terminal condition sets
 /// this and returns immediately; no other sentinel is needed.
 ///
-/// Maps to [`JobStatus`] via [`ThumbCook::to_result`] for the client view.
+/// Maps to [`ResultStatus`] via [`ThumbCook::to_result`] for the client view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CookStatus {
     /// Pipeline is running — the only "keep going" state.
@@ -336,8 +336,6 @@ pub struct ThumbCook<S: HttpStream> {
     // ── Output fields — written as steps complete ────────────────────────────
     /// The encoded JPEG thumbnail bytes.
     pub out_thumbnail: Vec<u8>,
-    /// Processing strategy that produced the thumbnail.
-    pub out_strategy: Option<Strategy>,
     /// Human-readable error/status message; empty on success.
     pub out_message: String,
     /// Stable token identifying the placeholder image, when applicable.
@@ -414,7 +412,6 @@ impl<S: HttpStream> ThumbCook<S> {
             render_video_seek_secs:   None,
             render_is_progressive_partial: false,
             out_thumbnail:       Vec::new(),
-            out_strategy:        None,
             out_message:         String::new(),
             out_placeholder:     None,
             cache_hit:           None,
@@ -588,35 +585,36 @@ impl<S: HttpStream> ThumbCook<S> {
     /// Materialise the client-facing [`ThumbResult`].  Called once at end of `run()`.
     pub fn to_result(&self) -> ThumbResult {
         let status = match self.status {
-            CookStatus::Processing | CookStatus::Complete => JobStatus::Success,
-            CookStatus::Fresh => JobStatus::Success,
-            CookStatus::Failed      => JobStatus::Failed,
-            CookStatus::Overloaded => JobStatus::Overloaded,
-            CookStatus::Intermediate   => JobStatus::Intermediate,
+            CookStatus::Processing | CookStatus::Complete => ResultStatus::Success,
+            CookStatus::Fresh => ResultStatus::Success,
+            CookStatus::Failed      => ResultStatus::Failed,
+            CookStatus::Overloaded => ResultStatus::Overloaded,
+            CookStatus::Intermediate   => ResultStatus::Intermediate,
         };
         ThumbResult {
             url:           self.input.url.clone(),
             status,
-            source_status: if self.http_status == 0 { None } else { Some(self.http_status) },
             duration:      self.out_duration,
             download_size: self.out_download_bytes,
             message:       if self.out_message.is_empty() { None } else { Some(self.out_message.clone()) },
-            strategy:      self.out_strategy,
-            thumbnail:     self.out_thumbnail.clone(),
             placeholder:   self.out_placeholder.clone(),
-            mime:          self.media.mime.clone(),
-            file_size:     self.media.file_size,
-            kind:          self.media.kind,
-            extension:     self.media.extension.clone(),
-            properties:    self.media.properties.clone().unwrap_or_else(|| Value::Object(Default::default())),
-            cache:         self.src.cache_hints.clone(),
-            cache_source:  if self.status == CookStatus::Fresh {
-                Some(ThumbSource::Cache)
-            } else if matches!(self.out_strategy, Some(Strategy::Embedded)) {
-                Some(ThumbSource::Shortcut)
+            source:        if self.status == CookStatus::Fresh {
+                Some(ResultSource::NotModified)
+            } else if self.out_placeholder.is_some() {
+                Some(ResultSource::Fallback)
             } else {
-                Some(ThumbSource::Render)
+                Some(ResultSource::Render)
             },
+            media:         Some(ThumbMedia {
+                url:        self.input.url.clone(),
+                thumbnail:  self.out_thumbnail.clone(),
+                mime:       self.media.mime.clone().unwrap_or_default(),
+                file_size:  self.media.file_size.unwrap_or(0),
+                kind:       self.media.kind.unwrap_or(FileKind::Unknown),
+                extension:  self.media.extension.clone().unwrap_or_default(),
+                properties: self.media.properties.clone().unwrap_or_else(|| Value::Object(Default::default())),
+                cache:      self.src.cache_hints.as_ref().and_then(|h| h.encode()),
+            }),
         }
     }
 
@@ -625,27 +623,27 @@ impl<S: HttpStream> ThumbCook<S> {
     /// Used by streaming batch responses to send a placeholder-backed snapshot
     /// after inspect/shortcut and before render or handoff begins.
     pub fn to_progress_result(&self, duration: f64) -> ThumbResult {
+        let kind = self.media.kind.unwrap_or(FileKind::Unknown);
         ThumbResult {
             url:           self.input.url.clone(),
-            status:        JobStatus::Intermediate,
-            source_status: None,
+            status:        ResultStatus::Intermediate,
             duration,
             download_size: self.out_download_bytes.max(self.http_bytes_fetched()),
             message:       None,
-            strategy:      self.out_strategy,
-            thumbnail:     crate::assets::placeholder_for_kind(
-                               self.media.kind.unwrap_or_default()
-                           ).to_vec(),
             placeholder:   Some(self.out_placeholder.clone().unwrap_or_else(|| {
-                               kind_slug(self.media.kind.unwrap_or_default()).to_string()
+                               kind_slug(kind).to_string()
                            })),
-            mime:          self.media.mime.clone(),
-            file_size:     self.media.file_size,
-            kind:          self.media.kind,
-            extension:     self.media.extension.clone(),
-            properties:    self.media.properties.clone().unwrap_or_else(|| Value::Object(Default::default())),
-            cache:         self.src.cache_hints.clone(),
-            cache_source:  None,
+            source:        None,
+            media:         Some(ThumbMedia {
+                url:        self.input.url.clone(),
+                thumbnail:  crate::assets::placeholder_for_kind(kind).to_vec(),
+                mime:       self.media.mime.clone().unwrap_or_default(),
+                file_size:  self.media.file_size.unwrap_or(0),
+                kind,
+                extension:  self.media.extension.clone().unwrap_or_default(),
+                properties: self.media.properties.clone().unwrap_or_else(|| Value::Object(Default::default())),
+                cache:      self.src.cache_hints.as_ref().and_then(|h| h.encode()),
+            }),
         }
     }
 
@@ -662,11 +660,11 @@ impl<S: HttpStream> ThumbCook<S> {
         let timestamp = String::new();
 
         let status = match self.status {
-            CookStatus::Processing | CookStatus::Complete => JobStatus::Success,
-            CookStatus::Fresh => JobStatus::Success,
-            CookStatus::Failed      => JobStatus::Failed,
-            CookStatus::Overloaded => JobStatus::Overloaded,
-            CookStatus::Intermediate   => JobStatus::Intermediate,
+            CookStatus::Processing | CookStatus::Complete => ResultStatus::Success,
+            CookStatus::Fresh => ResultStatus::Success,
+            CookStatus::Failed      => ResultStatus::Failed,
+            CookStatus::Overloaded => ResultStatus::Overloaded,
+            CookStatus::Intermediate   => ResultStatus::Intermediate,
         };
 
         #[cfg(feature = "native")]
@@ -680,14 +678,12 @@ impl<S: HttpStream> ThumbCook<S> {
         ThumbTrace {
             timestamp,
             status,
-            strategy:            self.out_strategy,
             kind:                self.media.kind,
             extension:           self.media.extension.clone(),
             canonical_url:       self.src.canonical_url.clone(),
             cache_key:           self.src.cache_key.clone(),
             cache_key_source:    self.src.cache_key_source.clone(),
             source_etag:         self.src.cache_hints.as_ref().and_then(|h| h.etag.clone()),
-            source_status:       if self.http_status == 0 { None } else { Some(self.http_status) },
             download_bytes:      self.out_download_bytes,
             download_tail_bytes: self.tel_download_tail_bytes,
             io_secs:             self.tel_connect_secs + self.tel_io_secs,
@@ -750,16 +746,18 @@ impl<S: HttpStream> ThumbCook<S> {
         let trace = &remote.trace;
 
         self.status             = cook_status_from_job(res.status);
-        self.out_thumbnail      = res.thumbnail.clone();
-        self.out_strategy       = res.strategy;
         self.out_message        = res.message.clone().unwrap_or_default();
         self.out_placeholder    = res.placeholder.clone();
         self.out_download_bytes = local_bytes.saturating_add(res.download_size);
-        self.media.mime         = res.mime.clone();
-        self.media.file_size    = res.file_size;
-        self.media.kind         = res.kind;
-        self.media.extension    = res.extension.clone();
-        self.media.properties   = Some(res.properties.clone());
+
+        if let Some(ref media) = res.media {
+            self.out_thumbnail      = media.thumbnail.clone();
+            self.media.mime         = Some(media.mime.clone());
+            self.media.file_size    = Some(media.file_size);
+            self.media.kind         = Some(media.kind);
+            self.media.extension    = Some(media.extension.clone());
+            self.media.properties   = Some(media.properties.clone());
+        }
 
         self.tel_job_tier_override   = Some(trace.job_tier);
         self.tel_version_override    = Some(trace.version.clone());
@@ -840,19 +838,23 @@ impl<S: HttpStream> ThumbCook<S> {
             if let Some((cached, _backend_name)) = self.runtime.cache.check(&pre_key).await {
                 // If the cached hints say the resource is still fresh,
                 // return the cached result without any HTTP request.
-                if cached.cache.as_ref().map_or(false, |h| h.is_fresh()) {
+                let decoded = cached.media.as_ref()
+                    .and_then(|m| m.cache.as_deref())
+                    .and_then(CacheHints::decode);
+                if decoded.as_ref().map_or(false, |h| h.is_fresh()) {
                     self.http_close().await;
-                    self.out_thumbnail      = cached.thumbnail;
-                    self.out_strategy       = cached.strategy;
+                    if let Some(ref media) = cached.media {
+                        self.out_thumbnail      = media.thumbnail.clone();
+                        self.media.mime         = Some(media.mime.clone());
+                        self.media.file_size    = Some(media.file_size);
+                        self.media.kind         = Some(media.kind);
+                        self.media.extension    = Some(media.extension.clone());
+                        self.media.properties   = Some(media.properties.clone());
+                    }
                     self.out_message        = cached.message.unwrap_or_default();
-                    self.out_placeholder    = cached.placeholder;
+                    self.out_placeholder    = cached.placeholder.clone();
                     self.out_download_bytes = cached.download_size;
-                    self.media.mime         = cached.mime;
-                    self.media.file_size    = cached.file_size;
-                    self.media.kind         = cached.kind;
-                    self.media.extension    = cached.extension;
-                    self.media.properties   = Some(cached.properties);
-                    self.src.cache_hints    = cached.cache.clone();
+                    self.src.cache_hints    = decoded;
                     self.cache_hit          = Some("workers-kv".to_string());
                     self.status             = CookStatus::Complete;
                     self.out_duration       = t0.elapsed().as_secs_f64();
@@ -861,7 +863,7 @@ impl<S: HttpStream> ThumbCook<S> {
 
                 // Stale — use the cached freshness hints as conditional
                 // request headers so connect can get a 304 instead of 200.
-                self.input.cache = cached.cache.clone();
+                self.input.cache = decoded;
                 pre_cached = Some(cached);
             }
         }
@@ -877,17 +879,20 @@ impl<S: HttpStream> ThumbCook<S> {
                 // just confirm it's still valid — no thumbnail needed.
                 // When we did a KV-assisted conditional fetch, return the KV data.
                 if let Some(cached) = pre_cached {
-                    self.out_thumbnail      = cached.thumbnail;
-                    self.out_strategy       = cached.strategy;
+                    if let Some(ref media) = cached.media {
+                        self.out_thumbnail      = media.thumbnail.clone();
+                        self.media.mime         = Some(media.mime.clone());
+                        self.media.file_size    = Some(media.file_size);
+                        self.media.kind         = Some(media.kind);
+                        self.media.extension    = Some(media.extension.clone());
+                        self.media.properties   = Some(media.properties.clone());
+                    }
                     self.out_message        = cached.message.unwrap_or_default();
-                    self.out_placeholder    = cached.placeholder;
+                    self.out_placeholder    = cached.placeholder.clone();
                     self.out_download_bytes = cached.download_size;
-                    self.media.mime         = cached.mime;
-                    self.media.file_size    = cached.file_size;
-                    self.media.kind         = cached.kind;
-                    self.media.extension    = cached.extension;
-                    self.media.properties   = Some(cached.properties);
-                    self.src.cache_hints    = cached.cache;
+                    self.src.cache_hints    = cached.media.as_ref()
+                        .and_then(|m| m.cache.as_deref())
+                        .and_then(CacheHints::decode);
                     self.cache_hit          = Some("workers-kv".to_string());
                 }
                 // pre_cached is None when caller provided hints → empty not_modified.
@@ -930,17 +935,20 @@ impl<S: HttpStream> ThumbCook<S> {
             if let Some(ref key) = self.src.cache_key.clone() {
             if let Some((cached, backend_name)) = self.runtime.cache.check(key).await {
                 self.http_close().await;
-                self.out_thumbnail     = cached.thumbnail;
-                self.out_strategy      = cached.strategy;
+                if let Some(ref media) = cached.media {
+                    self.out_thumbnail     = media.thumbnail.clone();
+                    self.media.mime        = Some(media.mime.clone());
+                    self.media.file_size   = Some(media.file_size);
+                    self.media.kind        = Some(media.kind);
+                    self.media.extension   = Some(media.extension.clone());
+                    self.media.properties  = Some(media.properties.clone());
+                }
                 self.out_message       = cached.message.unwrap_or_default();
-                self.out_placeholder   = cached.placeholder;
+                self.out_placeholder   = cached.placeholder.clone();
                 self.out_download_bytes = cached.download_size;
-                self.media.mime        = cached.mime;
-                self.media.file_size   = cached.file_size;
-                self.media.kind        = cached.kind;
-                self.media.extension   = cached.extension;
-                self.media.properties  = Some(cached.properties);
-                self.src.cache_hints   = cached.cache.clone();
+                self.src.cache_hints   = cached.media.as_ref()
+                    .and_then(|m| m.cache.as_deref())
+                    .and_then(CacheHints::decode);
                 self.cache_hit         = Some(backend_name.to_string());
                 self.status            = CookStatus::Complete;
                 self.out_duration      = t0.elapsed().as_secs_f64();
@@ -1174,12 +1182,23 @@ impl<S: HttpStream> ThumbCook<S> {
                 // If the pipeline failed at the render step (e.g. unsupported
                 // codec, EXR, SVG) promote the status to Unavailable — we know
                 // what the file is, we just can't render it yet.
-                if self.status == CookStatus::Failed {
+                let tried_render = self.status == CookStatus::Failed;
+                if tried_render {
                     self.status = CookStatus::Overloaded;
                 }
                 let slug = kind_slug(kind);
                 self.out_thumbnail   = crate::assets::placeholder_for_kind(kind).to_vec();
                 self.out_placeholder = Some(slug.to_string());
+
+                // Inject a cache expiry so clients know when to retry.
+                // - No renderer for this format → 1 day.
+                // - Tried and fell back → upstream cache with 1 h floor.
+                let hints = self.src.cache_hints.take();
+                self.src.cache_hints = if tried_render {
+                    Some(hints.unwrap_or_default().with_min_expiry(3600))
+                } else {
+                    Some(CacheHints::expiring_in(86400))
+                };
             } else {
                 // Kind never determined (network error, bad URL, early abort) —
                 // use the FAILED icon only for genuine infrastructure errors.
@@ -1221,12 +1240,12 @@ fn kind_slug(kind: crate::media::FileKind) -> &'static str {
     }
 }
 
-fn cook_status_from_job(status: JobStatus) -> CookStatus {
+fn cook_status_from_job(status: ResultStatus) -> CookStatus {
     match status {
-        JobStatus::Success => CookStatus::Complete,
-        JobStatus::Failed => CookStatus::Failed,
-        JobStatus::Overloaded => CookStatus::Overloaded,
-        JobStatus::Intermediate => CookStatus::Intermediate,
+        ResultStatus::Success => CookStatus::Complete,
+        ResultStatus::Failed => CookStatus::Failed,
+        ResultStatus::Overloaded => CookStatus::Overloaded,
+        ResultStatus::Intermediate => CookStatus::Intermediate,
     }
 }
 
