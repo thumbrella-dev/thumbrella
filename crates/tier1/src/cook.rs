@@ -92,8 +92,10 @@ pub enum CookStatus {
     Fresh,
     /// Terminal failure — message is in `out_message`.
     Failed,
-    /// No higher-tier renderer is configured or available.
+    /// Server is at capacity; client should retry later.
     Overloaded,
+    /// No renderer available for this format — placeholder returned.
+    Placeholder,
     /// Handed off to a higher-tier renderer; streaming result pending.
     Intermediate,
 }
@@ -588,7 +590,8 @@ impl<S: HttpStream> ThumbCook<S> {
             CookStatus::Processing | CookStatus::Complete => ResultStatus::Success,
             CookStatus::Fresh => ResultStatus::Success,
             CookStatus::Failed      => ResultStatus::Failed,
-            CookStatus::Overloaded => ResultStatus::Overloaded,
+            CookStatus::Overloaded  => ResultStatus::Overloaded,
+            CookStatus::Placeholder => ResultStatus::Placeholder,
             CookStatus::Intermediate   => ResultStatus::Intermediate,
         };
         ThumbResult {
@@ -663,7 +666,8 @@ impl<S: HttpStream> ThumbCook<S> {
             CookStatus::Processing | CookStatus::Complete => ResultStatus::Success,
             CookStatus::Fresh => ResultStatus::Success,
             CookStatus::Failed      => ResultStatus::Failed,
-            CookStatus::Overloaded => ResultStatus::Overloaded,
+            CookStatus::Overloaded  => ResultStatus::Overloaded,
+            CookStatus::Placeholder => ResultStatus::Placeholder,
             CookStatus::Intermediate   => ResultStatus::Intermediate,
         };
 
@@ -993,11 +997,9 @@ impl<S: HttpStream> ThumbCook<S> {
                 return self.finish(after);
             }
 
-            if !self.ctx_handoff && self.status.is_processing() && self.render_image.is_none() {
-                if let Some(progress) = on_progress.as_mut() {
-                    progress(self.to_progress_result(t0.elapsed().as_secs_f64()));
-                }
-            }
+            // Intermediate progress: only emit when there's a real async gap
+            // (handoff to higher tier).  In-process renderer results are immediate
+            // — success or placeholder — so an intermediate just adds noise.
         }
 
         // ── deliver (when shortcut decoded an image) ──────────────────────────
@@ -1063,7 +1065,7 @@ impl<S: HttpStream> ThumbCook<S> {
             }
             // Renderer returned false (format not recognised).
             // It must not have called take_reader() in this case.
-            self.status = CookStatus::Overloaded;
+            self.status = CookStatus::Placeholder;
             self.out_message = "format not handled by the registered renderer".to_string();
             self.out_duration = t0.elapsed().as_secs_f64();
             return self.finish(after);
@@ -1095,6 +1097,13 @@ impl<S: HttpStream> ThumbCook<S> {
             };
 
             if let Some(url) = target_url.as_deref() {
+                // Emit intermediate progress before the async handoff gap.
+                if !self.ctx_handoff {
+                    if let Some(progress) = on_progress.as_mut() {
+                        progress(self.to_progress_result(t0.elapsed().as_secs_f64()));
+                    }
+                }
+
                 // ── Single-flight deduplication ───────────────────────────────────
                 // Use the content-addressed cache_key as the dedup key so all
                 // concurrent requests for the same content version share one
@@ -1162,7 +1171,7 @@ impl<S: HttpStream> ThumbCook<S> {
         }
 
         self.http_close().await;
-        self.status = CookStatus::Overloaded;
+        self.status = CookStatus::Placeholder;
         self.out_message = "no higher-tier renderer is configured".to_string();
         self.out_duration = t0.elapsed().as_secs_f64();
         self.finish(after)
@@ -1180,11 +1189,11 @@ impl<S: HttpStream> ThumbCook<S> {
             if let Some(kind) = self.media.kind {
                 // Kind was identified: use the kind-specific placeholder.
                 // If the pipeline failed at the render step (e.g. unsupported
-                // codec, EXR, SVG) promote the status to Unavailable — we know
+                // codec, EXR, SVG) promote the status to Placeholder — we know
                 // what the file is, we just can't render it yet.
                 let tried_render = self.status == CookStatus::Failed;
                 if tried_render {
-                    self.status = CookStatus::Overloaded;
+                    self.status = CookStatus::Placeholder;
                 }
                 let slug = kind_slug(kind);
                 self.out_thumbnail   = crate::assets::placeholder_for_kind(kind).to_vec();
@@ -1245,6 +1254,7 @@ fn cook_status_from_job(status: ResultStatus) -> CookStatus {
         ResultStatus::Success => CookStatus::Complete,
         ResultStatus::Failed => CookStatus::Failed,
         ResultStatus::Overloaded => CookStatus::Overloaded,
+        ResultStatus::Placeholder => CookStatus::Placeholder,
         ResultStatus::Intermediate => CookStatus::Intermediate,
     }
 }

@@ -375,11 +375,12 @@ pub fn inject_exif_comment(jpeg: &[u8]) -> Vec<u8> {
 
     // ── Prepend APP1 wrapper ──────────────────────────────────────────────
     // APP1 structure:  FF E1  len16  "Exif\0\0"  [TIFF]
-    let payload = 6 + tiff.len() as u16; // "Exif\0\0" + TIFF (len includes itself)
-    let mut app1 = Vec::with_capacity(2 + 2 + payload as usize);
+    // len includes itself (2) + "Exif\0\0" (6) + TIFF bytes.
+    let app1_len = 2u16 + 6 + tiff.len() as u16;
+    let mut app1 = Vec::with_capacity(2 + 2 + app1_len as usize);
     app1.push(0xFF);
     app1.push(0xE1);
-    app1.extend_from_slice(&payload.to_be_bytes());
+    app1.extend_from_slice(&app1_len.to_be_bytes());
     app1.extend_from_slice(b"Exif\x00\x00");
     app1.extend_from_slice(&tiff);
 

@@ -41,9 +41,11 @@ pub enum ResultStatus {
     Success,
     #[default]
     Failed,
+    /// Server is at capacity; client should retry later.
     Overloaded,
+    /// No renderer available for this format (permanent, not retryable).
+    Placeholder,
     Intermediate,
-
 }
 
 // ── Source ────────────────────────────────────────────────────────────────────
