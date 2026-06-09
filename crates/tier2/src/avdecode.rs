@@ -754,9 +754,9 @@ unsafe fn decode_inner(
         codec:           codec_name,
         video_seek_secs: applied_seek_secs,
         properties:      Some(json!({
-            "width":  reported_w,
-            "height": reported_h,
-            "depth":  depth,
+            "width_pixels":  reported_w,
+            "height_pixels": reported_h,
+            "bits_per_pixel":  depth,
         })),
     })
 }

@@ -140,6 +140,12 @@ pub fn route(kind: FileKind, extension: Option<&str>) -> ThumbRoute {
         (FileKind::Geometry, _) =>
             ThumbRoute { tier: 3 },
 
+        // ── Tier 3 — ffmpeg CLI: formats not in tier2's slim static build ────
+        // JPEG2000 is supported by the system ffmpeg in the tier3 Docker image
+        // (--enable-libopenjpeg) but not by tier2's minimal static build.
+        (FileKind::Image, Some("jp2" | "j2k")) =>
+            ThumbRoute { tier: 3 },
+
         // Catch-all: tier-1 placeholder.
         _ => ThumbRoute { tier: 1 },
     }

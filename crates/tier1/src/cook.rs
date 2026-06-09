@@ -86,7 +86,7 @@ pub enum CookStatus {
     /// Pipeline is running — the only "keep going" state.
     #[default]
     Processing,
-    /// Thumbnail produced successfully.
+    /// Thumbnail produced successfully (may be a placeholder).
     Complete,
     /// Conditional request; source unchanged since caller's supplied validator.
     Fresh,
@@ -94,8 +94,6 @@ pub enum CookStatus {
     Failed,
     /// Server is at capacity; client should retry later.
     Overloaded,
-    /// No renderer available for this format — placeholder returned.
-    Placeholder,
     /// Handed off to a higher-tier renderer; streaming result pending.
     Intermediate,
 }
@@ -342,6 +340,8 @@ pub struct ThumbCook<S: HttpStream> {
     pub out_message: String,
     /// Stable token identifying the placeholder image, when applicable.
     pub out_placeholder: Option<String>,
+    /// When set, overrides the source in `to_result()` for placeholder paths.
+    pub placeholder_source: Option<ResultSource>,
     /// Cache outcome — `None` until the cache check runs.
     pub cache_hit: Option<String>,
     /// Wall-clock seconds to generate this result.
@@ -416,6 +416,7 @@ impl<S: HttpStream> ThumbCook<S> {
             out_thumbnail:       Vec::new(),
             out_message:         String::new(),
             out_placeholder:     None,
+            placeholder_source:  None,
             cache_hit:           None,
             out_duration:        0.0,
             out_download_bytes:  0,
@@ -591,7 +592,6 @@ impl<S: HttpStream> ThumbCook<S> {
             CookStatus::Fresh => ResultStatus::Success,
             CookStatus::Failed      => ResultStatus::Failed,
             CookStatus::Overloaded  => ResultStatus::Overloaded,
-            CookStatus::Placeholder => ResultStatus::Placeholder,
             CookStatus::Intermediate   => ResultStatus::Intermediate,
         };
         ThumbResult {
@@ -603,8 +603,12 @@ impl<S: HttpStream> ThumbCook<S> {
             placeholder:   self.out_placeholder.clone(),
             source:        if self.status == CookStatus::Fresh {
                 Some(ResultSource::NotModified)
+            } else if let Some(ps) = self.placeholder_source {
+                Some(ps)
             } else if self.out_placeholder.is_some() {
                 Some(ResultSource::Fallback)
+            } else if self.render_renderer.as_deref().is_some_and(|r| r.starts_with("shortcut/")) {
+                Some(ResultSource::Shortcut)
             } else {
                 Some(ResultSource::Render)
             },
@@ -667,7 +671,6 @@ impl<S: HttpStream> ThumbCook<S> {
             CookStatus::Fresh => ResultStatus::Success,
             CookStatus::Failed      => ResultStatus::Failed,
             CookStatus::Overloaded  => ResultStatus::Overloaded,
-            CookStatus::Placeholder => ResultStatus::Placeholder,
             CookStatus::Intermediate   => ResultStatus::Intermediate,
         };
 
@@ -1065,7 +1068,8 @@ impl<S: HttpStream> ThumbCook<S> {
             }
             // Renderer returned false (format not recognised).
             // It must not have called take_reader() in this case.
-            self.status = CookStatus::Placeholder;
+            self.status = CookStatus::Complete;
+            self.placeholder_source = Some(ResultSource::Fallback);
             self.out_message = "format not handled by the registered renderer".to_string();
             self.out_duration = t0.elapsed().as_secs_f64();
             return self.finish(after);
@@ -1171,7 +1175,8 @@ impl<S: HttpStream> ThumbCook<S> {
         }
 
         self.http_close().await;
-        self.status = CookStatus::Placeholder;
+        self.status = CookStatus::Complete;
+        self.placeholder_source = Some(ResultSource::Placeholder);
         self.out_message = "no higher-tier renderer is configured".to_string();
         self.out_duration = t0.elapsed().as_secs_f64();
         self.finish(after)
@@ -1193,7 +1198,8 @@ impl<S: HttpStream> ThumbCook<S> {
                 // what the file is, we just can't render it yet.
                 let tried_render = self.status == CookStatus::Failed;
                 if tried_render {
-                    self.status = CookStatus::Placeholder;
+                    self.status = CookStatus::Complete;
+                    self.placeholder_source = Some(ResultSource::Fallback);
                 }
                 let slug = kind_slug(kind);
                 self.out_thumbnail   = crate::assets::placeholder_for_kind(kind).to_vec();
@@ -1254,7 +1260,6 @@ fn cook_status_from_job(status: ResultStatus) -> CookStatus {
         ResultStatus::Success => CookStatus::Complete,
         ResultStatus::Failed => CookStatus::Failed,
         ResultStatus::Overloaded => CookStatus::Overloaded,
-        ResultStatus::Placeholder => CookStatus::Placeholder,
         ResultStatus::Intermediate => CookStatus::Intermediate,
     }
 }
@@ -1302,7 +1307,16 @@ impl<S: HttpStream + Send + 'static> crate::renderer::RenderCook for ThumbCook<S
         self.render_video_seek_secs = Some(secs);
     }
     fn set_media_properties(&mut self, props: serde_json::Value) {
-        self.media.properties = Some(props);
+        // Merge into existing properties so inspect/shortcut dimensions survive.
+        let mut merged = self.media.properties.take().unwrap_or_default();
+        if let (Some(existing), Some(new)) = (merged.as_object_mut(), props.as_object()) {
+            for (k, v) in new {
+                existing.insert(k.clone(), v.clone());
+            }
+        } else {
+            merged = props;
+        }
+        self.media.properties = Some(merged);
     }
     fn fail_cook(&mut self, msg: &str) {
         self.fail(msg);

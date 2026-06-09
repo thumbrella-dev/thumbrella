@@ -50,10 +50,21 @@ pub async fn deliver<S: HttpStream>(cook: &mut ThumbCook<S>) {
     }
     buf.apply_vignette(config.vignette_strength);
     let quality = if pixel_art { config.pixel_art_quality } else { config.jpeg_quality };
-    let jpeg = match buf.encode_jpeg(quality) {
+    let mut jpeg = match buf.encode_jpeg(quality) {
         Ok(j) => j,
         Err(_) => return,
     };
+    // If the thumbnail is unexpectedly large, re-encode at reduced quality.
+    // Some images (high-frequency textures, noise) produce pathological JPEGs
+    // even at small pixel dimensions.  A single retry at ~60% quality brings
+    // them back under budget without visible degradation at thumbnail size.
+    const SIZE_CAP: usize = 8192;
+    if jpeg.len() > SIZE_CAP && quality > 10 {
+        let fallback_quality = ((quality as f32) * 0.4) as u8;
+        if let Ok(smaller) = buf.encode_jpeg(fallback_quality.max(10)) {
+            jpeg = smaller;
+        }
+    }
     let jpeg = inject_exif_comment(&jpeg);
     drop(buf);
 

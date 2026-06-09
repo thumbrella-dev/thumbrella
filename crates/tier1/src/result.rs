@@ -43,8 +43,6 @@ pub enum ResultStatus {
     Failed,
     /// Server is at capacity; client should retry later.
     Overloaded,
-    /// No renderer available for this format (permanent, not retryable).
-    Placeholder,
     Intermediate,
 }
 
@@ -63,8 +61,10 @@ pub enum ResultSource {
     /// Client cache hints were valid; upstream resource unchanged.
     /// `media.thumbnail` is empty — the client should use its cached copy.
     NotModified,
-    /// Server could not render this media; a placeholder icon was used.
+    /// A registered renderer tried but could not handle this format.
     Fallback,
+    /// No renderer was registered for this format at all.
+    Placeholder,
     /// Not used by server, but defined and reserved for client handling.
     Client,
 }
@@ -92,16 +92,10 @@ pub struct CallRecord {
 /// `media` as the unit of cache storage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThumbMedia {
-    pub url: String,
-    #[serde(with = "base64_bytes")]
-    pub thumbnail: Vec<u8>,
-    pub mime: String,
     pub file_size: u64,
     pub kind: FileKind,
     pub extension: String,
-    /// Format-specific properties (dimensions, color depth, …).
-    #[serde(default)]
-    pub properties: Value,
+    pub mime: String,
     /// Opaque cache token for round-tripping on subsequent requests.
     ///
     /// Format: `hex_epoch:base64_blob`.  Clients can check freshness by
@@ -109,6 +103,12 @@ pub struct ThumbMedia {
     /// The blob is private server state — do not parse it.
     #[serde(default)]
     pub cache: Option<String>,
+    /// Format-specific properties (dimensions, color depth, …).
+    #[serde(default)]
+    pub properties: Value,
+    #[serde(with = "base64_bytes")]
+    pub thumbnail: Vec<u8>,
+    pub url: String,
 }
 
 impl Default for ThumbMedia {

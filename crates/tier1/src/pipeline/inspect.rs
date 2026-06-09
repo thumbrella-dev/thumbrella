@@ -134,13 +134,25 @@ fn sniff(bytes: &[u8], url: &str, content_type: Option<&str>) -> (FileKind, Stri
 
 /// Extract pixel dimensions from an image byte prefix without a full decode.
 ///
-/// Dimension headers are always within the first few KB for all formats the
-/// `image` crate supports, so this works on the same prefix read by `inspect`
-/// with no additional network I/O.
+/// For JPEG: manually skips APP marker segments in case the EXIF APP1 segment
+/// is large enough to push the SOF marker beyond the available prefix (e.g.
+/// files with embedded full-resolution thumbnails).  Falls back to the `image`
+/// crate for all other formats.
 ///
 /// Writes any properties it can determine into `props`, leaving existing keys
 /// untouched if it cannot determine a value.  Prefer no entry over a wrong one.
 pub(super) fn inspect_image_properties(bytes: &[u8], props: &mut serde_json::Value) {
+    // JPEG: parse marker structure ourselves so we skip large APP segments.
+    if bytes.len() >= 4 && bytes[0] == 0xFF && bytes[1] == 0xD8 {
+        if let Some((w, h, bpp)) = jpeg_sof_dimensions(bytes) {
+            let obj = props.as_object_mut().expect("properties is always a JSON object");
+            obj.insert("width_pixels".into(),  w.into());
+            obj.insert("height_pixels".into(), h.into());
+            obj.insert("bits_per_pixel".into(), bpp.into());
+        }
+        return;
+    }
+
     let cursor = Cursor::new(bytes);
     let Ok(reader) = ImageReader::new(cursor).with_guessed_format() else { return };
     let Ok(decoder) = reader.into_decoder() else { return };
@@ -159,6 +171,96 @@ pub(super) fn inspect_image_properties(bytes: &[u8], props: &mut serde_json::Val
     obj.insert("width_pixels".into(),  w.into());
     obj.insert("height_pixels".into(), h.into());
     obj.insert("bits_per_pixel".into(), bits_per_pixel.into());
+}
+
+/// Walk JPEG markers starting after SOI (offset 2), skipping APP segments
+/// by their length field, and return `(width, height, bits_per_pixel)` from
+/// the first SOF0/SOF1/SOF2 marker found.  Returns `None` if no SOF is
+/// reachable within `bytes`.
+pub(super) fn jpeg_sof_dimensions(bytes: &[u8]) -> Option<(u32, u32, u32)> {
+    let mut pos: usize = 2;
+    while pos + 8 < bytes.len() {
+        if bytes[pos] != 0xFF {
+            return None;
+        }
+        let marker = bytes[pos + 1];
+        // Stuffed byte (FF 00)
+        if marker == 0x00 {
+            pos += 2;
+            continue;
+        }
+        // SOF markers: baseline, extended sequential, progressive
+        if matches!(marker, 0xC0..=0xC2) {
+            let h = u16::from_be_bytes([bytes[pos + 5], bytes[pos + 6]]) as u32;
+            let w = u16::from_be_bytes([bytes[pos + 7], bytes[pos + 8]]) as u32;
+            let components = bytes[pos + 9];
+            let bpp = (components as u32) * (bytes[pos + 4] as u32);
+            return Some((w, h, bpp));
+        }
+        // SOS — scan data follows, SOF must precede it
+        if marker == 0xDA {
+            return None;
+        }
+        // All other markers have a 2-byte length (includes the length field itself)
+        if pos + 4 > bytes.len() {
+            return None;
+        }
+        let seg_len = u16::from_be_bytes([bytes[pos + 2], bytes[pos + 3]]) as usize;
+        if seg_len < 2 {
+            return None;
+        }
+        pos += 2 + seg_len;
+    }
+    None
+}
+
+/// Walk JPEG markers from a file prefix (starting at SOI) and return the byte
+/// offset where APP segments end — the position just before DQT/DHT/SOF/SOS.
+/// This is the offset from which a targeted read can reliably find the SOF
+/// marker.  Returns `None` if the header is invalid or SOS is reached first.
+pub(super) fn jpeg_app_segments_end(bytes: &[u8]) -> Option<u64> {
+    if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
+        return None;
+    }
+    let mut pos: usize = 2;
+    while pos + 4 <= bytes.len() {
+        if bytes[pos] != 0xFF {
+            return None;
+        }
+        let marker = bytes[pos + 1];
+        if marker == 0x00 {
+            pos += 2;
+            continue;
+        }
+        // Terminal markers — stop walking, return current position
+        if matches!(marker, 0xC0..=0xC2 | 0xC4 | 0xDB | 0xDA) {
+            return Some(pos as u64);
+        }
+        let seg_len = u16::from_be_bytes([bytes[pos + 2], bytes[pos + 3]]) as usize;
+        if seg_len < 2 {
+            return None;
+        }
+        pos += 2 + seg_len;
+    }
+    // Fell off the end of the buffer — the SOF is beyond this prefix.
+    None
+}
+
+/// Scan arbitrary bytes for a JPEG SOF marker and return dimensions.
+/// Unlike [`jpeg_sof_dimensions`], this does not require the bytes to start
+/// at SOI — it searches for the first FF C0/C1/C2 marker.
+pub(super) fn find_sof_in_bytes(bytes: &[u8]) -> Option<(u32, u32, u32)> {
+    for i in 0..bytes.len().saturating_sub(9) {
+        if bytes[i] == 0xFF && matches!(bytes[i+1], 0xC0..=0xC2) {
+            let h   = u16::from_be_bytes([bytes[i+5], bytes[i+6]]) as u32;
+            let w   = u16::from_be_bytes([bytes[i+7], bytes[i+8]]) as u32;
+            let bpp = (bytes[i+9] as u32) * (bytes[i+4] as u32);
+            if w > 0 && h > 0 {
+                return Some((w, h, bpp));
+            }
+        }
+    }
+    None
 }
 
 // ── Extension helpers ─────────────────────────────────────────────────────────

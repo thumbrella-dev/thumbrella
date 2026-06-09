@@ -244,7 +244,7 @@ fn decode_jxl(reader: &mut dyn ReadSeek) -> Option<RenderOutput> {
         renderer:        Some("jxl_oxide".into()),
         codec:           None,
         video_seek_secs: None,
-        properties:      Some(serde_json::json!({ "width": width, "height": height, "depth": depth })),
+        properties:      Some(serde_json::json!({ "width_pixels": width, "height_pixels": height, "bits_per_pixel": depth })),
     })
 }
 
@@ -255,18 +255,34 @@ fn render_svg(reader: &mut dyn ReadSeek) -> Option<RenderOutput> {
     let mut svg_str = String::new();
     reader.read_to_string(&mut svg_str).ok()?;
 
-    let tree = resvg::usvg::Tree::from_str(&svg_str, &resvg::usvg::Options::default()).ok()?;
-    let size = tree.size();
-    let (w, h) = (size.width().ceil() as u32, size.height().ceil() as u32);
-    if w == 0 || h == 0 { return None; }
+    // Speed-optimised: disable AA (Lanczos3 downscale handles quality) and
+    // use nearest-neighbor for embedded images.
+    let mut svg_opts = resvg::usvg::Options::default();
+    svg_opts.shape_rendering = resvg::usvg::ShapeRendering::OptimizeSpeed;
+    svg_opts.image_rendering = resvg::usvg::ImageRendering::OptimizeSpeed;
 
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h)?;
-    resvg::render(&tree, resvg::usvg::Transform::default(), &mut pixmap.as_mut());
-
-    let rgba = pixmap.take();
-    let img = DynamicImage::ImageRgba8(image::RgbaImage::from_raw(w, h, rgba)?);
+    let tree = resvg::usvg::Tree::from_str(&svg_str, &svg_opts).ok()?;
+    let svg_size = tree.size();
+    let (svg_w, svg_h) = (svg_size.width() as f64, svg_size.height() as f64);
+    if svg_w <= 0.0 || svg_h <= 0.0 { return None; }
 
     let cfg = ThumbnailConfig::CANONICAL;
+    // Render directly at the canonical thumbnail size (no oversampling —
+    // speed-optimised settings skip AA, so there's no quality benefit).
+    let scale = (cfg.exact_width as f64 / svg_w)
+        .min(cfg.exact_height as f64 / svg_h)
+        .min(1.0);
+    let rw = (svg_w * scale).ceil() as u32;
+    let rh = (svg_h * scale).ceil() as u32;
+
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(rw, rh)?;
+    let transform = resvg::usvg::Transform::from_scale(scale as f32, scale as f32);
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+
+    let rgba = pixmap.take();
+    let img = DynamicImage::ImageRgba8(image::RgbaImage::from_raw(rw, rh, rgba)?);
+    let (src_w, src_h) = (svg_w.ceil() as u32, svg_h.ceil() as u32);
+
     let img = pre_scale(img, cfg.exact_width, cfg.exact_height);
 
     Some(RenderOutput {
@@ -274,7 +290,7 @@ fn render_svg(reader: &mut dyn ReadSeek) -> Option<RenderOutput> {
         renderer:        Some("resvg".into()),
         codec:           None,
         video_seek_secs: None,
-        properties:      Some(serde_json::json!({ "width": w, "height": h, "depth": 32 })),
+        properties:      Some(serde_json::json!({ "width_pixels": src_w, "height_pixels": src_h, "bits_per_pixel": 32 })),
     })
 }
 
@@ -378,7 +394,7 @@ fn extract_raw_preview(
         renderer:        Some("raw_preview".into()),
         codec:           None,
         video_seek_secs: None,
-        properties: Some(serde_json::json!({ "width": src_w, "height": src_h, "depth": depth })),
+        properties: Some(serde_json::json!({ "width_pixels": src_w, "height_pixels": src_h, "bits_per_pixel": depth })),
     })
 }
 
@@ -709,7 +725,7 @@ fn collect_and_decode_image_crate(
         renderer:        Some("image_crate".into()),
         codec:           None,
         video_seek_secs: None,
-        properties: Some(serde_json::json!({ "width": src_w, "height": src_h, "depth": depth })),
+        properties: Some(serde_json::json!({ "width_pixels": src_w, "height_pixels": src_h, "bits_per_pixel": depth })),
     })
 }
 

@@ -107,7 +107,7 @@ pcm_s32le,pcm_u8,pcm_alaw,pcm_mulaw,pcm_f32le \
     --enable-demuxer=mov,mp4,m4v,matroska,webm,avi,mpegts,mpegps,mpegvideo,\
 flv,asf,rm,rmvb,ogg,mxf,gxf,lxf,yuv4mpegpipe,rawvideo,\
 image2,gif,image_jpeg_pipe,image_png_pipe,image_bmp_pipe,image_tiff_pipe,ico,\
-image_webp_pipe,image_psd_pipe,dds,\
+image_webp_pipe,image_psd_pipe,dds,image_j2k_pipe,\
 ape,aiff,au,wav,mp3,aac,flac,ogg \
     \
     --enable-parser=h264,hevc,vp8,vp9,av1,mpeg4video,mpeg4,mpegaudio,\

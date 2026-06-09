@@ -57,6 +57,11 @@ enum Command {
         #[arg(long)]
         json: bool,
 
+        /// Include full base64 thumbnail data in JSON output.
+        /// Without this flag, large thumbnails are replaced with a placeholder.
+        #[arg(long)]
+        raw: bool,
+
         /// Show internal trace fields (download metrics, render path, IDs, …).
         #[arg(long)]
         trace: bool,
@@ -153,7 +158,7 @@ where
 
     match cli.command {
         Command::Serve                                   => run_server(runtime.unwrap()).await,
-        Command::Thumb { urls, cache, json, trace }      => run_thumb(urls, cache, json, trace, runtime.unwrap()).await,
+        Command::Thumb { urls, cache, json, raw, trace } => run_thumb(urls, cache, json, raw, trace, runtime.unwrap()).await,
         Command::Render { src, dst }                     => run_render(src, dst, runtime.unwrap()).await,
         Command::Diag { json }                           => run_diag(json),
         Command::StreamBatch { server, args, cache } => {
@@ -282,7 +287,7 @@ pub fn promote_url(raw: &str) -> String {
     format!("file://{}", abs.display())
 }
 
-async fn run_thumb(urls: Vec<String>, cache_str: Option<String>, json: bool, show_trace: bool, runtime: Arc<Runtime>) {
+async fn run_thumb(urls: Vec<String>, cache_str: Option<String>, json: bool, raw: bool, show_trace: bool, runtime: Arc<Runtime>) {
     use futures::stream::{FuturesUnordered, StreamExt};
     use crate::{ThumbCook, cook::InputSpec};
     use crate::source::CacheHints;
@@ -306,10 +311,14 @@ async fn run_thumb(urls: Vec<String>, cache_str: Option<String>, json: bool, sho
     if json {
         let json_items: Vec<serde_json::Value> = items.iter().map(|(result, trace)| {
             let mut result_val = serde_json::to_value(result).unwrap();
-            if let Some(obj) = result_val.as_object_mut() {
-                if let Some(thumb) = obj.get("thumbnail") {
-                    if thumb.as_str().is_some_and(|s| !s.is_empty()) {
-                        obj.insert("thumbnail".into(), serde_json::Value::String("<binary image data>".into()));
+            if !raw {
+                if let Some(obj) = result_val.as_object_mut() {
+                    if let Some(media) = obj.get_mut("media").and_then(|m| m.as_object_mut()) {
+                        if let Some(thumb) = media.get("thumbnail") {
+                            if thumb.as_str().is_some_and(|s| !s.is_empty()) {
+                                media.insert("thumbnail".into(), serde_json::Value::String("<binary image data>".into()));
+                            }
+                        }
                     }
                 }
             }

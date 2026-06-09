@@ -225,15 +225,31 @@ async fn try_exif_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
 
     if embedded.len() < 4 || embedded[0] != 0xFF || embedded[1] != 0xD8 { return; }
 
+    // When EXIF IFD0/ExifIFD don't have dimension tags, try to locate the
+    // real JPEG SOF marker.  First attempt: walk APP segments in the cached
+    // 4 KB header and read 512 bytes starting after the last APP.  If the
+    // header scan falls off the end (APP segments extend beyond 4 KB), fall
+    // back to reading up to 64 KB from offset 0.
+    let source_dims: Option<(u32, u32)> = if let Some(dims) = source_dims {
+        Some(dims)
+    } else if let Some(sof_offset) = super::inspect::jpeg_app_segments_end(&header) {
+        cook.http_read_at(sof_offset, 512).await.ok()
+            .and_then(|chunk| super::inspect::find_sof_in_bytes(&chunk))
+            .map(|(w, h, _)| (w, h))
+    } else {
+        // Header scan couldn't find the SOF boundary — read a larger prefix.
+        let Ok(big) = cook.http_read_at(0, 65536).await else { return };
+        super::inspect::jpeg_sof_dimensions(&big).map(|(w, h, _)| (w, h))
+    };
+    let Some((prop_w, prop_h)) = source_dims else { return };
+
     let Ok(img) = image::load_from_memory(&embedded) else { return };
-    let (thumb_w, thumb_h) = (img.width(), img.height());
     let color_type = img.color();
     let dl_bytes = cook.http_bytes_fetched();
 
     let img = pre_scale_to_target(img, config.exact_width, config.exact_height);
     cook.http_close().await;
 
-    let (prop_w, prop_h) = source_dims.unwrap_or((thumb_w, thumb_h));
     cook.render_renderer    = Some("shortcut/exif".into());
     cook.render_handler     = RenderHandler::Builtin;
     cook.out_download_bytes = dl_bytes;
@@ -392,7 +408,9 @@ async fn try_zip_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     cook.tel_decode_secs         = render_secs;
     cook.out_download_bytes      = dl_bytes;
     cook.tel_download_tail_bytes = tail_bytes;
-    if src_w > 0 && src_h > 0 {
+    // Document thumbnails are just previews — the source file isn't an image
+    // so reporting the thumbnail's pixel dimensions as "properties" is misleading.
+    if cook.media.kind != Some(FileKind::Document) && src_w > 0 && src_h > 0 {
         cook.media.properties = Some(image_properties(src_w, src_h, color_type));
     }
     cook.render_image = Some(img);
@@ -400,6 +418,15 @@ async fn try_zip_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
 
 /// Core ZIP extraction logic.  Returns `(image_bytes, total_dl, tail_size)` or
 /// `None` when the shortcut cannot be applied.
+///
+/// Phase 1: fetch the tail (Central Directory) via a Range request so we can
+/// discover where the thumbnail lives.  Phase 2: if the thumbnail sits inside
+/// the tail window, extract it directly (zero extra I/O).  If it is outside
+/// the tail, read it via the existing HttpBuffer's `read_at` — this streams
+/// through the already-open connection on tier 2 rather than opening a third
+/// Range request.  Tier 1 gives up here (the out-of-tail path is guarded by
+/// `zip_tail_size`, which is small on tier 1 — if the thumbnail was far enough
+/// to miss the tail, tier 1 hands off to tier 2).
 async fn zip_extract<S: HttpStream>(
     cook: &mut ThumbCook<S>,
 ) -> Option<(Vec<u8>, u64, u64)> {
@@ -412,8 +439,6 @@ async fn zip_extract<S: HttpStream>(
 
     // When the tail window covers the entire file, reuse the already-open
     // streaming connection rather than opening a redundant Range request.
-    // This avoids double-counting inspect-phase bytes in the download metric
-    // and eliminates a second TCP connection for small archives.
     let tail = if tail_start == 0 {
         cook.http_read_at(0, file_size as usize).await.ok()?
     } else {
@@ -421,76 +446,80 @@ async fn zip_extract<S: HttpStream>(
         cook.http_fetch_range(tail_start, tail_size).await.ok()?
     };
 
-    let image_bytes = zip_parse_and_extract(&tail, tail_start)?;
-    let dl_bytes    = cook.http_bytes_fetched();
+    // Phase 1: find the thumbnail entry from the Central Directory.
+    let entry = zip_find_thumb_entry(&tail, tail_start)?;
+
+    let image_bytes = if entry.local_offset >= tail_start {
+        // Thumbnail data sits within the tail window — extract inline,
+        // zero extra I/O.
+        zip_extract_from_buffer(&tail, &entry, tail_start)?
+    } else {
+        // Thumbnail is outside the tail window.  Read it through the
+        // existing HttpBuffer (`read_at`) rather than opening a third
+        // Range request.  The buffer streams from wherever it is now
+        // (typically still near the front from inspect) and pages the
+        // data into its cache.  IO time is free on Cloudflare Workers
+        // and continues the already-open connection on tier 2.
+        //
+        // Tier 1's small `zip_tail_size` (128 KiB) means this path is
+        // only reached when the thumbnail is far from the tail — in
+        // practice tier 1 gives up here (the read would exceed the CPU
+        // budget) and hands off to tier 2, where the buffer is already
+        // open and streaming is cheap.
+        let fetch_size = (entry.comp_size as u64)
+            .saturating_add(512); // local header + filename + extra overhead
+        let lh_data = cook
+            .http_read_at(entry.local_offset, fetch_size as usize)
+            .await
+            .ok()?;
+        zip_extract_from_buffer(&lh_data, &entry, entry.local_offset)?
+    };
+
+    let dl_bytes = cook.http_bytes_fetched();
     Some((image_bytes, dl_bytes, tail_size as u64))
 }
 
-/// Parse the ZIP tail buffer, locate the thumbnail entry, and return its
-/// (decompressed) bytes.  All offsets are translated using `tail_start`.
-fn zip_parse_and_extract(tail: &[u8], tail_start: u64) -> Option<Vec<u8>> {
-    // ── Locate EOCD ───────────────────────────────────────────────────────
+/// Find the thumbnail entry from a ZIP tail buffer.  Returns the entry metadata
+/// (local offset, sizes, method) or `None` if no thumbnail is found or the CD
+/// is incomplete.
+fn zip_find_thumb_entry(tail: &[u8], tail_start: u64) -> Option<ZipEntry> {
     let eocd = zip_find_eocd(tail)?;
-    if eocd + 22 > tail.len() {
-        return None;
-    }
+    if eocd + 22 > tail.len() { return None; }
 
-    // EOCD layout (no comment variant — 22 bytes):
-    //   0  PK\x05\x06 (4)
-    //   4  disk# (2) | start_disk# (2) | entries_this_disk (2) | entries_total (2)
-    //  12  cd_size (4) | cd_offset (4) | comment_len (2)
     let cd_size   = zip_u32(tail, eocd + 12) as usize;
     let cd_offset = zip_u32(tail, eocd + 16) as u64;
 
-    // ── Locate Central Directory in the tail ──────────────────────────────
-    if cd_offset < tail_start {
-        return None; // CD not captured — thumbnail could be anywhere
-    }
+    if cd_offset < tail_start { return None; }
     let cd_in_tail = (cd_offset - tail_start) as usize;
     let cd_end     = cd_in_tail.checked_add(cd_size)?;
-    if cd_end > tail.len() {
-        return None;
-    }
+    if cd_end > tail.len() { return None; }
 
-    // ── Find thumbnail entry ──────────────────────────────────────────────
-    let entry = zip_find_thumb(&tail[cd_in_tail..cd_end])?;
+    zip_find_thumb(&tail[cd_in_tail..cd_end])
+}
 
-    // ── Locate local file header in the tail ─────────────────────────────
-    if entry.local_offset < tail_start {
-        return None; // thumbnail data starts before our tail window — give up
-    }
-    let lh_off = (entry.local_offset - tail_start) as usize;
-    if lh_off + 30 > tail.len() {
-        return None;
-    }
-    let lh = &tail[lh_off..];
-    if &lh[..4] != b"PK\x03\x04" {
-        return None;
-    }
+/// Extract and decompress thumbnail data from a buffer that contains the local
+/// file header + compressed data, starting at `buf_start` (absolute file offset
+/// of the first byte in `buf`).
+fn zip_extract_from_buffer(buf: &[u8], entry: &ZipEntry, buf_start: u64) -> Option<Vec<u8>> {
+    if entry.local_offset < buf_start { return None; }
+    let lh_off = (entry.local_offset - buf_start) as usize;
+    if lh_off + 30 > buf.len() { return None; }
+    let lh = &buf[lh_off..];
+    if &lh[..4] != b"PK\x03\x04" { return None; }
 
-    // Local file header layout (30 bytes fixed + variable):
-    //   0  PK\x03\x04 (4) | min_ver (2) | flags (2) | method (2)
-    //   8  mtime (2) | mdate (2) | crc32 (4)
-    //  16  comp_size (4) | uncomp_size (4)
-    //  24  — (this is actually at 14,18 but layout below is cumulative from 0)
-    // The two variable-length fields at bytes 26–27 and 28–29:
-    //  26  fname_len (2) | extra_len (2)
     let fname_len = zip_u16(lh, 26) as usize;
     let extra_len = zip_u16(lh, 28) as usize;
 
     let data_off = lh_off + 30 + fname_len + extra_len;
     let data_end = data_off.checked_add(entry.comp_size as usize)?;
-    if data_end > tail.len() {
-        return None; // data extends beyond our tail window
-    }
+    if data_end > buf.len() { return None; }
 
-    let compressed = &tail[data_off..data_end];
+    let compressed = &buf[data_off..data_end];
 
-    // ── Decompress ────────────────────────────────────────────────────────
     match entry.method {
-        0 => Some(compressed.to_vec()), // stored — no compression
+        0 => Some(compressed.to_vec()),
         8 => zip_inflate(compressed, entry.uncomp_size as usize),
-        _ => None, // unsupported compression method
+        _ => None,
     }
 }
 
@@ -770,6 +799,104 @@ fn find_png_exif_shortcut(bytes: &[u8]) -> Option<JpegExifShortcutInfo> {
         pos += 8 + chunk_len + 4;
     }
     None
+}
+
+/// Read image dimensions from a WebP header.
+/// Lossy (VP8):  bytes 23-25 contain a 14-bit width, 14-bit height.
+/// Lossless (VP8L): bytes 21-24 contain a 14-bit width+height.
+/// Extended (VP8X): bytes 24-27 contain 24-bit width+1, 24-bit height+1.
+fn webp_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 30 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
+        return None;
+    }
+    match &bytes[12..16] {
+        b"VP8 " if bytes.len() >= 30 => {
+            // Lossy: 3-byte frame header at offset 20, then width/height
+            let w = u16::from_le_bytes([bytes[26], bytes[27]]) as u32 & 0x3FFF;
+            let h = u16::from_le_bytes([bytes[28], bytes[29]]) as u32 & 0x3FFF;
+            if w > 0 && h > 0 { Some((w, h)) } else { None }
+        }
+        b"VP8L" if bytes.len() >= 25 => {
+            // Lossless: 5-byte signature at offset 20
+            let bits = u32::from_le_bytes([bytes[21], bytes[22], bytes[23], bytes[24]]);
+            let w = (bits & 0x3FFF) + 1;
+            let h = ((bits >> 14) & 0x3FFF) + 1;
+            if w > 1 && h > 1 { Some((w, h)) } else { None }
+        }
+        b"VP8X" if bytes.len() >= 30 => {
+            // Extended: 24-bit width+1, 24-bit height+1
+            let w = u32::from_le_bytes([bytes[24], bytes[25], bytes[26], 0]) + 1;
+            let h = u32::from_le_bytes([bytes[27], bytes[28], bytes[29], 0]) + 1;
+            if w > 1 && h > 1 { Some((w, h)) } else { None }
+        }
+        _ => None,
+    }
+}
+
+// ── WebP: EXIF chunk (tail-read) ─────────────────────────────────────────────
+
+/// WebP stores EXIF data in an `EXIF` chunk that follows the VP8/VP8L image
+/// data — it is NOT reachable from the standard 4 KiB header scan.  This
+/// function reads the tail of the file, scans for the `EXIF` chunk marker,
+/// and delegates to [`parse_tiff_exif_thumbnail`].
+async fn try_webp_exif_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
+    let file_size = match cook.http_stream_len() {
+        Some(s) if s > 16 => s,
+        _ => return,
+    };
+
+    // WebP chunks are typically < 1 MB; the EXIF chunk lives near the end.
+    let tail_size = (file_size as usize).min(131_072);
+    let tail_offset = file_size.saturating_sub(tail_size as u64);
+    let tail = match cook.http_read_at(tail_offset, tail_size).await {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+
+    // Scan for the 'EXIF' chunk marker.  The tail starts mid-VP8-data so we
+    // can't walk chunk headers — search for the 4-byte marker directly.
+    let mut pos = 0usize;
+    while pos + 12 <= tail.len() {
+        if &tail[pos..pos+4] == b"EXIF" {
+            let chunk_len = u32::from_le_bytes([tail[pos+4], tail[pos+5], tail[pos+6], tail[pos+7]]) as usize;
+            let data_start = pos + 8;
+            let data_end = (data_start + chunk_len).min(tail.len());
+            let file_offset = tail_offset + data_start as u64;
+            if let Some(info) = parse_tiff_exif_thumbnail(&tail[data_start..data_end], file_offset) {
+                let embedded = match cook.http_read_at(info.thumb_file_offset, info.thumb_len).await {
+                    Ok(b) => b,
+                    Err(_) => return,
+                };
+                if embedded.len() < 4 || embedded[0] != 0xFF || embedded[1] != 0xD8 {
+                    return;
+                }
+
+                let source_dims: Option<(u32, u32)> = if let Some(dims) = info.source_dims {
+                    Some(dims)
+                } else {
+                    // WebP header contains dimensions; parse from the first 30 bytes.
+                    cook.http_read_at(0, 4096).await.ok()
+                        .and_then(|hdr| webp_dimensions(&hdr))
+                };
+                let Some((prop_w, prop_h)) = source_dims else { return };
+
+                let Ok(img) = image::load_from_memory(&embedded) else { return };
+                let color_type = img.color();
+                let dl_bytes = cook.http_bytes_fetched();
+                let img = pre_scale_to_target(img, ThumbnailConfig::CANONICAL.exact_width, ThumbnailConfig::CANONICAL.exact_height);
+                cook.http_close().await;
+                cook.render_renderer    = Some("shortcut/webp_exif".into());
+                cook.render_handler     = RenderHandler::Builtin;
+                cook.out_download_bytes = dl_bytes;
+                if prop_w > 0 && prop_h > 0 {
+                    cook.media.properties = Some(image_properties(prop_w, prop_h, color_type));
+                }
+                cook.render_image = Some(img);
+                return;
+            }
+        }
+        pos += 1; // scan byte-by-byte — tail starts mid-VP8-data
+    }
 }
 
 // ── TIFF: embedded JPEG preview ───────────────────────────────────────────────
@@ -1145,7 +1272,12 @@ async fn try_audio_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     }
 
     // ── Scan ID3v2 frames for APIC cover art ──────────────────────────────
-    let image_bytes = id3.and_then(|h| find_id3_apic(&tag_bytes, h.version_major));
+    let image_bytes = id3.and_then(|h| {
+        let result = find_id3_apic(&tag_bytes, h.version_major);
+        if result.is_none() {
+        }
+        result
+    });
 
     let Some(image_bytes) = image_bytes else {
         // No cover art, but we still have audio metadata.
@@ -1159,17 +1291,8 @@ async fn try_audio_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     cook.http_close().await;
 
     let Ok(img) = image::load_from_memory(&image_bytes) else { return };
-    let (src_w, src_h) = (img.width(), img.height());
-    let color_type = img.color();
-
     let img = pre_scale_to_target(img, config.exact_width, config.exact_height);
 
-    if src_w > 0 && src_h > 0 {
-        let img_props = image_properties(src_w, src_h, color_type);
-        if let (Some(obj), Some(img_obj)) = (props.as_object_mut(), img_props.as_object()) {
-            for (k, v) in img_obj { obj.insert(k.clone(), v.clone()); }
-        }
-    }
     cook.media.properties = Some(props);
 
     cook.render_renderer    = Some("shortcut/audio".into());
@@ -1287,7 +1410,10 @@ fn find_id3_apic(bytes: &[u8], version_major: u8) -> Option<Vec<u8>> {
         if frame_id == b"APIC" {
             let data_end = data_start.checked_add(frame_size)?.min(bytes.len());
             let apic_data = &bytes[data_start..data_end];
-            return extract_apic_image(apic_data);
+            let result = extract_apic_image(apic_data);
+            if result.is_none() {
+            }
+            return result;
         }
 
         // Advance to next frame.
@@ -1309,7 +1435,7 @@ fn is_valid_frame_id(id: &[u8]) -> bool {
         && id[0].is_ascii_uppercase()
         && id[1].is_ascii_alphanumeric() && id[1].is_ascii_uppercase()
         && id[2].is_ascii_alphanumeric() && id[2].is_ascii_uppercase()
-        && id[3].is_ascii_alphanumeric() && id[3].is_ascii_uppercase()
+        && id[3].is_ascii_alphanumeric()
 }
 
 /// Extract the raw image bytes from an APIC frame data payload.
@@ -1417,6 +1543,10 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     let is_tiff = matches!(ext, "tiff");
     if is_jpeg || is_tiff || ext == "png" {
         try_exif_shortcut(cook).await;
+        if !cook.http_is_open() { return; }
+    }
+    if ext == "webp" {
+        try_webp_exif_shortcut(cook).await;
         if !cook.http_is_open() { return; }
     }
 
