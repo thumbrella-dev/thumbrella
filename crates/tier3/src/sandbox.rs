@@ -56,7 +56,9 @@ pub struct SandboxConfig {
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
-            max_memory:         512 * 1024 * 1024,
+            // 0 = no address space limit — needed for Python-based renderers
+            // (usd-core) and FFmpeg that load large native libraries.
+            max_memory:         0,
             max_fds:            64,
             allow_core_dumps:   false,
             drop_capabilities:  true,

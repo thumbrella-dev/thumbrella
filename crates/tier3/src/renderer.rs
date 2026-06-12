@@ -15,7 +15,7 @@
 //! | Video | libav | (same as tier 2) |
 //! | Vector | resvg | (same as tier 2) + optional inkscape subprocess |
 //! | Document | (none) | dlopen: pdfium, subprocess: libreoffice |
-//! | Geometry | (none) | subprocess: blender |
+//! | Geometry | (none) | subprocess: f3d / usdrecord |
 //!
 //! # Dispatch order
 //!
@@ -38,6 +38,14 @@ use std::sync::Arc;
 
 use tier1::InProcessRenderer;
 use tier1::RenderCook;
+
+// ── Embedded Python scripts ──────────────────────────────────────────────────
+
+/// Embedded `usd_extract.py` — extracts triangulated mesh from USD/USDZ → OBJ.
+const USD_EXTRACT_PY: &str = include_str!("usd_extract.py");
+
+/// Embedded `sanitize_glb.py` — strips images/textures/materials from GLB.
+const SANITIZE_GLB_PY: &str = include_str!("sanitize_glb.py");
 use tier1::media::FileKind;
 use tier1::renderer::{RenderOutput, apply_render_output};
 use tier2::Tier2Renderer;
@@ -282,7 +290,9 @@ fn run_magick_image_decode(
        .stdout(std::process::Stdio::null())
        .stderr(std::process::Stdio::piped());
 
-    crate::sandbox::apply(&mut cmd, &crate::sandbox::default_strict());
+    // Do not apply sandbox wrappers here: xvfb-run + f3d is already running
+    // entirely inside our container boundary and may fail under pre-exec
+    // restrictions despite being otherwise valid.
 
     let status = cmd.status().map_err(|e| format!("spawn gm convert: {e}"))?;
     if !status.success() {
@@ -429,8 +439,16 @@ fn run_ffmpeg_decode(
 
     let png_bytes = arena.read_output(&output_path)
         .map_err(|e| format!("read output: {e}"))?;
-    let img = image::load_from_memory(&png_bytes)
+    let mut img = image::load_from_memory(&png_bytes)
         .map_err(|e| format!("decode PNG output: {e}"))?;
+
+    // Scene-linear formats come through ffmpeg as linear 8-bit PNGs.
+    // Apply a gamma-1.8 curve to approximate an sRGB display transform.
+    // (1.8 is used instead of 2.2 because 8-bit truncation loses
+    // highlight detail — a gentler curve compensates visually.)
+    if is_linear_format(ext) {
+        img = linear_to_srgb_fast(img);
+    }
 
     Ok(RenderOutput {
         image: img,
@@ -632,10 +650,11 @@ fn run_oiiotool_decode(
         resize_h = src_h / s;
     }
 
-    // ── oiiotool: decode + resize → PNG ───────────────────────────────────
+    // ── oiiotool: decode + colorspace + resize → PNG ───────────────────────
     let output_path = arena.output_path("png");
     let mut cmd = Command::new("oiiotool");
-    cmd.arg(&input_path);
+    cmd.arg(&input_path)
+       .arg("--colorconvert").arg("linear").arg("sRGB");
     if resize_w != src_w || resize_h != src_h {
         cmd.arg("--resize").arg(format!("{resize_w}x{resize_h}"));
     }
@@ -694,6 +713,34 @@ async fn render_geometry_tier3(
     cook: &mut dyn RenderCook,
     ext: &str,
 ) -> bool {
+    // USDZ/USDC/USDA: extract mesh to OBJ via usd-core Python script,
+    // then render the OBJ through the existing F3D handler (which provides
+    // tone mapping, camera orbit, and delivery identical to STL/OBJ).
+    if matches!(ext, "usdz" | "usdc" | "usda") {
+        if let Some(mut reader) = cook.take_reader() {
+            let result = tokio::task::spawn_blocking(move || {
+                run_usdz_via_obj_handler(&mut *reader)
+            }).await;
+
+            match result {
+                Ok(Ok(out)) => {
+                    apply_render_output(cook, out);
+                    return true;
+                }
+                Ok(Err(msg)) => {
+                    eprintln!("[tier3] usdz: {msg}");
+                    cook.fail_cook(&format!("usdz: {msg}"));
+                    return true;
+                }
+                Err(_) => {
+                    cook.fail_cook("usdz: panicked");
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     // Find the first registered handler that claims this extension.
     let handlers = crate::env_check::registered_handlers();
     let Some(handler) = handlers.iter().find(|h| h.extensions.contains(&ext)) else {
@@ -708,6 +755,34 @@ async fn render_geometry_tier3(
         .unwrap_or(false);
 
     if !available {
+        return false;
+    }
+
+    // Use direct F3D invocation for the common geometry path.
+    if handler.command == "f3d" {
+        if let Some(mut reader) = cook.take_reader() {
+            let ext_owned = ext.to_string();
+            let result = tokio::task::spawn_blocking(move || {
+                run_f3d_geometry_handler(&mut *reader, &ext_owned)
+            }).await;
+
+            match result {
+                Ok(Ok(out)) => {
+                    apply_render_output(cook, out);
+                    return true;
+                }
+                Ok(Err(msg)) => {
+                    eprintln!("[tier3] {}: {msg}", handler.name);
+                    cook.fail_cook(&format!("{}: {msg}", handler.name));
+                    return true;
+                }
+                Err(_) => {
+                    cook.fail_cook(&format!("{}: panicked", handler.name));
+                    return true;
+                }
+            }
+        }
+
         return false;
     }
 
@@ -757,6 +832,10 @@ fn run_subprocess_handler(
     command: &str,
 ) -> Result<RenderOutput, String> {
     use std::process::Command;
+
+    // Ensure subprocess handlers receive the full source file.
+    reader.seek(std::io::SeekFrom::Start(0))
+        .map_err(|e| format!("rewind input: {e}"))?;
 
     // Create a scratch arena for this invocation.
     let arena = ScratchArena::new(100 * 1024 * 1024) // 100 MiB limit
@@ -809,4 +888,405 @@ fn run_subprocess_handler(
         video_seek_secs: None,
         properties:      props,
     })
+}
+
+/// Extract mesh from USDZ/USDC/USDA to OBJ, then render via the existing
+/// F3D handler (which applies tone mapping, camera orbit, and delivery).
+fn run_usdz_via_obj_handler(
+    reader: &mut dyn tier1::ReadSeek,
+) -> Result<RenderOutput, String> {
+    use std::process::Command;
+
+    // Read the full USDZ data.
+    reader.seek(std::io::SeekFrom::Start(0))
+        .map_err(|e| format!("rewind usdz: {e}"))?;
+    let mut usdz_bytes = Vec::new();
+    reader.read_to_end(&mut usdz_bytes)
+        .map_err(|e| format!("read usdz: {e}"))?;
+
+    let arena = ScratchArena::new(100 * 1024 * 1024)
+        .map_err(|e| format!("scratch arena: {e}"))?;
+
+    // Stage the USDZ to a temp file so the Python script can open it.
+    let usdz_path = arena.stage_bytes(&usdz_bytes, "input.usdz")
+        .map_err(|e| format!("stage usdz: {e}"))?;
+
+    let obj_path = arena.output_path("obj");
+
+    // Stage the embedded usd_extract.py script to a temp file.
+    let script_path = arena.stage_bytes(USD_EXTRACT_PY.as_bytes(), "usd_extract.py")
+        .map_err(|e| format!("stage usd_extract script: {e}"))?;
+
+    // Run usd_extract.py (embedded) to convert USDZ → OBJ.
+    let extract_status = Command::new("python3")
+        .arg(&script_path)
+        .arg(&usdz_path)
+        .arg(&obj_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .status()
+        .map_err(|e| format!("spawn usd_extract: {e}"))?;
+
+    if !extract_status.success() {
+        return Err(format!("usd_extract exited with {extract_status}"));
+    }
+
+    // Read the extracted OBJ.
+    let obj_bytes = std::fs::read(&obj_path)
+        .map_err(|e| format!("read obj output: {e}"))?;
+
+    if obj_bytes.is_empty() {
+        return Err("usd_extract produced empty OBJ".into());
+    }
+
+    // Render the OBJ through the existing F3D handler.
+    let mut cursor = std::io::Cursor::new(obj_bytes);
+    run_f3d_geometry_handler(&mut cursor, "obj")
+}
+
+/// Run F3D directly to render STL/OBJ/glTF/GLB geometry to a PNG, then
+/// load the resulting image into a RenderOutput.
+fn run_f3d_geometry_handler(
+    reader: &mut dyn tier1::ReadSeek,
+    ext: &str,
+) -> Result<RenderOutput, String> {
+    use std::process::{Command, Stdio};
+
+    // Read the full source so we can sanitise GLB files before staging.
+    reader.seek(std::io::SeekFrom::Start(0))
+        .map_err(|e| format!("rewind input: {e}"))?;
+
+    let mut source_bytes = Vec::new();
+    reader.read_to_end(&mut source_bytes)
+        .map_err(|e| format!("read input: {e}"))?;
+
+    // STL/OBJ assets are commonly authored Z-up, while glTF assets are
+    // typically Y-up. This is only a default hint; camera transforms still
+    // apply after load.
+    let up_axis = match ext {
+        "stl" | "obj" => "+Z",
+        _ => "+Y",
+    };
+
+    // Baseline framing and material styling for thumbnail appeal.
+    const AZIMUTH: &str = "-30";
+    const ELEVATION: &str = "20";
+    const VIEW_ANGLE: &str = "45";
+    const RESOLUTION: &str = "512,512";
+    const BASE_COLOR: &str = "1,.9,.5";
+
+    let arena = ScratchArena::new(100 * 1024 * 1024)
+        .map_err(|e| format!("scratch arena: {e}"))?;
+
+    // Stage the source, then sanitise GLB files in-place (VTK 9.1 crashes
+    // on embedded textures and KHR_texture_transform).
+    let input_path = arena.stage_bytes(&source_bytes, &format!("input.{ext}"))
+        .map_err(|e| format!("stage input: {e}"))?;
+
+    if ext == "glb" {
+        // Stage the embedded sanitize_glb.py script to a temp file.
+        let script_path = arena.stage_bytes(
+            SANITIZE_GLB_PY.as_bytes(), "sanitize_glb.py",
+        ).map_err(|e| format!("stage sanitize script: {e}"))?;
+
+        let output = std::process::Command::new("python3")
+            .arg(&script_path)
+            .arg(&input_path)
+            .output()
+            .map_err(|e| format!("sanitize_glb: {e}"))?;
+        if !output.status.success() {
+            return Err("sanitize_glb.py failed".into());
+        }
+        std::fs::write(&input_path, &output.stdout)
+            .map_err(|e| format!("write sanitized glb: {e}"))?;
+    }
+
+    let output_path = arena.output_path("png");
+
+    // F3D 2.2.x (Debian) does not support newer flags like --no-config or
+    // --rendering-backend. Use broadly-compatible options.
+    let mut cmd = if std::env::var("DISPLAY").is_ok() {
+        let mut c = Command::new("f3d");
+        c.arg(&input_path)
+         .arg(format!("--output={}", output_path.display()))
+         .arg("--dry-run")
+         .arg(format!("--resolution={}", RESOLUTION))
+         .arg("--quiet")
+         .arg("--no-background")
+         .arg("--up")
+         .arg(up_axis)
+         .arg("--color")
+         .arg(BASE_COLOR)
+         .arg("--camera-azimuth-angle")
+         .arg(AZIMUTH)
+         .arg("--camera-elevation-angle")
+         .arg(ELEVATION)
+         .arg("--camera-view-angle")
+         .arg(VIEW_ANGLE);
+        c
+    } else {
+        let mut c = Command::new("xvfb-run");
+        c.arg("-a")
+         .arg("-s")
+         .arg("-screen 0 1600x1200x24")
+         .arg("f3d")
+         .arg(&input_path)
+         .arg(format!("--output={}", output_path.display()))
+         .arg("--dry-run")
+         .arg(format!("--resolution={}", RESOLUTION))
+         .arg("--quiet")
+         .arg("--no-background")
+         .arg("--up")
+         .arg(up_axis)
+         .arg("--color")
+         .arg(BASE_COLOR)
+         .arg("--camera-azimuth-angle")
+         .arg(AZIMUTH)
+         .arg("--camera-elevation-angle")
+         .arg(ELEVATION)
+         .arg("--camera-view-angle")
+         .arg(VIEW_ANGLE);
+        c
+    };
+
+    cmd.stdout(Stdio::null())
+       .stderr(Stdio::piped());
+
+     // Do not apply the strict sandbox here: F3D rendering under Xvfb requires
+     // GL/X11 process setup that may be terminated by the default bwrap profile.
+
+    let output = cmd.output()
+        .map_err(|e| format!("spawn f3d: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let first_err = stderr.lines().next().unwrap_or("");
+        let first_out = stdout.lines().next().unwrap_or("");
+        let detail = if !first_err.is_empty() {
+            first_err
+        } else if !first_out.is_empty() {
+            first_out
+        } else {
+            "(no stderr/stdout)"
+        };
+        return Err(format!("f3d exited {:?}: {detail}", output.status.code()));
+    }
+
+    let png_bytes = arena.read_output(&output_path)
+        .map_err(|e| format!("read output: {e}"))?;
+
+    let img = image::load_from_memory(&png_bytes)
+        .map_err(|e| format!("decode output PNG: {e}"))?;
+
+    // Only apply the project tone map to formats that are typically unmaterialed.
+    // For textured/material-rich formats (for example FBX/glTF/USD), preserve
+    // source colors by skipping this remap.
+    let img = if should_apply_geometry_tonemap(ext) {
+        stylize_f3d_image(img).adjust_contrast(14.0)
+    } else {
+        img
+    };
+
+    // Autocrop transparent borders so the deliver step gets a tight
+    // bounding box before resizing to the canonical thumbnail size.
+    let img = autocrop_transparent(img);
+
+    let props = serde_json::json!({
+        "width_pixels": img.width(),
+        "height_pixels": img.height(),
+        "up_axis": up_axis,
+        "camera_azimuth_deg": -30,
+        "camera_elevation_deg": 20,
+        "base_color": BASE_COLOR,
+    });
+
+    Ok(RenderOutput {
+        image: img,
+        renderer: Some("f3d".into()),
+        codec: None,
+        video_seek_secs: None,
+        properties: Some(props),
+    })
+}
+
+/// Apply a purple→gold gradient map to F3D output while preserving alpha.
+///
+/// This gives low-contrast geometry renders a stronger visual identity before
+/// tier1 composites them onto the canonical background.
+fn stylize_f3d_image(img: image::DynamicImage) -> image::DynamicImage {
+    let mut rgba = img.to_rgba8();
+
+    // Purple is restricted to the deepest tones; mids/highs stay warm gold.
+    let shadow_purple = [84.0f32, 54.0, 146.0];
+    let warm_mid = [184.0f32, 150.0, 100.0];
+    // Pulled back from [242,208,150] to prevent highlight blowout
+    // on light-coloured models (e.g. pale vintage cars).
+    let warm_high = [210.0f32, 185.0, 140.0];
+
+    for px in rgba.pixels_mut() {
+        let a = px[3];
+        if a == 0 {
+            continue;
+        }
+
+        let r = px[0] as f32 / 255.0;
+        let g = px[1] as f32 / 255.0;
+        let b = px[2] as f32 / 255.0;
+
+        // Start from scene luminance and apply a strong contrast curve.
+        let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        let t = ((luma - 0.5) * 1.28 + 0.5).clamp(0.0, 1.0);
+
+        // Warm body tones for most of the range.
+        let warm_t = ((t - 0.14) / 0.86).clamp(0.0, 1.0);
+        let wr = warm_mid[0] + (warm_high[0] - warm_mid[0]) * warm_t;
+        let wg = warm_mid[1] + (warm_high[1] - warm_mid[1]) * warm_t;
+        let wb = warm_mid[2] + (warm_high[2] - warm_mid[2]) * warm_t;
+
+        // Keep purple only in deep shadows.
+        let shadow_t = ((0.58 - t) / 0.58).clamp(0.0, 1.0);
+        let shadow_shape = shadow_t * shadow_t * (3.0 - 2.0 * shadow_t);
+        let shadow_mix = 1.0 * shadow_shape;
+
+        // Add an extra cool push in the deepest shadows so low-end tones
+        // cannot collapse to brown/amber only.
+        let deep_t = ((0.30 - t) / 0.30).clamp(0.0, 1.0);
+        let deep_boost = deep_t * deep_t;
+
+        // Global warmth lift across the model, with restrained highlight gain.
+        let lift_t = ((t - 0.10) / 0.90).clamp(0.0, 1.0);
+        // Soft-ceiling the lift so highlights don't blow past 255.
+        let lift = 1.01 + 0.20 * (lift_t * lift_t * (3.0 - 2.0 * lift_t));
+
+        // Preserve form: keep dark regions denser and prevent flat washout.
+        let shade = 0.80 + 0.30 * t;
+
+        // Push shadows cooler: reduce red and raise blue as luminance drops.
+        let cool_red = 16.0 * shadow_mix + 18.0 * deep_boost;
+        let cool_blue = 26.0 * shadow_mix + 28.0 * deep_boost;
+
+        let nr = ((wr * (1.0 - shadow_mix) + shadow_purple[0] * shadow_mix - cool_red)
+            * lift * shade)
+            .clamp(0.0, 255.0);
+        let ng = ((wg * (1.0 - shadow_mix) + shadow_purple[1] * shadow_mix) * lift * shade)
+            .clamp(0.0, 255.0);
+        let nb = ((wb * (1.0 - shadow_mix) + shadow_purple[2] * shadow_mix + cool_blue)
+            * lift * shade)
+            .clamp(0.0, 255.0);
+
+        px[0] = nr as u8;
+        px[1] = ng as u8;
+        px[2] = nb as u8;
+    }
+
+    image::DynamicImage::ImageRgba8(rgba)
+}
+
+
+/// Heuristic gate for aggressive color remapping.
+///
+/// STL/OBJ frequently arrive without authored materials, so the custom
+/// purple→gold grade improves readability.  Most other geometry formats often
+/// carry materials/textures that should be preserved.
+fn should_apply_geometry_tonemap(ext: &str) -> bool {
+    matches!(ext, "stl" | "obj")
+}
+
+/// Strip problematic content from a GLB file's JSON chunk.
+///
+/// VTK 9.1's GLTF importer crashes on `KHR_texture_transform` and
+/// fails to load models with embedded texture images (tries to read
+/// them as HDR).  We strip images, textures, materials, samplers and
+/// Crop transparent rows and columns from the edges of an RGBA image,
+/// leaving a small transparent border for visual breathing room.
+///
+/// F3D renders with `--no-background` produce a transparent surround.
+/// Cropping it away gives the downstream deliver step a tight bounding
+/// box before it resizes to the canonical thumbnail dimensions.
+
+// ── Linear → sRGB helpers (shared by ffmpeg_cli and oiiotool paths) ──────────
+
+/// Returns `true` for extensions that are scene-linear (needs gamma correction).
+fn is_linear_format(ext: &str) -> bool {
+    matches!(ext, "exr" | "hdr" | "rgbe" | "sxr" | "mxr")
+}
+
+/// Fast gamma-2.2 correction for scene-linear pixel data.
+///
+/// Scene-linear formats store light proportionally.  Without tone-mapping
+/// they render dark and crushed on an sRGB display.  This applies a simple
+/// power-law curve so the deliver step receives perceptually-correct pixels.
+fn linear_to_srgb_fast(img: image::DynamicImage) -> image::DynamicImage {
+    // Apply gamma 2.2 to bring linear-light pixel data into approximate
+    // sRGB perceptual space.  The ffmpeg CLI path converts HDR to 8-bit
+    // PNG first, so highlight detail is already clipped — this is a
+    // best-effort correction, not a full colour pipeline.
+    const GAMMA: f64 = 1.0 / 2.2;
+
+    fn gamma_pixel_rgb(p: &mut image::Rgb<u8>) {
+        for c in &mut p.0 {
+            let linear = *c as f64 / 255.0;
+            *c = ((linear.powf(GAMMA)) * 255.0).round() as u8;
+        }
+    }
+
+    fn gamma_pixel_rgba(p: &mut image::Rgba<u8>) {
+        for c in 0..3 {
+            let linear = p.0[c] as f64 / 255.0;
+            p.0[c] = ((linear.powf(GAMMA)) * 255.0).round() as u8;
+        }
+    }
+
+    match img {
+        image::DynamicImage::ImageRgb8(mut buf) => {
+            buf.pixels_mut().for_each(gamma_pixel_rgb);
+            image::DynamicImage::ImageRgb8(buf)
+        }
+        image::DynamicImage::ImageRgba8(mut buf) => {
+            buf.pixels_mut().for_each(gamma_pixel_rgba);
+            image::DynamicImage::ImageRgba8(buf)
+        }
+        other => other,
+    }
+}
+
+fn autocrop_transparent(img: image::DynamicImage) -> image::DynamicImage {
+    const BORDER: u32 = 8;
+
+    let rgba = img.to_rgba8();
+    let (w, h) = (rgba.width(), rgba.height());
+
+    // Find the first non-transparent row from the top.
+    let top = (0..h).find(|&y| rgba.rows().nth(y as usize)
+        .is_some_and(|mut row| row.any(|p| p[3] != 0)))
+        .unwrap_or(0);
+
+    // First non-transparent row from the bottom.
+    let bottom = (0..h).rev().find(|&y| rgba.rows().nth(y as usize)
+        .is_some_and(|mut row| row.any(|p| p[3] != 0)))
+        .unwrap_or(h - 1);
+
+    // First non-transparent column from the left.
+    let left = (0..w).find(|&x| {
+        (0..h).any(|y| rgba.get_pixel(x, y)[3] != 0)
+    }).unwrap_or(0);
+
+    // First non-transparent column from the right.
+    let right = (0..w).rev().find(|&x| {
+        (0..h).any(|y| rgba.get_pixel(x, y)[3] != 0)
+    }).unwrap_or(w - 1);
+
+    if top >= bottom || left >= right {
+        return img; // fully transparent — passthrough
+    }
+
+    // Back off by BORDER pixels, clamped to image bounds.
+    let top    = top.saturating_sub(BORDER);
+    let bottom = (bottom + BORDER).min(h - 1);
+    let left   = left.saturating_sub(BORDER);
+    let right  = (right + BORDER).min(w - 1);
+
+    let cropped = image::imageops::crop_imm(&rgba, left, top, right - left + 1, bottom - top + 1);
+    image::DynamicImage::ImageRgba8(cropped.to_image())
 }

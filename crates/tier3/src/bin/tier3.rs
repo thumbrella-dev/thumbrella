@@ -16,28 +16,31 @@ async fn main() {
     // executable are marked available in the env report.
 
     tier3::env_check::register_handler(tier3::env_check::HandlerDecl {
-        name: "3drender",
+        name: "f3d",
         category: "geometry",
-        command: "/opt/thumbrella/bin/3drender.sh",
-        extensions: &["glb", "gltf"],
-        description: "3D geometry renderer (glTF/GLB)",
+        command: "f3d",
+        // F3D readers available in this runtime (mesh/CAD/simulation formats).
+        // USDZ is NOT in this list — it is handled separately via ZIP extraction.
+        extensions: &[
+            "3ds", "brep", "dae", "dxf", "e", "exo", "ex2", "fbx",
+            "glb", "gltf", "gml", "iges", "igs", "obj", "off", "p21",
+            "ply", "pts", "step", "stl", "stp", "stpnc", "vtk", "vtm",
+            "vti", "vtp", "vtr", "vts", "vtu", "vrml", "wrl", "210",
+        ],
+        description: "3D geometry renderer (F3D)",
     });
 
     tier3::env_check::register_handler(tier3::env_check::HandlerDecl {
-        name: "usdrender",
+        name: "usdz",
         category: "geometry",
-        command: "/opt/thumbrella/bin/usdrender.sh",
+        command: "(builtin)",
+        // USDZ/USDC/USDA are extracted to OBJ via Python usd-core, then
+        // rendered through the F3D handler.  Availability depends on both
+        // python3+usd-core and f3d being present at runtime.
         extensions: &["usdz", "usdc", "usda"],
-        description: "USD geometry renderer (usdrecord)",
+        description: "USDZ/USD geometry (usd-core extract → F3D render)",
     });
 
-    tier3::env_check::register_handler(tier3::env_check::HandlerDecl {
-        name: "stlrender",
-        category: "geometry",
-        command: "/opt/thumbrella/bin/stlrender.sh",
-        extensions: &["stl", "obj"],
-        description: "STL/OBJ geometry renderer",
-    });
 
     // ── Probe the environment ────────────────────────────────────────────────
     let env_report = tier3::env_check::probe_environment();
@@ -87,16 +90,38 @@ fn register_tier3_diag(env: &tier3::env_check::EnvReport) {
                 .find(|h| h.extensions.contains(&f.extension));
             let (status, detail) = match handler {
                 Some(ref h) => {
-                    let available = env.backends.get(h.name)
-                        .map(|b| b.available)
-                        .unwrap_or(false);
-                    if available {
-                        ("available".into(), format!("{}", h.command))
+                    // The usdz handler depends on both f3d and python3+usd-core.
+                    // Check both before reporting as available.
+                    if h.name == "usdz" {
+                        let f3d_ok = env.backends.get("f3d")
+                            .map(|b| b.available).unwrap_or(false);
+                        let py_ok = env.backends.get("python3")
+                            .map(|b| b.available).unwrap_or(false);
+                        let usd_ok = env.backends.get("python3")
+                            .and_then(|b| b.details.as_deref())
+                            .map(|d| d.contains("usd-core available"))
+                            .unwrap_or(false);
+                        if f3d_ok && py_ok && usd_ok {
+                            ("available".into(), format!("f3d + python3/usd-core"))
+                        } else {
+                            let mut missing = Vec::new();
+                            if !f3d_ok { missing.push("f3d"); }
+                            if !py_ok { missing.push("python3"); }
+                            else if !usd_ok { missing.push("usd-core"); }
+                            ("missing".into(), format!("requires: {}", missing.join(", ")))
+                        }
                     } else {
-                        let reason = env.backends.get(h.name)
-                            .and_then(|b| b.unavailable_reason.clone())
-                            .unwrap_or_else(|| "not found".into());
-                        ("missing".into(), reason)
+                        let available = env.backends.get(h.name)
+                            .map(|b| b.available)
+                            .unwrap_or(false);
+                        if available {
+                            ("available".into(), format!("{}", h.command))
+                        } else {
+                            let reason = env.backends.get(h.name)
+                                .and_then(|b| b.unavailable_reason.clone())
+                                .unwrap_or_else(|| "not found".into());
+                            ("missing".into(), reason)
+                        }
                     }
                 }
                 None => ("unregistered".into(), String::new()),
@@ -115,7 +140,10 @@ fn register_tier3_diag(env: &tier3::env_check::EnvReport) {
 
     // General tools section — backends not tied to specific extensions.
     {
-        let general: &[&str] = &["ffmpeg_cli", "magick", "oiiotool", "bwrap", "display_server"];
+        let general: &[&str] = &[
+            "f3d", "python3", "ffmpeg_cli", "magick", "oiiotool", "bwrap",
+            "display_server",
+        ];
         let entries: Vec<tier1::diag::DiagEntry> = general.iter().filter_map(|name| {
             let info = env.backends.get(*name)?;
             let status = if info.available { "available" } else { "missing" };

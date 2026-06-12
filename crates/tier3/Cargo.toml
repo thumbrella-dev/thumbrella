@@ -32,6 +32,7 @@ tier2 = { path = "../tier2" }
 # PNG) produced by external tools.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
+
 # ── Tier 3 extensions ──────────────────────────────────────────────────────────
 # libloading: dlopen-based detection and dispatch for optional shared libraries
 # (e.g. libpdfium, libblender, …).  Each renderer backend is probed at startup;

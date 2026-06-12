@@ -173,7 +173,15 @@ impl ScratchArena {
         }
 
         let suffix: String = std::iter::repeat_with(fast_random_char).take(8).collect();
-        let file_name = format!("{hint_name}_{suffix}");
+
+        // Preserve the original extension so subprocess tools that dispatch
+        // by extension (for example, F3D) continue to detect the format.
+        let file_name = match hint_name.rsplit_once('.') {
+            Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => {
+                format!("{stem}_{suffix}.{ext}")
+            }
+            _ => format!("{hint_name}_{suffix}"),
+        };
         let dest = self.dir.path().join(&file_name);
 
         std::fs::write(&dest, bytes).map_err(ArenaError::Io)?;

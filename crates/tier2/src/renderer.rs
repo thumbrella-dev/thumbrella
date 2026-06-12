@@ -251,26 +251,24 @@ fn decode_jxl(reader: &mut dyn ReadSeek) -> Option<RenderOutput> {
 // ── SVG render ────────────────────────────────────────────────────────────────
 
 /// Render an SVG to a raster image via the `resvg` crate.
+///
+/// We rasterise at 500×400 (2× the canonical thumbnail) with default
+/// quality settings (anti-aliasing on) so the downstream deliver step
+/// has enough pixel data for a clean Lanczos3 downscale to 250×200.
 fn render_svg(reader: &mut dyn ReadSeek) -> Option<RenderOutput> {
     let mut svg_str = String::new();
     reader.read_to_string(&mut svg_str).ok()?;
 
-    // Speed-optimised: disable AA (Lanczos3 downscale handles quality) and
-    // use nearest-neighbor for embedded images.
-    let mut svg_opts = resvg::usvg::Options::default();
-    svg_opts.shape_rendering = resvg::usvg::ShapeRendering::OptimizeSpeed;
-    svg_opts.image_rendering = resvg::usvg::ImageRendering::OptimizeSpeed;
-
-    let tree = resvg::usvg::Tree::from_str(&svg_str, &svg_opts).ok()?;
+    let tree = resvg::usvg::Tree::from_str(&svg_str, &resvg::usvg::Options::default()).ok()?;
     let svg_size = tree.size();
     let (svg_w, svg_h) = (svg_size.width() as f64, svg_size.height() as f64);
     if svg_w <= 0.0 || svg_h <= 0.0 { return None; }
 
-    let cfg = ThumbnailConfig::CANONICAL;
-    // Render directly at the canonical thumbnail size (no oversampling —
-    // speed-optimised settings skip AA, so there's no quality benefit).
-    let scale = (cfg.exact_width as f64 / svg_w)
-        .min(cfg.exact_height as f64 / svg_h)
+    // Render at 500×400 — fit the SVG inside, preserving aspect ratio.
+    const RENDER_W: u32 = 500;
+    const RENDER_H: u32 = 400;
+    let scale = (RENDER_W as f64 / svg_w)
+        .min(RENDER_H as f64 / svg_h)
         .min(1.0);
     let rw = (svg_w * scale).ceil() as u32;
     let rh = (svg_h * scale).ceil() as u32;
@@ -282,8 +280,6 @@ fn render_svg(reader: &mut dyn ReadSeek) -> Option<RenderOutput> {
     let rgba = pixmap.take();
     let img = DynamicImage::ImageRgba8(image::RgbaImage::from_raw(rw, rh, rgba)?);
     let (src_w, src_h) = (svg_w.ceil() as u32, svg_h.ceil() as u32);
-
-    let img = pre_scale(img, cfg.exact_width, cfg.exact_height);
 
     Some(RenderOutput {
         image:           img,
@@ -551,6 +547,16 @@ async fn render_image(
     if avio_bytes > 0 {
         cook.set_bytes_consumed(avio_bytes);
     }
+
+    // Scene-linear formats (EXR, HDR) need a gamma curve applied before
+    // they hit the deliver step, otherwise they look dark and crushed.
+    let result = result.map(|mut out| {
+        if is_linear_format(ext) {
+            out.image = linear_to_srgb(out.image);
+        }
+        out
+    });
+
     apply_result(cook, result)
 }
 
@@ -896,6 +902,54 @@ fn read_u16_le_be(data: &[u8], off: usize, little: bool) -> Option<u16> {
     if off + 2 > data.len() { return None; }
     Some(if little { u16::from_le_bytes([data[off], data[off+1]]) }
          else      { u16::from_be_bytes([data[off], data[off+1]]) })
+}
+
+// ── Linear → sRGB gamma correction ───────────────────────────────────────────
+
+/// Scene-linear formats (EXR, HDR, Radiance RGBe, …) store light values
+/// proportionally.  Without tone-mapping they render dark and crushed on an
+/// sRGB display.  Apply a simple gamma-2.2 curve so the deliver step works
+/// with perceptually-correct pixel data.
+///
+/// This is intentionally a fast approximation — not a full colour pipeline.
+/// Targeted at thumbnail-quality output where the primary goal is legibility.
+fn linear_to_srgb(img: image::DynamicImage) -> image::DynamicImage {
+    /// sRGB transfer function (approximated as pure gamma 2.2).
+    const GAMMA: f64 = 1.0 / 2.2;
+
+    fn gamma_correct(p: &mut image::Rgb<u8>) {
+        for c in &mut p.0 {
+            let linear = *c as f64 / 255.0;
+            let srgb   = linear.powf(GAMMA);
+            *c = (srgb * 255.0).round() as u8;
+        }
+    }
+
+    fn gamma_correct_rgba(p: &mut image::Rgba<u8>) {
+        for c in 0..3 {
+            let linear = p.0[c] as f64 / 255.0;
+            let srgb   = linear.powf(GAMMA);
+            p.0[c] = (srgb * 255.0).round() as u8;
+        }
+        // Alpha is not colour — leave it alone.
+    }
+
+    match img {
+        image::DynamicImage::ImageRgb8(mut buf) => {
+            buf.pixels_mut().for_each(gamma_correct);
+            image::DynamicImage::ImageRgb8(buf)
+        }
+        image::DynamicImage::ImageRgba8(mut buf) => {
+            buf.pixels_mut().for_each(gamma_correct_rgba);
+            image::DynamicImage::ImageRgba8(buf)
+        }
+        other => other,
+    }
+}
+
+/// Returns `true` for extensions that are scene-linear (needs gamma correction).
+fn is_linear_format(ext: &str) -> bool {
+    matches!(ext, "exr" | "hdr" | "rgbe" | "sxr" | "mxr")
 }
 
 fn read_u32_le_be(data: &[u8], off: usize, little: bool) -> Option<u32> {

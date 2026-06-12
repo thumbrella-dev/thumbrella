@@ -25,7 +25,7 @@
 //! |------|--------|---------|
 //! | Shared library | `libloading::Library::new()` | `libpdfium.so` |
 //! | Executable | `which::which()` + `--version` | `ffmpeg`, `inkscape` |
-//! | Registered handler | file exists + exec bit | `/opt/thumbrella/bin/3drender.sh` |
+//! | Registered handler | file exists + exec bit / PATH lookup | `f3d` |
 //! | Runtime service | Check env var or socket | `DISPLAY` for xvfb |
 
 use serde::{Deserialize, Serialize};
@@ -42,7 +42,7 @@ pub struct HandlerDecl {
     pub name: &'static str,
     /// Broad category for diag grouping (e.g. `"geometry"`).
     pub category: &'static str,
-    /// Absolute path to the command.
+    /// Executable name or absolute path to the command.
     pub command: &'static str,
     /// File extensions this handler claims (e.g. `&["glb", "gltf"]`).
     pub extensions: &'static [&'static str],
@@ -139,6 +139,12 @@ pub fn probe_environment() -> EnvReport {
 
     // ── Executable backends ──────────────────────────────────────────────────
     probe_executables(&mut report);
+
+    // ── F3D (geometry renderer with X11 dependency) ─────────────────────────
+    probe_f3d(&mut report);
+
+    // ── Python + usd-core (USDZ geometry pipeline) ──────────────────────────
+    probe_python_usd(&mut report);
 
     // ── Runtime service backends ─────────────────────────────────────────────
     probe_runtime_services(&mut report);
@@ -248,16 +254,23 @@ fn probe_executables(report: &mut EnvReport) {
     }
 
     // Registered handlers — probed by file existence + execute bit.
+    // Handlers with command "(builtin)" are always available (pure-Rust).
     let handlers = HANDLER_REGISTRY.read().unwrap().clone();
     for h in &handlers {
-        let (available, details, reason) = try_executable_at(h.command, h.description);
+        let (available, details, reason, method) = if h.command == "(builtin)" {
+            (true, Some(h.description.to_string()), None, ProbeMethod::Builtin)
+        } else {
+            let (a, d, r) = try_executable_at(h.command, h.description);
+            let m = ProbeMethod::Executable {
+                binary: h.command.to_string(),
+                check_arg: String::new(),
+            };
+            (a, d, r, m)
+        };
         report.backends.insert(h.name.to_string(), BackendInfo {
             name: h.name.to_string(),
             category: h.category.to_string(),
-            method: ProbeMethod::Executable {
-                binary: h.command.to_string(),
-                check_arg: String::new(),
-            },
+            method,
             available,
             details,
             unavailable_reason: reason,
@@ -282,6 +295,146 @@ fn probe_runtime_services(report: &mut EnvReport) {
         available,
         details,
         unavailable_reason: reason,
+    });
+}
+
+// ── F3D probe ─────────────────────────────────────────────────────────────────
+
+/// Probe for the F3D 3D geometry renderer.
+///
+/// F3D `--version` crashes without a display server, so the version check is
+/// only attempted when `DISPLAY` or `WAYLAND_DISPLAY` is set.  Without a
+/// display we still report the binary as available if it exists and is
+/// executable, but note the display requirement.
+fn probe_f3d(report: &mut EnvReport) {
+    let path = match which::which("f3d") {
+        Ok(p) => p,
+        Err(_) => {
+            report.backends.insert("f3d".into(), BackendInfo {
+                name: "f3d".into(),
+                category: "geometry".into(),
+                method: ProbeMethod::Executable {
+                    binary: "f3d".into(),
+                    check_arg: "--version".into(),
+                },
+                available: false,
+                details: None,
+                unavailable_reason: Some("f3d not found on PATH".into()),
+            });
+            return;
+        }
+    };
+
+    let has_display = std::env::var("DISPLAY").ok()
+        .or_else(|| std::env::var("WAYLAND_DISPLAY").ok())
+        .is_some();
+
+    let (details, reason) = if has_display {
+        match std::process::Command::new(&path)
+            .arg("--version")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+        {
+            Ok(output) => {
+                let first_line = String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .next()
+                    .unwrap_or("(no output)")
+                    .to_string();
+                (Some(format!("{}: {}", path.display(), first_line)), None)
+            }
+            Err(e) => {
+                (Some(format!("found at {}", path.display())),
+                 Some(format!("f3d --version: {e}")))
+            }
+        }
+    } else {
+        // F3D --version crashes without a display; just note it was found.
+        (Some(format!("{} (display required for version check)", path.display())), None)
+    };
+
+    report.backends.insert("f3d".into(), BackendInfo {
+        name: "f3d".into(),
+        category: "geometry".into(),
+        method: ProbeMethod::Executable {
+            binary: "f3d".into(),
+            check_arg: "--version".into(),
+        },
+        available: true,
+        details,
+        unavailable_reason: reason,
+    });
+}
+
+// ── Python + usd-core probe ───────────────────────────────────────────────────
+
+/// Probe for Python 3 with the `usd-core` package (USDZ/USD geometry extraction).
+///
+/// The tier-3 USD pipeline uses a Python script to extract mesh data from
+/// USDZ/USDC/USDA files, then feeds the resulting OBJ to F3D for rendering.
+/// Both Python and usd-core must be present for USD support.
+fn probe_python_usd(report: &mut EnvReport) {
+    let python = match which::which("python3") {
+        Ok(p) => p,
+        Err(_) => {
+            report.backends.insert("python3".into(), BackendInfo {
+                name: "python3".into(),
+                category: "runtime".into(),
+                method: ProbeMethod::Executable {
+                    binary: "python3".into(),
+                    check_arg: "--version".into(),
+                },
+                available: false,
+                details: None,
+                unavailable_reason: Some("python3 not found on PATH".into()),
+            });
+            return;
+        }
+    };
+
+    // Check Python version.
+    let py_ver = std::process::Command::new(&python)
+        .arg("--version")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .ok()
+        .and_then(|o| {
+            let s = String::from_utf8_lossy(&o.stdout);
+            let s = s.trim();
+            if s.is_empty() {
+                Some(String::from_utf8_lossy(&o.stderr).trim().to_string())
+            } else {
+                Some(s.to_string())
+            }
+        })
+        .unwrap_or_else(|| "unknown version".into());
+
+    // Check for usd-core (the PyPI package that provides pxr.Usd).
+    let usd_ok = std::process::Command::new(&python)
+        .arg("-c")
+        .arg("from pxr import Usd")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    report.backends.insert("python3".into(), BackendInfo {
+        name: "python3".into(),
+        category: "runtime".into(),
+        method: ProbeMethod::Executable {
+            binary: "python3".into(),
+            check_arg: "--version".into(),
+        },
+        available: true,
+        details: Some(format!("{}: {}; usd-core {}",
+            python.display(), py_ver,
+            if usd_ok { "available" } else { "NOT FOUND" })),
+        unavailable_reason: if usd_ok { None } else {
+            Some("usd-core not installed (pip install usd-core)".into())
+        },
     });
 }
 
@@ -341,19 +494,27 @@ fn try_executable(binary: &str, check_arg: &str, _desc: &str) -> (bool, Option<S
 ///
 /// Returns `(available, details, reason)`.
 fn try_executable_at(path: &str, _desc: &str) -> (bool, Option<String>, Option<String>) {
-    let p = std::path::Path::new(path);
-    match std::fs::metadata(p) {
+    let resolved = if std::path::Path::new(path).components().count() > 1 {
+        std::path::PathBuf::from(path)
+    } else {
+        match which::which(path) {
+            Ok(p) => p,
+            Err(e) => return (false, None, Some(format!("which({path}): {e}"))),
+        }
+    };
+
+    match std::fs::metadata(&resolved) {
         Ok(meta) if meta.is_file() => {
             // Check if any execute bit is set (owner, group, or other).
             use std::os::unix::fs::PermissionsExt;
             let mode = meta.permissions().mode();
             if mode & 0o111 != 0 {
-                (true, Some(format!("executable at {path}")), None)
+                (true, Some(format!("executable at {}", resolved.display())), None)
             } else {
-                (false, None, Some(format!("{path}: not executable (mode {mode:o})")))
+                (false, None, Some(format!("{}: not executable (mode {mode:o})", resolved.display())))
             }
         }
-        Ok(_) => (false, None, Some(format!("{path}: not a regular file"))),
-        Err(e) => (false, None, Some(format!("{path}: {e}"))),
+        Ok(_) => (false, None, Some(format!("{}: not a regular file", resolved.display()))),
+        Err(e) => (false, None, Some(format!("{}: {e}", resolved.display()))),
     }
 }
