@@ -618,7 +618,8 @@ impl<S: HttpStream> ThumbCook<S> {
                 mime:       self.media.mime.clone().unwrap_or_default(),
                 file_size:  self.media.file_size.unwrap_or(0),
                 kind:       self.media.kind.unwrap_or(FileKind::Unknown),
-                extension:  self.media.extension.clone().unwrap_or_default(),
+                extension:  crate::pipeline::canonical_extension(
+                    &self.media.extension.clone().unwrap_or_default()),
                 properties: self.media.properties.clone().unwrap_or_else(|| Value::Object(Default::default())),
                 cache:      self.src.cache_hints.as_ref().and_then(|h| h.encode()),
             }),
@@ -647,7 +648,8 @@ impl<S: HttpStream> ThumbCook<S> {
                 mime:       self.media.mime.clone().unwrap_or_default(),
                 file_size:  self.media.file_size.unwrap_or(0),
                 kind,
-                extension:  self.media.extension.clone().unwrap_or_default(),
+                extension:  crate::pipeline::canonical_extension(
+                    &self.media.extension.clone().unwrap_or_default()),
                 properties: self.media.properties.clone().unwrap_or_else(|| Value::Object(Default::default())),
                 cache:      self.src.cache_hints.as_ref().and_then(|h| h.encode()),
             }),
@@ -686,7 +688,8 @@ impl<S: HttpStream> ThumbCook<S> {
             timestamp,
             status,
             kind:                self.media.kind,
-            extension:           self.media.extension.clone(),
+            extension:           self.media.extension.as_deref()
+                .map(|e| crate::pipeline::canonical_extension(e)),
             canonical_url:       self.src.canonical_url.clone(),
             cache_key:           self.src.cache_key.clone(),
             cache_key_source:    self.src.cache_key_source.clone(),
@@ -762,7 +765,7 @@ impl<S: HttpStream> ThumbCook<S> {
             self.media.mime         = Some(media.mime.clone());
             self.media.file_size    = Some(media.file_size);
             self.media.kind         = Some(media.kind);
-            self.media.extension    = Some(media.extension.clone());
+            self.media.extension    = Some(crate::pipeline::canonical_extension(&media.extension));
             self.media.properties   = Some(media.properties.clone());
         }
 
@@ -855,7 +858,7 @@ impl<S: HttpStream> ThumbCook<S> {
                         self.media.mime         = Some(media.mime.clone());
                         self.media.file_size    = Some(media.file_size);
                         self.media.kind         = Some(media.kind);
-                        self.media.extension    = Some(media.extension.clone());
+                        self.media.extension    = Some(crate::pipeline::canonical_extension(&media.extension));
                         self.media.properties   = Some(media.properties.clone());
                     }
                     self.out_message        = cached.message.unwrap_or_default();
@@ -891,7 +894,7 @@ impl<S: HttpStream> ThumbCook<S> {
                         self.media.mime         = Some(media.mime.clone());
                         self.media.file_size    = Some(media.file_size);
                         self.media.kind         = Some(media.kind);
-                        self.media.extension    = Some(media.extension.clone());
+                        self.media.extension    = Some(crate::pipeline::canonical_extension(&media.extension));
                         self.media.properties   = Some(media.properties.clone());
                     }
                     self.out_message        = cached.message.unwrap_or_default();

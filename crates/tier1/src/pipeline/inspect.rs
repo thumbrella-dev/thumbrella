@@ -289,7 +289,7 @@ fn is_raw_tiff_extension(ext: &str) -> bool {
 
 /// Normalise common extension aliases to their canonical form.
 /// Unknown extensions are returned as-is.
-fn canonical_extension(raw: &str) -> String {
+pub fn canonical_extension(raw: &str) -> String {
     match raw {
         "jpg"          => "jpeg",
         "tif"          => "tiff",
@@ -364,6 +364,8 @@ fn mime_to_kind(mime: &str, ext: &str) -> FileKind {
         "model/vnd.usdz+zip"
         | "model/gltf-binary"
         | "model/gltf+json"
+        | "application/vnd.fbx"
+        | "model/vnd.collada+xml"
         | "model/obj"
         | "model/stl" => FileKind::Geometry,
         _ => ext_to_kind(ext),
@@ -390,7 +392,11 @@ fn ext_to_kind(ext: &str) -> FileKind {
         "pdf" | "docx" | "xlsx" | "pptx" | "odt"
         | "doc" | "xls" | "ppt" | "odp" | "ods"
         | "epub" | "rtf"                                  => FileKind::Document,
-        "usdz" | "glb" | "gltf" | "obj" | "stl"           => FileKind::Geometry,
+        "usdz" | "glb" | "gltf" | "obj" | "stl" | "fbx" | "dae" | "dxf"
+        | "off" | "3ds" | "gml" | "ply" | "pts" | "wrl" | "vrml"
+        | "vtk" | "vtu" | "vtp" | "vti" | "vtr" | "vts" | "vtm"
+        | "stp" | "step" | "stpnc" | "p21" | "210"
+        | "igs" | "iges" | "brep" | "exo" | "ex2" | "e" => FileKind::Geometry,
         "zip" | "tar" | "gz" | "bz2" | "xz" | "rar" | "7z" => FileKind::Archive,
         "html" | "xhtml"                                  => FileKind::Document,
         "xml" | "json" | "txt" | "csv" | "md"            => FileKind::Text,
@@ -433,6 +439,7 @@ fn mime_to_extension(mime: &str) -> &'static str {
         "application/rtf"               => "rtf",
         "model/vnd.usdz+zip" => "usdz", "model/gltf-binary" => "glb",
         "model/gltf+json"    => "gltf", "model/obj"         => "obj",
+        "application/vnd.fbx" => "fbx", "model/vnd.collada+xml" => "dae",
         "model/stl"          => "stl",
         "text/html"  => "html", "text/xml"      => "xml",
         "text/plain" => "txt",  "text/csv"      => "csv",
@@ -491,6 +498,7 @@ fn ext_to_mime(ext: &str) -> &'static str {
         "csv"  => "text/csv",     "md"   => "text/markdown",
         "usdz" => "model/vnd.usdz+zip", "glb" => "model/gltf-binary",
         "gltf" => "model/gltf+json",    "obj" => "model/obj",
+        "fbx"  => "application/vnd.fbx", "dae" => "model/vnd.collada+xml",
         "stl"  => "model/stl",
         _      => "application/octet-stream",
     }

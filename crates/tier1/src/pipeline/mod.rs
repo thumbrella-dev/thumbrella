@@ -58,4 +58,5 @@ mod shortcut;
 pub use connect::connect;
 pub use deliver::deliver;
 pub use inspect::inspect;
+pub use inspect::canonical_extension;
 pub use shortcut::shortcut;

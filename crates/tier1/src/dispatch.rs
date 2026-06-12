@@ -191,7 +191,6 @@ pub fn format_manifest() -> &'static [FormatEntry] {
 
         // ── Tier 2 — JPEG (baseline/progressive) via libav ───────────────────
         FormatEntry { extension: "jpeg", label: "JPEG (standard)",  kind: FileKind::Image, tier: 2, renderer: "libav" },
-        FormatEntry { extension: "jpg",  label: "JPEG (standard)",  kind: FileKind::Image, tier: 2, renderer: "libav" },
 
         // ── Tier 2 — libav / resvg / jxl-oxide ───────────────────────────────
         FormatEntry { extension: "svg",  label: "SVG",              kind: FileKind::Vector,  tier: 2, renderer: "resvg" },
@@ -217,7 +216,6 @@ pub fn format_manifest() -> &'static [FormatEntry] {
 
         // ── Tier 3 — ffmpeg CLI: arithmetic JPEG + all image formats ──────────
         FormatEntry { extension: "jpeg", label: "JPEG (arithmetic)", kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli" },
-        FormatEntry { extension: "jpg",  label: "JPEG (arithmetic)", kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli" },
         FormatEntry { extension: "png",  label: "PNG (via ffmpeg)",  kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli" },
         FormatEntry { extension: "webp", label: "WebP (via ffmpeg)", kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli" },
         FormatEntry { extension: "bmp",  label: "BMP (via ffmpeg)",  kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli" },
@@ -256,13 +254,41 @@ pub fn format_manifest() -> &'static [FormatEntry] {
         FormatEntry { extension: "zfile",label: "Renderman Z-file",  kind: FileKind::Image, tier: 3, renderer: "oiiotool" },
 
         // ── Tier 3 — subprocess: 3D geometry ──────────────────────────────────
-        FormatEntry { extension: "glb",  label: "glTF Binary",     kind: FileKind::Geometry, tier: 3, renderer: "3drender" },
-        FormatEntry { extension: "gltf", label: "glTF JSON",       kind: FileKind::Geometry, tier: 3, renderer: "3drender" },
-        FormatEntry { extension: "usdz", label: "USDZ",            kind: FileKind::Geometry, tier: 3, renderer: "usdrender" },
-        FormatEntry { extension: "usdc", label: "USDC",            kind: FileKind::Geometry, tier: 3, renderer: "usdrender" },
-        FormatEntry { extension: "usda", label: "USDA",            kind: FileKind::Geometry, tier: 3, renderer: "usdrender" },
-        FormatEntry { extension: "stl",  label: "STL",             kind: FileKind::Geometry, tier: 3, renderer: "stlrender" },
-        FormatEntry { extension: "obj",  label: "Wavefront OBJ",   kind: FileKind::Geometry, tier: 3, renderer: "stlrender" },
+        FormatEntry { extension: "glb",  label: "glTF Binary",     kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "gltf", label: "glTF JSON",       kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "fbx",  label: "Filmbox",         kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "dae",  label: "Collada",         kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "dxf",  label: "AutoCAD DXF",     kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "off",  label: "Object File Format", kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "exo",  label: "Exodus II",       kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "ex2",  label: "Exodus II",       kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "e",    label: "Exodus II",       kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "3ds",  label: "Autodesk 3D Studio", kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "gml",  label: "CityGML",         kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "ply",  label: "Polygon",         kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "pts",  label: "Point Cloud",     kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "usdz", label: "USDZ",            kind: FileKind::Geometry, tier: 3, renderer: "usdz" },
+        FormatEntry { extension: "usdc", label: "USDC",            kind: FileKind::Geometry, tier: 3, renderer: "usdz" },
+        FormatEntry { extension: "usda", label: "USDA",            kind: FileKind::Geometry, tier: 3, renderer: "usdz" },
+        FormatEntry { extension: "stl",  label: "STL",             kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "obj",  label: "Wavefront OBJ",   kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "wrl",  label: "VRML",            kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "vrml", label: "VRML",            kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "vtk",  label: "VTK Legacy",      kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "vtu",  label: "VTK XML UnstructuredGrid", kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "vtp",  label: "VTK XML PolyData", kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "vti",  label: "VTK XML ImageData", kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "vtr",  label: "VTK XML RectGrid", kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "vts",  label: "VTK XML StructGrid", kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "vtm",  label: "VTK XML MultiBlock", kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "stp",  label: "STEP",            kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "step", label: "STEP",            kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "stpnc", label: "STEP",           kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "p21",  label: "STEP",            kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "210",  label: "STEP",            kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "igs",  label: "IGES",            kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "iges", label: "IGES",            kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "brep", label: "Open CASCADE BRep", kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
     ]
 }
 
