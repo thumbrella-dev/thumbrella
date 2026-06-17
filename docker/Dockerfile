@@ -9,7 +9,6 @@
 # Build:  ./build.sh
 # Run:    podman run --rm -p 3411:3411 local/thumbrella-server:dev
 
-
 FROM lscr.io/linuxserver/ffmpeg:latest
 
 
@@ -22,7 +21,7 @@ LABEL org.opencontainers.image.version="${VERSION}"
 LABEL org.opencontainers.image.licenses="Apache 2"
 
 
-COPY thumbrella /usr/local/thumbrella
+COPY thumbrella /usr/local/bin/thumbrella
 RUN chmod 777 /usr/local/bin/thumbrella
 
 

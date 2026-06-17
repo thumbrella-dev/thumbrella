@@ -40,7 +40,7 @@ VERSION="${VERSION:-$(sed -n 's/^version = "\(.*\)".*/\1/p' "${WORKSPACE}/Cargo.
 
 DOCKPATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-DEVIMAGE="${DEVIMAGE:-local/thumbrella-server:dev}"
+DEVIMAGE="${DEVIMAGE:-thumbrella-server:dev}"
 IMAGE="${IMAGE:-thumbrella/server}"
 
 
