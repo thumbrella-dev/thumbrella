@@ -21,17 +21,17 @@ pub static BACKGROUND_PNG: &[u8] =
 
 /// Per-kind 250×200 JPEG placeholder thumbnails.
 pub mod placeholders {
-    pub static IMAGE:    &[u8] = include_bytes!("../assets/placeholders/image.jpg");
-    pub static VIDEO:    &[u8] = include_bytes!("../assets/placeholders/video.jpg");
-    pub static AUDIO:    &[u8] = include_bytes!("../assets/placeholders/audio.jpg");
-    pub static VECTOR:   &[u8] = include_bytes!("../assets/placeholders/vector.jpg");
-    pub static DOCUMENT: &[u8] = include_bytes!("../assets/placeholders/document.jpg");
-    pub static GEOMETRY: &[u8] = include_bytes!("../assets/placeholders/geometry.jpg");
-    pub static ARCHIVE:  &[u8] = include_bytes!("../assets/placeholders/archive.jpg");
-    pub static TEXT:     &[u8] = include_bytes!("../assets/placeholders/text.jpg");
-    pub static BINARY:   &[u8] = include_bytes!("../assets/placeholders/binary.jpg");
-    pub static UNKNOWN:  &[u8] = include_bytes!("../assets/placeholders/unknown.jpg");
-    pub static FAILED:   &[u8] = include_bytes!("../assets/placeholders/failed.jpg");
+    pub static IMAGE:    &[u8] = include_bytes!("../assets/placeholders/image.jpeg");
+    pub static VIDEO:    &[u8] = include_bytes!("../assets/placeholders/video.jpeg");
+    pub static AUDIO:    &[u8] = include_bytes!("../assets/placeholders/audio.jpeg");
+    pub static VECTOR:   &[u8] = include_bytes!("../assets/placeholders/vector.jpeg");
+    pub static DOCUMENT: &[u8] = include_bytes!("../assets/placeholders/document.jpeg");
+    pub static GEOMETRY: &[u8] = include_bytes!("../assets/placeholders/geometry.jpeg");
+    pub static ARCHIVE:  &[u8] = include_bytes!("../assets/placeholders/archive.jpeg");
+    pub static TEXT:     &[u8] = include_bytes!("../assets/placeholders/text.jpeg");
+    pub static BINARY:   &[u8] = include_bytes!("../assets/placeholders/binary.jpeg");
+    pub static UNKNOWN:  &[u8] = include_bytes!("../assets/placeholders/unknown.jpeg");
+    pub static FAILED:   &[u8] = include_bytes!("../assets/placeholders/failed.jpeg");
 }
 
 /// Return the appropriate placeholder JPEG for a known [`FileKind`], or the

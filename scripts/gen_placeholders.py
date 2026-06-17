@@ -6,8 +6,8 @@ Usage
     python3 scripts/gen_placeholders.py --out crates/tier1/assets/placeholders/
 
 Writes one JPEG per media kind plus a generic 'failed' icon:
-    image.jpg  video.jpg  audio.jpg  vector.jpg  document.jpg
-    geometry.jpg  archive.jpg  text.jpg  binary.jpg  unknown.jpg  failed.jpg
+    image.jpeg  video.jpeg  audio.jpeg  vector.jpeg  document.jpeg
+    geometry.jpeg  archive.jpeg  text.jpeg  binary.jpeg  unknown.jpeg  failed.jpeg
 
 Dependencies (install once):
     pip install cairosvg pillow
@@ -335,7 +335,7 @@ def main() -> None:
     for spec in SPECS:
         svg = build_svg(spec["color"], spec["label"], spec["icon"], spec.get("fg", "white"))
         data = render_jpeg(svg, args.quality)
-        out_path = os.path.join(args.out, f"{spec['name']}.jpg")
+        out_path = os.path.join(args.out, f"{spec['name']}.jpeg")
         with open(out_path, "wb") as fh:
             fh.write(data)
         print(f"  {out_path}  ({len(data):,} bytes)")

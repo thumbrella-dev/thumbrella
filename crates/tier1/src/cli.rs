@@ -207,6 +207,7 @@ async fn run_server(runtime: Arc<Runtime>) {
 
     let app = Router::new()
         .route("/health", get(routes::health))
+        .route("/placeholder/{kind}.jpeg", get(routes::placeholder))
         .route("/thumb.jpeg", get(routes::thumb))
         .route("/thumb", get(routes::thumb))
         .route("/handoff", post(routes::handoff))

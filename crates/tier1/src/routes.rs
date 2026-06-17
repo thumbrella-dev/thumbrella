@@ -1,11 +1,12 @@
 //! Axum HTTP route handlers for the native server.
 //!
 //! Routes:
-//! - `GET  /health`                — liveness probe
-//! - `GET  /thumb.jpeg?url=<url>`  — single thumbnail; returns raw JPEG bytes (canonical)
-//! - `GET  /thumb?url=<url>`       — same handler; alias without extension
-//! - `POST /handoff`               — trusted tier-to-tier thumbnail handoff
-//! - `POST /batch`                 — batch thumbnail + describe; waits for all items, returns one JSON object
+//! - `GET  /health`                       — liveness probe
+//! - `GET  /placeholder/:kind.jpeg`       — static placeholder thumbnail for a file kind
+//! - `GET  /thumb.jpeg?url=<url>`         — single thumbnail; returns raw JPEG bytes (canonical)
+//! - `GET  /thumb?url=<url>`              — same handler; alias without extension
+//! - `POST /handoff`                      — trusted tier-to-tier thumbnail handoff
+//! - `POST /batch`                        — batch thumbnail + describe; waits for all items, returns one JSON object
 //!
 //! # Server token
 //!
@@ -42,6 +43,55 @@ use crate::tracelog::TraceStore;
 /// Liveness probe.  Always returns `{"status":"ok"}`.
 pub async fn health() -> Json<Value> {
     Json(json!({ "status": "ok" }))
+}
+
+// ── GET /placeholder/:kind.jpeg ───────────────────────────────────────────────
+
+/// Serve the static placeholder thumbnail for a given file kind.
+///
+/// Kinds: `image`, `video`, `audio`, `vector`, `document`, `geometry`,
+/// `archive`, `text`, `binary`, `unknown`, `failed`.
+///
+/// The `.jpeg` extension is required — `/placeholder/image.jpeg` works,
+/// `/placeholder/image` does not.
+///
+/// These images are embedded at compile time and never change, so the
+/// response includes aggressive cache headers.
+pub async fn placeholder(
+    axum::extract::Path(kind): axum::extract::Path<String>,
+) -> Response {
+    let Some(kind_name) = kind.strip_suffix(".jpeg") else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    let bytes: &'static [u8] = match kind_name {
+        "image"    => crate::assets::placeholders::IMAGE,
+        "video"    => crate::assets::placeholders::VIDEO,
+        "audio"    => crate::assets::placeholders::AUDIO,
+        "vector"   => crate::assets::placeholders::VECTOR,
+        "document" => crate::assets::placeholders::DOCUMENT,
+        "geometry" => crate::assets::placeholders::GEOMETRY,
+        "archive"  => crate::assets::placeholders::ARCHIVE,
+        "text"     => crate::assets::placeholders::TEXT,
+        "binary"   => crate::assets::placeholders::BINARY,
+        "unknown"  => crate::assets::placeholders::UNKNOWN,
+        "failed"   => crate::assets::placeholders::FAILED,
+        // Forward-compatible: any unrecognised kind silently falls back to
+        // the generic "unknown" placeholder rather than 404-ing, so clients
+        // that reference a kind added in a newer server release still get a
+        // valid JPEG.
+        _ => crate::assets::placeholders::UNKNOWN,
+    };
+
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "image/jpeg"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        Bytes::from_static(bytes),
+    )
+        .into_response()
 }
 
 // ── GET /thumb ────────────────────────────────────────────────────────────────
