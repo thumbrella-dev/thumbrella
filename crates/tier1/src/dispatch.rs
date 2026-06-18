@@ -92,7 +92,9 @@ pub struct ThumbRoute {
 pub fn route(kind: FileKind, extension: Option<&str>) -> ThumbRoute {
     match (kind, extension) {
         // ── Tier 1 — pure Rust (image crate) ─────────────────────────────────
-        (FileKind::Image, Some("png" | "gif" | "webp" | "bmp" | "tiff"))
+        // ico is decoded as a small-image shortcut; listed explicitly so it
+        // appears in diagnostics and the route recommendation is accurate.
+        (FileKind::Image, Some("png" | "gif" | "webp" | "bmp" | "tiff" | "ico"))
         | (FileKind::Image, None) =>
             ThumbRoute { tier: 1 },
 
@@ -112,13 +114,16 @@ pub fn route(kind: FileKind, extension: Option<&str>) -> ThumbRoute {
             ThumbRoute { tier: 2 },
 
         // ── Tier 2 — libav: HDR/specialty images ──────────────────────────────
-        (FileKind::Image, Some("exr" | "hdr" | "avif" | "heic" | "heif" | "jxl")) =>
+        (FileKind::Image, Some("exr" | "hdr" | "avif" | "heic" | "heif" | "jxl"
+            | "ppm" | "pgm" | "pbm" | "tga")) =>
             ThumbRoute { tier: 2 },
 
         // ── Tier 2 — camera raw containers (tier1 may still shortcut first) ─
+        // Union of dispatch route() and shortcut.rs raw preview list.
         (FileKind::Image, Some(
             "dng" | "cr2" | "nef" | "arw" | "orf" | "rw2"
             | "pef" | "srw" | "raf" | "3fr" | "fff" | "iiq" | "raw"
+            | "mef" | "rwl"
         )) =>
             ThumbRoute { tier: 2 },
 
@@ -203,16 +208,43 @@ pub fn format_manifest() -> &'static [FormatEntry] {
         FormatEntry { extension: "dng",  label: "DNG (raw)",       kind: FileKind::Image,   tier: 2, renderer: "raw_preview" },
         FormatEntry { extension: "cr2",  label: "CR2 (raw)",       kind: FileKind::Image,   tier: 2, renderer: "raw_preview" },
         FormatEntry { extension: "nef",  label: "NEF (raw)",       kind: FileKind::Image,   tier: 2, renderer: "raw_preview" },
+        FormatEntry { extension: "mef",  label: "Mamiya RAW",      kind: FileKind::Image,   tier: 2, renderer: "raw_preview" },
+        FormatEntry { extension: "rwl",  label: "Leica RAW",       kind: FileKind::Image,   tier: 2, renderer: "raw_preview" },
         FormatEntry { extension: "psd",  label: "PSD",             kind: FileKind::Image,   tier: 2, renderer: "libav" },
+        FormatEntry { extension: "ppm",  label: "PPM image",       kind: FileKind::Image,   tier: 2, renderer: "libav" },
+        FormatEntry { extension: "pgm",  label: "PGM image",       kind: FileKind::Image,   tier: 2, renderer: "libav" },
+        FormatEntry { extension: "pbm",  label: "PBM image",       kind: FileKind::Image,   tier: 2, renderer: "libav" },
+        FormatEntry { extension: "tga",  label: "Targa",           kind: FileKind::Image,   tier: 2, renderer: "libav" },
+        // ── Tier 2 — video (libav / ffmpeg) ───────────────────────────
         FormatEntry { extension: "mp4",  label: "MP4 video",       kind: FileKind::Video,   tier: 2, renderer: "libav" },
         FormatEntry { extension: "mov",  label: "QuickTime",       kind: FileKind::Video,   tier: 2, renderer: "libav" },
         FormatEntry { extension: "avi",  label: "AVI",             kind: FileKind::Video,   tier: 2, renderer: "libav" },
         FormatEntry { extension: "webm", label: "WebM",            kind: FileKind::Video,   tier: 2, renderer: "libav" },
         FormatEntry { extension: "mkv",  label: "Matroska",        kind: FileKind::Video,   tier: 2, renderer: "libav" },
+        FormatEntry { extension: "flv",  label: "Flash Video",     kind: FileKind::Video,   tier: 2, renderer: "libav" },
+        FormatEntry { extension: "ts",   label: "MPEG Transport Stream", kind: FileKind::Video, tier: 2, renderer: "libav" },
+        FormatEntry { extension: "m4v",  label: "MPEG-4 Video",   kind: FileKind::Video,   tier: 2, renderer: "libav" },
+        FormatEntry { extension: "3gp",  label: "3GPP video",     kind: FileKind::Video,   tier: 2, renderer: "libav" },
+        FormatEntry { extension: "ogv",  label: "Ogg video",      kind: FileKind::Video,   tier: 2, renderer: "libav" },
+        FormatEntry { extension: "wmv",  label: "Windows Media Video", kind: FileKind::Video, tier: 2, renderer: "libav" },
+        FormatEntry { extension: "mpeg", label: "MPEG video",     kind: FileKind::Video,   tier: 2, renderer: "libav" },
+        // ── Tier 2 — audio (libav / ffmpeg) ───────────────────────────
         FormatEntry { extension: "mp3",  label: "MP3 audio",       kind: FileKind::Audio,   tier: 2, renderer: "libav" },
         FormatEntry { extension: "wav",  label: "WAV audio",       kind: FileKind::Audio,   tier: 2, renderer: "libav" },
         FormatEntry { extension: "flac", label: "FLAC audio",      kind: FileKind::Audio,   tier: 2, renderer: "libav" },
         FormatEntry { extension: "ogg",  label: "Ogg audio",       kind: FileKind::Audio,   tier: 2, renderer: "libav" },
+        FormatEntry { extension: "m4a",  label: "MPEG-4 Audio",   kind: FileKind::Audio,   tier: 2, renderer: "libav" },
+        FormatEntry { extension: "aac",  label: "AAC audio",       kind: FileKind::Audio,   tier: 2, renderer: "libav" },
+        FormatEntry { extension: "wma",  label: "Windows Media Audio", kind: FileKind::Audio, tier: 2, renderer: "libav" },
+        FormatEntry { extension: "aiff", label: "AIFF audio",      kind: FileKind::Audio,   tier: 2, renderer: "libav" },
+        FormatEntry { extension: "opus", label: "Opus audio",      kind: FileKind::Audio,   tier: 2, renderer: "libav" },
+        // ── Tier 2 — documents (thumbnail extraction from ZIP) ────────
+        FormatEntry { extension: "odt",  label: "ODT document",    kind: FileKind::Document, tier: 2, renderer: "builtin" },
+        FormatEntry { extension: "ods",  label: "ODS spreadsheet", kind: FileKind::Document, tier: 2, renderer: "builtin" },
+        FormatEntry { extension: "odp",  label: "ODP presentation",kind: FileKind::Document, tier: 2, renderer: "builtin" },
+        FormatEntry { extension: "docx", label: "DOCX document",   kind: FileKind::Document, tier: 2, renderer: "builtin" },
+        FormatEntry { extension: "xlsx", label: "XLSX spreadsheet",kind: FileKind::Document, tier: 2, renderer: "builtin" },
+        FormatEntry { extension: "pptx", label: "PPTX presentation",kind: FileKind::Document, tier: 2, renderer: "builtin" },
 
         // ── Tier 3 — ffmpeg CLI: arithmetic JPEG + all image formats ──────────
         FormatEntry { extension: "jpeg", label: "JPEG (arithmetic)", kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli" },

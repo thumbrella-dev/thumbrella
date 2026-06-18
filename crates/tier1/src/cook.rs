@@ -802,6 +802,7 @@ impl<S: HttpStream> ThumbCook<S> {
     /// Run the full pipeline and optionally emit intermediate progress snapshots.
     pub async fn run_with_progress(
         mut self,
+        #[allow(unused_mut, unused_variables)]
         mut on_progress: Option<Box<dyn FnMut(ThumbResult) + Send>>,
     ) -> (ThumbResult, ThumbTrace, AfterResponse)
     where

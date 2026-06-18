@@ -284,20 +284,34 @@ fn sniff_svg(bytes: &[u8]) -> bool {
 /// that the `infer` crate assigns to all TIFF-magic files.
 fn is_raw_tiff_extension(ext: &str) -> bool {
     matches!(ext, "dng" | "cr2" | "nef" | "arw" | "orf" | "rw2"
-                | "pef" | "srw" | "3fr" | "mef" | "rwl")
+                | "pef" | "srw" | "raf" | "3fr" | "fff" | "iiq"
+                | "mef" | "rwl" | "raw")
 }
 
 /// Normalise common extension aliases to their canonical form.
 /// Unknown extensions are returned as-is.
 pub fn canonical_extension(raw: &str) -> String {
     match raw {
-        "jpg"          => "jpeg",
-        "tif"          => "tiff",
-        "htm"          => "html",
-        "mpg"          => "mpeg",
-        "mid"          => "midi",
-        "svg" | "svgz" => "svg",
-        other          => other,
+        // image formats
+        "jpg" | "jpe"   => "jpeg",
+        "tif"           => "tiff",
+        "j2k"           => "jp2",
+        "sxr" | "mxr"   => "exr",
+        "rgbe"          => "hdr",
+        "rgb" | "rgba" | "int" | "inta" => "sgi",
+        // video / audio
+        "mpg" | "mpe"   => "mpeg",
+        "mid"           => "midi",
+        // vector
+        "svg" | "svgz"  => "svg",
+        // 3D geometry
+        "wrl"           => "vrml",
+        "stp" | "stpnc" | "p21" | "210" => "step",
+        "igs"           => "iges",
+        "ex2" | "e"     => "exo",
+        // web
+        "htm"           => "html",
+        other           => other,
     }.to_string()
 }
 
@@ -375,32 +389,34 @@ fn mime_to_kind(mime: &str, ext: &str) -> FileKind {
 fn ext_to_kind(ext: &str) -> FileKind {
     match ext {
         "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff"
-        | "avif" | "heic" | "heif" | "exr" | "hdr" | "rgbe"
-        | "apng" | "ico" | "xcf"                           => FileKind::Image,
+        | "avif" | "heic" | "heif" | "exr" | "hdr"
+        | "apng" | "ico" | "xcf" | "jxl" | "psd"
+        | "ppm" | "pgm" | "pbm" | "tga"                    => FileKind::Image,
+        // JPEG 2000
+        "jp2"                                               => FileKind::Image,
         // Studio / VFX image formats (via oiiotool).
-        "sxr" | "mxr" | "dpx" | "cin" | "dds" | "fits"
-        | "iff" | "pic" | "rla" | "sgi" | "rgb" | "rgba"
-        | "int" | "inta" | "zfile"                         => FileKind::Image,
+        "sgi" | "dpx" | "cin" | "dds" | "fits"
+        | "iff" | "pic" | "rla" | "zfile"                  => FileKind::Image,
         // Camera-raw formats (TIFF-based containers).
         "dng" | "cr2" | "nef" | "arw" | "orf" | "rw2"
-        | "pef" | "srw" | "3fr" | "mef" | "rwl"          => FileKind::Image,
+        | "pef" | "srw" | "3fr" | "mef" | "rwl"
+        | "raf" | "fff" | "iiq" | "raw"                    => FileKind::Image,
         "svg" | "emf" | "wmf"                              => FileKind::Vector,
         "mp4" | "mov" | "mkv" | "avi" | "webm" | "mpeg"
-        | "ogv"                                            => FileKind::Video,
+        | "ogv" | "flv" | "ts" | "m4v" | "3gp" | "wmv"    => FileKind::Video,
         "mp3" | "ogg" | "flac" | "wav" | "m4a"
-        | "aac" | "midi" | "opus" | "oga" | "weba"        => FileKind::Audio,
+        | "aac" | "midi" | "opus" | "oga" | "weba"
+        | "wma" | "aiff"                                    => FileKind::Audio,
         "pdf" | "docx" | "xlsx" | "pptx" | "odt"
         | "doc" | "xls" | "ppt" | "odp" | "ods"
-        | "epub" | "rtf"                                  => FileKind::Document,
+        | "epub" | "rtf" | "html" | "xhtml"                 => FileKind::Document,
         "usdz" | "glb" | "gltf" | "obj" | "stl" | "fbx" | "dae" | "dxf"
-        | "off" | "3ds" | "gml" | "ply" | "pts" | "wrl" | "vrml"
+        | "off" | "3ds" | "gml" | "ply" | "pts" | "vrml"
         | "vtk" | "vtu" | "vtp" | "vti" | "vtr" | "vts" | "vtm"
-        | "stp" | "step" | "stpnc" | "p21" | "210"
-        | "igs" | "iges" | "brep" | "exo" | "ex2" | "e" => FileKind::Geometry,
+        | "step" | "iges" | "brep" | "exo"                 => FileKind::Geometry,
         "zip" | "tar" | "gz" | "bz2" | "xz" | "rar" | "7z" => FileKind::Archive,
-        "html" | "xhtml"                                  => FileKind::Document,
-        "xml" | "json" | "txt" | "csv" | "md"            => FileKind::Text,
-        _                                                  => FileKind::Unknown,
+        "xml" | "json" | "txt" | "csv" | "md"              => FileKind::Text,
+        _                                                    => FileKind::Unknown,
     }
 }
 
@@ -416,14 +432,19 @@ fn mime_to_extension(mime: &str) -> &'static str {
         "image/emf"        => "emf",
         "image/x-xcf"      => "xcf",
         "image/apng"       => "apng", "image/vnd.microsoft.icon" => "ico",
+        "image/jxl"        => "jxl",  "image/vnd.adobe.photoshop" => "psd",
+        "image/jp2"        => "jp2",
         "video/mp4"        => "mp4",  "video/quicktime"  => "mov",
         "video/webm"       => "webm", "video/mpeg"       => "mpeg",
-        "video/ogg"        => "ogv",
+        "video/ogg"        => "ogv",  "video/x-flv"      => "flv",
+        "video/mp2t"       => "ts",   "video/3gpp"      => "3gp",
+        "video/x-ms-wmv"   => "wmv",
         "audio/mpeg"       => "mp3",  "audio/ogg"        => "ogg",
         "audio/flac"       => "flac", "audio/wav"        => "wav",
         "audio/mp4"        => "m4a",  "audio/aac"        => "aac",
         "audio/midi" | "audio/x-midi" => "midi",
-        "audio/webm"       => "weba",
+        "audio/webm"       => "weba", "audio/x-ms-wma"   => "wma",
+        "audio/aiff"       => "aiff",
         "application/pdf"  => "pdf",
         "application/zip"  => "zip",  "application/gzip" => "gz",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
@@ -457,25 +478,39 @@ fn ext_to_mime(ext: &str) -> &'static str {
         "avif" => "image/avif",   "heic" => "image/heic",
         "heif" => "image/heif",   "exr"  => "image/x-exr",
         "hdr"  => "image/vnd.radiance",
+        "jxl"  => "image/jxl",    "psd"  => "image/vnd.adobe.photoshop",
+        "jp2"  => "image/jp2",
+        "ppm"  => "image/x-portable-pixmap",
+        "pgm"  => "image/x-portable-graymap",
+        "pbm"  => "image/x-portable-bitmap",
+        "tga"  => "image/x-tga",
         "xcf"  => "image/x-xcf",
+        "sgi"  => "image/x-sgi",  "dpx"  => "image/x-dpx",
+        "cin"  => "image/x-cineon", "dds" => "image/vnd-ms.dds",
+        "fits" => "image/fits",   "iff"  => "image/x-iff",
         "dng"  => "image/x-adobe-dng",
         "cr2"  => "image/x-canon-cr2",   "nef"  => "image/x-nikon-nef",
         "arw"  => "image/x-sony-arw",    "orf"  => "image/x-olympus-orf",
         "rw2"  => "image/x-panasonic-rw2", "pef" => "image/x-pentax-pef",
         "srw"  => "image/x-samsung-srw", "3fr"  => "image/x-hasselblad-3fr",
         "mef"  => "image/x-mamiya-mef",  "rwl"  => "image/x-leica-rwl",
+        "raf"  => "image/x-fuji-raf",    "fff"  => "image/x-hasselblad-fff",
+        "iiq"  => "image/x-phaseone-iiq", "raw" => "image/x-raw",
         "svg"  => "image/svg+xml",    "emf"  => "image/emf",
         "wmf"  => "image/wmf",
         "apng" => "image/apng",   "ico"  => "image/vnd.microsoft.icon",
         "mp4"  => "video/mp4",    "mov"  => "video/quicktime",
         "mkv"  => "video/x-matroska", "avi" => "video/x-msvideo",
         "webm" => "video/webm",   "mpeg" => "video/mpeg",
-        "ogv"  => "video/ogg",
+        "ogv"  => "video/ogg",    "flv"  => "video/x-flv",
+        "ts"   => "video/mp2t",   "m4v"  => "video/mp4",
+        "3gp"  => "video/3gpp",   "wmv"  => "video/x-ms-wmv",
         "mp3"  => "audio/mpeg",   "ogg"  => "audio/ogg",
         "flac" => "audio/flac",   "wav"  => "audio/wav",
         "m4a"  => "audio/mp4",    "aac"  => "audio/aac",
         "midi" => "audio/midi",   "opus" => "audio/ogg",
         "oga"  => "audio/ogg",    "weba" => "audio/webm",
+        "wma"  => "audio/x-ms-wma", "aiff" => "audio/aiff",
         "pdf"  => "application/pdf",
         "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -488,18 +523,20 @@ fn ext_to_mime(ext: &str) -> &'static str {
         "ppt"  => "application/vnd.ms-powerpoint",
         "epub" => "application/epub+zip",
         "rtf"  => "application/rtf",
+        "html" => "text/html",    "xhtml" => "application/xhtml+xml",
         "zip"  => "application/zip",
         "tar"  => "application/x-tar",
         "gz"   => "application/gzip",
         "rar"  => "application/vnd.rar",
         "7z"   => "application/x-7z-compressed",
-        "html" => "text/html",    "xml"  => "text/xml",
+        "xml"  => "text/xml",
         "json" => "application/json", "txt" => "text/plain",
         "csv"  => "text/csv",     "md"   => "text/markdown",
         "usdz" => "model/vnd.usdz+zip", "glb" => "model/gltf-binary",
         "gltf" => "model/gltf+json",    "obj" => "model/obj",
         "fbx"  => "application/vnd.fbx", "dae" => "model/vnd.collada+xml",
-        "stl"  => "model/stl",
+        "stl"  => "model/stl",    "vrml"  => "model/vrml",
+        "step" => "model/step",   "iges"  => "model/iges",
         _      => "application/octet-stream",
     }
 }
