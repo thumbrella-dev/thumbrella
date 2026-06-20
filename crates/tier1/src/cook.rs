@@ -157,7 +157,7 @@ pub struct Runtime {
     pub handshake: Option<String>,
     /// Allow `file://` URLs and bare absolute paths in HTTP endpoint requests.
     ///
-    /// Set from [`AppConfig::allow_local`] (`TBR_ALLOW_FILES`).  Propagated
+    /// Set from [`AppConfig::allow_local`] (`TBR_ALLOW_LOCAL`).  Propagated
     /// to each [`InputSpec`] by the route handlers.  The second-line guard
     /// in `pipeline::connect` also checks `InputSpec::allow_local` directly.
     pub allow_local: bool,
@@ -593,6 +593,7 @@ impl<S: HttpStream> ThumbCook<S> {
             download_size: self.out_download_bytes,
             message:       if self.out_message.is_empty() { None } else { Some(self.out_message.clone()) },
             placeholder:   self.out_placeholder.clone(),
+            http_status:   if self.http_status > 0 { Some(self.http_status) } else { None },
             source:        if self.status == CookStatus::Fresh {
                 Some(ResultSource::NotModified)
             } else if let Some(ps) = self.placeholder_source {
@@ -633,6 +634,7 @@ impl<S: HttpStream> ThumbCook<S> {
             placeholder:   Some(self.out_placeholder.clone().unwrap_or_else(|| {
                                kind_slug(kind).to_string()
                            })),
+            http_status:   if self.http_status > 0 { Some(self.http_status) } else { None },
             source:        None,
             media:         Some(ThumbMedia {
                 url:        self.input.url.clone(),

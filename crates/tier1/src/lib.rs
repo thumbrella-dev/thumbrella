@@ -42,6 +42,9 @@ pub mod url_safety;
 // ── Native-only modules ───────────────────────────────────────────────────────
 
 #[cfg(feature = "native")]
+pub mod ux;
+
+#[cfg(feature = "native")]
 pub mod config;
 
 #[cfg(feature = "native")]

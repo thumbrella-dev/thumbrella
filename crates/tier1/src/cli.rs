@@ -141,10 +141,17 @@ where
     F: FnOnce(Arc<Runtime>) -> Fut,
     Fut: std::future::Future<Output = Arc<Runtime>>,
 {
-    tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    // Initialise the UX subsystem first — it controls all output.
+    let ux = crate::ux::init();
+
+    // Only enable tracing-driven logging in full mode.
+    // In standard/minimal mode, all user-facing output goes through ux.
+    if ux.style.show_raw_logs() {
+        tracing_subscriber::registry()
+            .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+    }
 
     let cli = Cli::parse();
 
@@ -203,7 +210,22 @@ async fn run_server(runtime: Arc<Runtime>) {
     use crate::{config::AppConfig, routes};
 
     let cfg = AppConfig::from_env();
-    tracing::info!(version = crate::TBR_VERSION, "thumbrella starting");
+    let ux = crate::ux::get();
+
+    // Startup block — banner, hints, and connection info.
+    let has_handshake = cfg.handshake.is_some() || !cfg.tier2.headers.is_empty() || !cfg.tier3.headers.is_empty();
+    ux.print_startup(
+        cfg.port,
+        crate::TBR_VERSION,
+        has_handshake,
+        cfg.cache_url.is_some(),
+        cfg.tier2.url.is_some(),
+        cfg.tier3.url.is_some(),
+    );
+
+    if ux.style.show_raw_logs() {
+        tracing::info!(version = crate::TBR_VERSION, "thumbrella starting");
+    }
 
     let app = Router::new()
         .route("/health", get(routes::health))
@@ -212,6 +234,7 @@ async fn run_server(runtime: Arc<Runtime>) {
         .route("/thumb", get(routes::thumb))
         .route("/handoff", post(routes::handoff))
         .route("/batch", post(routes::batch))
+        .fallback(routes::not_found)
         .layer(axum::middleware::from_fn_with_state(
             runtime.clone(),
             routes::require_handshake,
@@ -219,10 +242,25 @@ async fn run_server(runtime: Arc<Runtime>) {
         .with_state(runtime);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
-    tracing::info!(%addr, "listening");
 
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app)
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            ux.fatal(
+                &format!("could not bind port {} — address already in use", cfg.port),
+                &format!(
+                    "Set TBR_PORT to a different port, or stop any existing \
+                     server and try again.  (details: {e})"
+                ),
+            );
+        }
+    };
+
+    if ux.style.show_raw_logs() {
+        tracing::info!(%addr, "listening");
+    }
+
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(shutdown_signal())
         .await
         .unwrap();
@@ -236,11 +274,14 @@ async fn run_server(runtime: Arc<Runtime>) {
 /// and shut down cleanly instead of being force-killed after the Docker
 /// stop timeout.
 async fn shutdown_signal() {
+    let ux = crate::ux::get();
+    let show = ux.style.show_raw_logs();
+
     let ctrl_c = async {
         tokio::signal::ctrl_c()
             .await
             .expect("failed to install Ctrl+C handler");
-        tracing::info!("received SIGINT, shutting down");
+        if show { tracing::info!("received SIGINT, shutting down"); }
     };
 
     #[cfg(unix)]
@@ -249,7 +290,7 @@ async fn shutdown_signal() {
             .expect("failed to install SIGTERM handler")
             .recv()
             .await;
-        tracing::info!("received SIGTERM, shutting down");
+        if show { tracing::info!("received SIGTERM, shutting down"); }
     };
 
     #[cfg(not(unix))]
@@ -260,7 +301,7 @@ async fn shutdown_signal() {
         _ = terminate => {},
     }
 
-    tracing::info!("shutdown signal received, draining connections");
+    if show { tracing::info!("shutdown signal received, draining connections"); }
 }
 
 // ── thumb (CLI) ───────────────────────────────────────────────────────────────

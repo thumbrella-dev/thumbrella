@@ -29,6 +29,15 @@ use tier1::media::FileKind;
 use tier1::renderer::{RenderOutput, apply_render_output};
 use tier1::spec::ThumbnailConfig;
 
+/// Emit a debug message only when raw logs are enabled (TBR_LOG=full).
+macro_rules! tbr_debug {
+    ($($arg:tt)*) => {
+        if tier1::ux::show_raw_logs() {
+            eprintln!($($arg)*);
+        }
+    };
+}
+
 // ── Renderer ──────────────────────────────────────────────────────────────────
 
 pub struct Tier2Renderer;
@@ -51,7 +60,7 @@ impl InProcessRenderer for Tier2Renderer {
             let kind           = cook.media_kind();
             let ext            = cook.media_extension().unwrap_or("?").to_string();
             let content_length = cook.content_length();
-            eprintln!("[tier2] render: kind={kind:?}  ext={ext}  content_length={content_length:?}");
+            tbr_debug!("[tier2] render: kind={kind:?}  ext={ext}  content_length={content_length:?}");
 
             match kind {
                 Some(FileKind::Image) => {
@@ -59,13 +68,13 @@ impl InProcessRenderer for Tier2Renderer {
                     // immediately so tier3's oiiotool / ffmpeg CLI can
                     // take over without the reader being consumed.
                     if !tier2_handles_image(&ext) {
-                        eprintln!("[tier2] unsupported image format {ext} — deferring to higher tier");
+                        tbr_debug!("[tier2] unsupported image format {ext} — deferring to higher tier");
                         return false;
                     }
                     // Early-exit for arithmetic JPEGs: libav's mjpeg decoder
                     // does not support SOF9/SOF10.
                     if is_jpeg_format(&ext) && is_arithmetic_peek(cook) {
-                        eprintln!("[tier2] arithmetic JPEG detected — deferring to higher tier");
+                        tbr_debug!("[tier2] arithmetic JPEG detected — deferring to higher tier");
                         return false;
                     }
                     render_image(cook, &ext, content_length).await
@@ -360,7 +369,7 @@ fn extract_raw_preview(
     if jpeg_bytes.len() < 4 || jpeg_bytes[0] != 0xFF || jpeg_bytes[1] != 0xD8 {
         return Err(reader);
     }
-    eprintln!("[tier2] raw_preview: {} bytes JPEG @ offset {}", jpeg_bytes.len(), jpeg_off);
+    tbr_debug!("[tier2] raw_preview: {} bytes JPEG @ offset {}", jpeg_bytes.len(), jpeg_off);
 
     let mut img = match image::load_from_memory(&jpeg_bytes) {
         Ok(i) => i,
@@ -468,7 +477,7 @@ async fn render_image(
     };
 
     let ext_owned = ext.to_string();
-    eprintln!("[tier2] render_image: streaming reader  ext={ext}");
+    tbr_debug!("[tier2] render_image: streaming reader  ext={ext}");
 
     let (result, avio_bytes): (Option<RenderOutput>, u64) = if is_image_crate_format(ext) {
         tokio::task::spawn_blocking(move || {
@@ -519,7 +528,7 @@ async fn render_image(
         tokio::task::spawn_blocking(move || {
             let mut reader = reader;
             if detect_arithmetic_jpeg(&mut *reader) {
-                eprintln!("[tier2] arithmetic JPEG detected — deferring to tier 3");
+                tbr_debug!("[tier2] arithmetic JPEG detected — deferring to tier 3");
                 // Reader is dropped here.  The renderer returns false,
                 // which tells the cook the format was not handled.
                 // The cook marks the result as Unavailable and finishes.
@@ -611,7 +620,7 @@ async fn render_vector(
     };
 
     let ext_owned = ext.to_string();
-    eprintln!("[tier2] render_vector: streaming reader  ext={ext}");
+    tbr_debug!("[tier2] render_vector: streaming reader  ext={ext}");
 
     let result = if is_svg_format(&ext_owned) {
         tokio::task::spawn_blocking(move || {
@@ -664,7 +673,7 @@ async fn render_video(
     };
 
     let ext_owned = ext.to_string();
-    eprintln!("[tier2] render_video: streaming reader  ext={ext}  seek={VIDEO_SEEK_SECS}s");
+    tbr_debug!("[tier2] render_video: streaming reader  ext={ext}  seek={VIDEO_SEEK_SECS}s");
 
     let (result, avio_bytes) = tokio::task::spawn_blocking(move || {
         crate::avdecode::decode_with_libav(reader, content_length, Some(ext_owned), 0, Some(VIDEO_SEEK_SECS))
@@ -696,7 +705,7 @@ fn collect_and_decode_image_crate(
 
     let mut bytes = Vec::with_capacity(content_length.unwrap_or(65536) as usize);
     std::io::Read::read_to_end(&mut reader, &mut bytes).ok()?;
-    eprintln!("[tier2] collect_and_decode_image_crate: {} bytes  ext={}", bytes.len(), ext);
+    tbr_debug!("[tier2] collect_and_decode_image_crate: {} bytes  ext={}", bytes.len(), ext);
 
     // Read EXIF orientation before decoding — the `image` crate does not
     // apply it automatically.
@@ -811,7 +820,7 @@ fn decode_jpeg_dct(
 
 /// Write a `RenderOutput` (or failure) into the cook.  Always returns `true`.
 fn apply_result(cook: &mut dyn RenderCook, result: Option<RenderOutput>) -> bool {
-    eprintln!("[tier2] result: {}", if result.is_some() { "ok" } else { "decode failed" });
+    tbr_debug!("[tier2] result: {}", if result.is_some() { "ok" } else { "decode failed" });
     match result {
         Some(out) => apply_render_output(cook, out),
         None      => cook.fail_cook("render failed: could not decode image"),

@@ -150,6 +150,9 @@ pub struct ThumbResult {
     pub download_size: u64,
     /// Placeholder token; `Some` when a fallback icon is used.
     pub placeholder: Option<String>,
+    /// HTTP status code returned by the remote source, if fetched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
     /// Stable media payload; `None` on total failure.
     #[serde(default)]
     pub media: Option<ThumbMedia>,
@@ -165,6 +168,7 @@ impl Default for ThumbResult {
             duration:      0.0,
             download_size: 0,
             placeholder:   None,
+            http_status:   None,
             media:         None,
         }
     }

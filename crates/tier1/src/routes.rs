@@ -19,30 +19,161 @@ use std::{convert::Infallible, sync::Arc};
 use axum::{
     body::Body,
     Json,
-    extract::{Query, Request, State},
-    http::{HeaderMap, StatusCode, header},
+    extract::{ConnectInfo, Query, Request, State},
+    http::{HeaderMap, Method, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
 use futures::stream::{self, FuturesUnordered, StreamExt};
 use serde_json::{json, Value};
+use std::net::SocketAddr;
 use tokio::{sync::mpsc, task::JoinSet};
+use web_time::Instant;
 
 use crate::cook::{InputSpec, Runtime, ThumbCook};
 use crate::cache::CacheStore;
 use crate::http_buf::PlatformStream;
 use crate::handoff::{HANDSHAKE_HEADER, HandoffResponse, ThumbHandoff};
+use crate::media::FileKind;
 use crate::request::CallRequest;
 use crate::result::ResultSource;
 use crate::source::CacheHints;
 use crate::tracelog::TraceStore;
+use crate::ux;
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Extract a client IP from request headers or connection info.
+fn client_ip(headers: &HeaderMap, connect_info: Option<&SocketAddr>) -> Option<String> {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(|s| s.trim().to_string())
+        .or_else(|| connect_info.map(|a| a.ip().to_string()))
+}
+
+/// Return a human-readable string for a FileKind.
+fn kind_str(kind: FileKind) -> &'static str {
+    match kind {
+        FileKind::Image    => "image",
+        FileKind::Video    => "video",
+        FileKind::Audio    => "audio",
+        FileKind::Vector   => "vector",
+        FileKind::Document => "document",
+        FileKind::Geometry => "geometry",
+        FileKind::Archive  => "archive",
+        FileKind::Text     => "text",
+        FileKind::Binary   => "binary",
+        FileKind::Unknown  => "unknown",
+    }
+}
+
+/// Return a human-readable label for a ResultSource.
+fn source_label(source: &ResultSource) -> &'static str {
+    match source {
+        ResultSource::Render      => "render",
+        ResultSource::Cache       => "cache",
+        ResultSource::Shortcut    => "shortcut",
+        ResultSource::Placeholder => "placeholder",
+        ResultSource::Fallback    => "fallback",
+        ResultSource::NotModified => "not_modified",
+        ResultSource::Client      => "client_error",
+    }
+}
+
+/// Log a completed thumbnail result through the UX layer.
+fn log_result(result: &crate::ThumbResult, duration_ms: u64) {
+    let ux = ux::get();
+    let media = result.media.as_ref();
+    // Use the remote HTTP status when available (reflects what the source
+    // server returned), falling back to our result-status mapping.
+    let status_code = result.http_status.unwrap_or_else(|| match result.status {
+        crate::result::ResultStatus::Success     => 200,
+        crate::result::ResultStatus::Failed      => 500,
+        crate::result::ResultStatus::Overloaded  => 503,
+        crate::result::ResultStatus::Intermediate => 102,
+    });
+    ux.log_thumb_result(
+        &result.url,
+        status_code,
+        duration_ms,
+        media.map(|m| kind_str(m.kind)),
+        media.map(|m| m.extension.as_str()),
+        result.source.as_ref().map(source_label),
+        result.message.as_deref(),
+    );
+}
 
 // ── GET /health ───────────────────────────────────────────────────────────────
 
 /// Liveness probe.  Always returns `{"status":"ok"}`.
-pub async fn health() -> Json<Value> {
+///
+/// Logging is rate-limited: after 20 health checks, further requests are
+/// suppressed and a one-time hint is printed.
+pub async fn health(
+    headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
+) -> Json<Value> {
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    static HEALTH_COUNT: AtomicU32 = AtomicU32::new(0);
+    static HINT_SHOWN: AtomicBool = AtomicBool::new(false);
+
+    let full_log = matches!(std::env::var("TBR_LOG").as_deref(), Ok("full"));
+    let n = HEALTH_COUNT.fetch_add(1, Ordering::Relaxed);
+    let ip = client_ip(&headers, Some(&connect_info.0)).unwrap_or_else(|| "?".to_string());
+
+    if full_log || n < 20 {
+        let line = format!("GET /health from {ip}\n");
+        let _ = std::io::Write::write_all(&mut std::io::stdout(), line.as_bytes());
+    } else if !HINT_SHOWN.swap(true, Ordering::Relaxed) {
+        let line = "  # hint: no longer showing /health requests, use TBR_LOG=full to see them\n";
+        let _ = std::io::Write::write_all(&mut std::io::stdout(), line.as_bytes());
+    }
+
     Json(json!({ "status": "ok" }))
+}
+
+// ── Fallback — 404 for unknown routes ─────────────────────────────────────────
+
+/// Catch-all for unmatched routes.  Logs the request and returns 404.
+pub async fn not_found(
+    method: Method,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
+) -> Response {
+    let ip = client_ip(&headers, Some(&connect_info.0));
+    let line = format!(
+        "{} {} from {} - 404 not found\n",
+        colour::cyan(method.as_str()),
+        uri.path(),
+        ip.as_deref().unwrap_or("?"),
+    );
+    let _ = std::io::Write::write_all(&mut std::io::stdout(), line.as_bytes());
+    (StatusCode::NOT_FOUND, Json(json!({ "error": "not found" }))).into_response()
+}
+
+/// Log a request that returned early with an error (missing param, bad URL, etc.).
+fn log_early_exit(method: &str, path: &str, reason: &str, ip: &Option<String>) {
+    let ip_str = ip.as_deref().unwrap_or("?");
+    let line = format!(
+        "{} {} from {} - 400 {}\n",
+        colour::cyan(method),
+        path,
+        ip_str,
+        reason,
+    );
+    let _ = std::io::Write::write_all(&mut std::io::stdout(), line.as_bytes());
+}
+
+/// Tiny colour helpers — duplicated here to avoid a circular dep on ux.
+mod colour {
+    pub(super) fn cyan(s: &str) -> String {
+        if std::env::var("NO_COLOR").is_ok_and(|v| !v.is_empty()) { s.to_string() }
+        else { format!("\x1b[36m{s}\x1b[0m") }
+    }
 }
 
 // ── GET /placeholder/:kind.jpeg ───────────────────────────────────────────────
@@ -125,21 +256,32 @@ pub async fn placeholder(
 /// | 500    | JSON error          | Pipeline or upstream server error  |
 #[derive(serde::Deserialize)]
 pub struct ThumbQuery {
-    pub url: String,
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 pub async fn thumb(
     State(runtime): State<Arc<Runtime>>,
+    method: Method,
     Query(q): Query<ThumbQuery>,
     headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
 ) -> axum::response::Response {
-    if q.url.is_empty() {
+    let t0 = Instant::now();
+    let ip = client_ip(&headers, Some(&connect_info.0));
+    let url_raw = q.url.unwrap_or_default();
+
+    if url_raw.is_empty() {
+        log_early_exit(method.as_str(), "/thumb.jpeg", "url parameter is required", &ip);
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": "url parameter is required" })))
             .into_response();
     }
-    let url = match normalize_url(q.url, runtime.allow_local) {
+    let url = match normalize_url(url_raw, runtime.allow_local) {
         Ok(u)    => u,
-        Err(msg) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response(),
+        Err(msg) => {
+            log_early_exit(method.as_str(), "/thumb.jpeg", msg, &ip);
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response();
+        }
     };
 
     let cache: Option<CacheHints> = headers
@@ -147,9 +289,23 @@ pub async fn thumb(
         .and_then(|v| v.to_str().ok())
         .map(|etag| CacheHints { etag: Some(etag.to_owned()), ..Default::default() });
 
-    let input = InputSpec { url, cache, allow_local: runtime.allow_local };
+    let input = InputSpec { url: url.clone(), cache, allow_local: runtime.allow_local };
     let (result, _trace, mut after) = ThumbCook::<PlatformStream>::from_input(input, runtime).run().await;
     after.drain_spawn();
+    let duration_ms = t0.elapsed().as_millis() as u64;
+
+    let media = result.media.as_ref();
+    let _ux = ux::get();
+    _ux.log_single_thumb(
+        method.as_str(), "/thumb.jpeg", &url,
+        if result.source == Some(ResultSource::NotModified) { 304 } else { 200 },
+        duration_ms,
+        media.and_then(|m| Some(kind_str(m.kind))),
+        media.and_then(|m| Some(m.extension.as_str())),
+        result.source.as_ref().map(source_label),
+        result.message.as_deref(),
+        ip.as_deref(),
+    );
 
     if result.source == Some(ResultSource::NotModified) {
         return StatusCode::NOT_MODIFIED.into_response();
@@ -179,9 +335,12 @@ pub async fn thumb(
 pub async fn batch(
     State(runtime): State<Arc<Runtime>>,
     headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
     Json(req): Json<CallRequest>,
 ) -> Response {
+    let _t0 = Instant::now();
     let stream_mode = wants_ndjson(&headers);
+    let ip = client_ip(&headers, Some(&connect_info.0));
 
     let mut jobs = Vec::with_capacity(req.items.len());
     for (idx, input) in req.items.into_iter().enumerate() {
@@ -194,46 +353,39 @@ pub async fn batch(
     }
     let count = jobs.len();
 
+    // Log batch start.
+    ux::get().log_batch_start("POST", "/batch", count, ip.as_deref());
+
     if stream_mode {
+        // Streaming path: results logged from client side; server log is minimal.
         let (tx, rx) = mpsc::unbounded_channel::<Bytes>();
         let batch_runtime = Arc::clone(&runtime);
         tokio::spawn(async move {
-            let _ = tx.send(as_ndjson_line(json!({
-                "type": "batch.started",
-                "count": count,
-            })));
+            let _ = tx.send(as_ndjson_line(json!({ "type": "batch.started", "count": count })));
 
             let mut pending = JoinSet::new();
             for (idx, spec) in jobs {
-                let _ = tx.send(as_ndjson_line(json!({
-                    "type": "item.accepted",
-                    "index": idx,
-                })));
-
+                let _ = tx.send(as_ndjson_line(json!({ "type": "item.accepted", "index": idx })));
                 let item_runtime = Arc::clone(&batch_runtime);
                 let item_tx = tx.clone();
                 pending.spawn(async move {
+                    let t_item = Instant::now();
                     let progress_tx = item_tx.clone();
                     let progress = Box::new(move |result| {
                         let _ = progress_tx.send(as_ndjson_line(json!({
-                            "type": "item.intermediate",
-                            "index": idx,
-                            "result": result,
+                            "type": "item.intermediate", "index": idx, "result": result,
                         })));
                     });
-
                     let (result, _trace, mut after) = ThumbCook::<PlatformStream>::from_input(spec, item_runtime)
-                        .run_with_progress(Some(progress))
-                        .await;
+                        .run_with_progress(Some(progress)).await;
                     after.drain_spawn();
+                    let dur = t_item.elapsed().as_millis() as u64;
+                    log_result(&result, dur);
                     let _ = item_tx.send(as_ndjson_line(json!({
-                        "type": "item.result",
-                        "index": idx,
-                        "result": result,
+                        "type": "item.result", "index": idx, "result": result,
                     })));
                 });
             }
-
             while pending.join_next().await.is_some() {}
             let _ = tx.send(as_ndjson_line(json!({ "type": "batch.complete" })));
         });
@@ -241,30 +393,29 @@ pub async fn batch(
         let stream = stream::unfold(rx, |mut rx| async move {
             rx.recv().await.map(|line| (Ok::<Bytes, Infallible>(line), rx))
         });
-        let body = Body::from_stream(stream);
         return (
             StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, "application/x-ndjson"),
-                (header::CACHE_CONTROL, "no-store"),
-            ],
-            body,
-        )
-            .into_response();
+            [(header::CONTENT_TYPE, "application/x-ndjson"), (header::CACHE_CONTROL, "no-store")],
+            Body::from_stream(stream),
+        ).into_response();
     }
 
+    // Non-streaming: wait for all, then log each result.
     let mut pool = FuturesUnordered::new();
     for (idx, spec) in jobs {
         let job_runtime = Arc::clone(&runtime);
         pool.push(async move {
+            let t_item = Instant::now();
             let (result, trace, after) = ThumbCook::<PlatformStream>::from_input(spec, job_runtime).run().await;
-            (idx, result, trace, after)
+            let dur = t_item.elapsed().as_millis() as u64;
+            (idx, result, trace, after, dur)
         });
     }
 
     let mut items = Vec::with_capacity(count);
-    while let Some((_idx, result, _trace, mut after)) = pool.next().await {
+    while let Some((_idx, result, _trace, mut after, dur)) = pool.next().await {
         after.drain_spawn();
+        log_result(&result, dur);
         items.push(result);
     }
 
@@ -277,18 +428,32 @@ pub async fn batch(
 /// - `file://` URLs → rejected with 400.
 /// - Bare paths (no `://` scheme) → rejected with 400.
 ///
-/// When `allow_local` is `true` (`TBR_ALLOW_FILES=1`):
+/// When `allow_local` is `true` (`TBR_ALLOW_LOCAL=1`):
 /// - `file://` URLs → accepted unchanged.
 /// - Bare absolute paths (starting with `/`) → promoted to `file://` URLs
 ///   (e.g. `/data/img.png` becomes `file:///data/img.png`).
 /// - Bare relative paths → rejected; the server's CWD is ambiguous.
 fn normalize_url(url: String, allow_local: bool) -> Result<String, &'static str> {
     if url.contains("://") {
-        if url.starts_with("file://") && !allow_local {
-            Err("file:// URLs are not permitted")
-        } else {
-            Ok(url)
+        if url.starts_with("file://") {
+            if !allow_local {
+                ux::warn_file_url_denied();
+                return Err("file:// URLs are not permitted");
+            }
+            return Ok(url);
         }
+
+        // Check for localhost / private-network hosts.
+        if !allow_local {
+            if let Ok(parsed) = url::Url::parse(&url) {
+                if is_private_host(parsed.host_str()) {
+                    ux::warn_localhost_denied();
+                    return Err("localhost and private-network URLs are not permitted");
+                }
+            }
+        }
+
+        Ok(url)
     } else if allow_local {
         if url.starts_with('/') {
             Ok(format!("file://{url}"))
@@ -298,6 +463,25 @@ fn normalize_url(url: String, allow_local: bool) -> Result<String, &'static str>
     } else {
         Err("url must be an http:// or https:// URL")
     }
+}
+
+fn is_private_host(host: Option<&str>) -> bool {
+    let Some(h) = host else { return false };
+    if h.eq_ignore_ascii_case("localhost")
+        || h == "127.0.0.1"
+        || h == "::1"
+        || h == "[::1]"
+    {
+        return true;
+    }
+    if let Ok(ip) = h.parse::<std::net::Ipv4Addr>() {
+        let octets = ip.octets();
+        return octets[0] == 10
+            || (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31)
+            || (octets[0] == 192 && octets[1] == 168)
+            || octets[0] == 127;
+    }
+    false
 }
 
 fn wants_ndjson(headers: &HeaderMap) -> bool {

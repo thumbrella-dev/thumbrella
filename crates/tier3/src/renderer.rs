@@ -52,6 +52,15 @@ use tier2::Tier2Renderer;
 
 use crate::scratch::ScratchArena;
 
+/// Emit a debug message only when raw logs are enabled (TBR_LOG=full).
+macro_rules! tbr_debug {
+    ($($arg:tt)*) => {
+        if tier1::ux::show_raw_logs() {
+            eprintln!($($arg)*);
+        }
+    };
+}
+
 // ============================================================================
 // Tier3Renderer
 // ============================================================================
@@ -64,19 +73,12 @@ use crate::scratch::ScratchArena;
 pub struct Tier3Renderer {
     /// Tier 2 renderer for standard formats.
     tier2: Tier2Renderer,
-    /// Environment capability report from startup probe.
-    #[allow(dead_code)]
-    env: crate::env_check::EnvReport,
 }
 
 impl Tier3Renderer {
-    /// Create a new tier 3 renderer, probing the environment for available
-    /// backends.
+    /// Create a new tier 3 renderer.
     pub fn new() -> Self {
-        Self {
-            tier2: Tier2Renderer::new(),
-            env: crate::env_check::probe_environment(),
-        }
+        Self { tier2: Tier2Renderer::new() }
     }
 
     /// Create a shared (Arc-wrapped) tier 3 renderer.
@@ -98,7 +100,7 @@ impl InProcessRenderer for Tier3Renderer {
             let kind = cook.media_kind();
             let ext  = cook.media_extension().unwrap_or("?").to_string();
             let cl   = cook.content_length();
-            eprintln!("[tier3] render: kind={kind:?}  ext={ext}  content_length={cl:?}");
+            tbr_debug!("[tier3] render: kind={kind:?}  ext={ext}  content_length={cl:?}");
 
             // On a handoff, skip tier2 entirely — the lower tier already
             // tried and determined it needs tier3.  Go straight to
@@ -728,7 +730,7 @@ async fn render_geometry_tier3(
                     return true;
                 }
                 Ok(Err(msg)) => {
-                    eprintln!("[tier3] usdz: {msg}");
+                    tbr_debug!("[tier3] usdz: {msg}");
                     cook.fail_cook(&format!("usdz: {msg}"));
                     return true;
                 }
@@ -772,7 +774,7 @@ async fn render_geometry_tier3(
                     return true;
                 }
                 Ok(Err(msg)) => {
-                    eprintln!("[tier3] {}: {msg}", handler.name);
+                    tbr_debug!("[tier3] {}: {msg}", handler.name);
                     cook.fail_cook(&format!("{}: {msg}", handler.name));
                     return true;
                 }
@@ -803,7 +805,7 @@ async fn render_geometry_tier3(
             Ok(Err(msg)) => {
                 // Renderer ran but failed — log the message, fall through
                 // to placeholder.
-                eprintln!("[tier3] {name}: {msg}");
+                tbr_debug!("[tier3] {name}: {msg}");
                 cook.fail_cook(&format!("{name}: {msg}"));
                 return true;
             }

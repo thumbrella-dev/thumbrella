@@ -240,12 +240,15 @@ impl ScratchArena {
 
 impl Drop for ScratchArena {
     fn drop(&mut self) {
-        // TempDir::drop handles recursive cleanup.  We just log.
         let usage = self.current_bytes.load(Ordering::Relaxed);
-        if usage > 0 {
+        if usage > 0 && raw_logs_enabled() {
             eprintln!("[tier3] scratch arena dropped ({usage} bytes cleaned up)");
         }
     }
+}
+
+fn raw_logs_enabled() -> bool {
+    matches!(std::env::var("TBR_LOG").as_deref(), Ok("full"))
 }
 
 // ── ArenaError ────────────────────────────────────────────────────────────────

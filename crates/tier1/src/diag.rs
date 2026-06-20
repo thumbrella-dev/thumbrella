@@ -190,7 +190,8 @@ pub struct DiagReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_id: Option<String>,
     /// Developer / debug mode enabled.
-    pub developer_mode: bool,
+    /// Whether local-URL access is enabled (`TBR_ALLOW_LOCAL`).
+    pub allow_local: bool,
     /// Trace sink DSN if configured, or `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_url: Option<String>,
@@ -280,6 +281,13 @@ pub fn mark_tier3_builtin() {
     TIER3_BUILTIN.store(true, std::sync::atomic::Ordering::Release);
 }
 
+/// True when at least one higher-tier renderer is compiled into this binary.
+/// Used by the UX layer to suppress "no higher tiers configured" hints.
+pub fn has_builtin_renderer() -> bool {
+    TIER2_BUILTIN.load(std::sync::atomic::Ordering::Acquire)
+        || TIER3_BUILTIN.load(std::sync::atomic::Ordering::Acquire)
+}
+
 /// Collect a diagnostic report for the current process environment.
 ///
 /// All configuration is read from `AppConfig` — which itself was populated
@@ -359,7 +367,7 @@ pub fn collect(cfg: &crate::config::AppConfig) -> DiagReport {
         server_port: cfg.port,
         port_available,
         server_id: cfg.server.clone(),
-        developer_mode: cfg.developer_mode,
+        allow_local: cfg.allow_local,
         trace_url,
         trace_validation,
         trace_file_check,
@@ -547,7 +555,7 @@ impl DiagReport {
         let port_ok = if self.port_available { "available" } else { "UNAVAILABLE (already in use or permission denied)" };
         println!("  port_available  : {port_ok}");
         println!("  server_id       : {}", self.server_id.as_deref().unwrap_or("—"));
-        println!("  developer_mode  : {}", self.developer_mode);
+        println!("  allow_local     : {}", self.allow_local);
         println!("  trace_url       : {}", self.trace_url.as_deref().unwrap_or("none"));
         print_validation("  trace_validation", &self.trace_validation);
         if let Some(ref fc) = self.trace_file_check {

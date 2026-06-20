@@ -114,5 +114,15 @@ pub async fn connect<S: HttpStream>(cook: &mut ThumbCook<S>) {
     cook.src.final_url     = Some(buf.url.clone());
     cook.src.canonical_url = canonical_url(&buf.url);
 
+    // If the server returned a 2xx HTML page (common for CDN error pages on
+    // missing files), treat it as "not found" rather than trying to thumbnail
+    // what looks like valid content.
+    if let Some(ct) = buf.headers.get("content-type") {
+        if ct.starts_with("text/html") {
+            cook.fail("source returned HTML (likely an error page, not media)");
+            return;
+        }
+    }
+
     cook.http_install(buf);
 }

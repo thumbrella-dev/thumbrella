@@ -58,7 +58,6 @@ struct ReaderState {
     reader: Box<dyn ReadSeek + Send>,
     /// `Content-Length` or equivalent total size, used to answer `AVSEEK_SIZE`.
     content_length: Option<u64>,
-    avio_debug: bool,
     read_calls: u64,
     read_bytes: u64,
     read_zero: u64,
@@ -77,10 +76,14 @@ use serde_json::json;
 use tier1::renderer::RenderOutput;
 use tier1::spec::ThumbnailConfig;
 
-fn avio_debug_enabled() -> bool {
-    std::env::var("TBR_AVIO_DEBUG")
-        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false)
+/// Emit a debug message only when raw logs are enabled (TBR_LOG=full).
+/// avdecode cannot use tier1::ux (native-only), so it checks the env var directly.
+macro_rules! tbr_debug {
+    ($($arg:tt)*) => {
+        if matches!(std::env::var("TBR_LOG").as_deref(), Ok("full")) {
+            eprintln!($($arg)*);
+        }
+    };
 }
 
 // ── Orientation helpers ───────────────────────────────────────────────────────
@@ -170,8 +173,8 @@ unsafe extern "C" fn avio_read_cb(opaque: *mut c_void, buf: *mut u8, buf_size: c
         }
         Err(e) => {
             state.read_errors += 1;
-            if state.avio_debug && state.read_errors <= 4 {
-                eprintln!("[avdecode][avio] read error {}: {}", state.read_errors, e);
+            if state.read_errors <= 4 {
+                tbr_debug!("[avdecode][avio] read error {}: {}", state.read_errors, e);
             }
             -5 // −EIO
         }
@@ -269,7 +272,7 @@ pub fn decode_with_libav(
     rotation_hint: i32,
     seek_secs: Option<f64>,
 ) -> (Option<RenderOutput>, u64) {
-    eprintln!("[avdecode] decode_with_libav: content_length={content_length:?}, ext_hint={ext_hint:?}, rotation_hint={rotation_hint}, seek_secs={seek_secs:?}");
+    tbr_debug!("[avdecode] decode_with_libav: content_length={content_length:?}, ext_hint={ext_hint:?}, rotation_hint={rotation_hint}, seek_secs={seek_secs:?}");
 
     // Force-retain all pipe demuxer structs from img2dec.o and icodeac.o.
     // LLD's --gc-sections removes data sections that aren't reachable from a
@@ -298,8 +301,18 @@ pub fn decode_with_libav(
     };
 
     if !fmt_hint_ptr.is_null() {
-        eprintln!("[avdecode] using format hint for {:?}", ext_hint);
+        tbr_debug!("[avdecode] using format hint for {:?}", ext_hint);
     }
+
+    // Suppress ffmpeg's own stderr output unless TBR_LOG=full.
+    // libav prints warnings and info messages directly to stderr through
+    // its internal logging — not through our eprintln! calls.
+    let ff_log_level = if matches!(std::env::var("TBR_LOG").as_deref(), Ok("full")) {
+        ffmpeg_sys_next::AV_LOG_INFO
+    } else {
+        ffmpeg_sys_next::AV_LOG_QUIET
+    };
+    unsafe { ffmpeg_sys_next::av_log_set_level(ff_log_level); }
 
     // Box the reader state so it has a stable address.  All libav callbacks
     // hold a raw pointer into this box; the box must outlive every libav
@@ -307,7 +320,6 @@ pub fn decode_with_libav(
     let mut state = Box::new(ReaderState {
         reader,
         content_length,
-        avio_debug: avio_debug_enabled(),
         read_calls: 0,
         read_bytes: 0,
         read_zero: 0,
@@ -377,19 +389,17 @@ pub fn decode_with_libav(
         // set — free it ourselves.
         free_avio_ctx(&mut avio_ctx);
     }
-    if state.avio_debug {
-        eprintln!("[avdecode][avio] reads={} bytes={} short_reads={} eof_reads={} read_errors={} seeks={} seek_errors={} last_seek=(off={}, whence={})",
-            state.read_calls,
-            state.read_bytes,
-            state.read_short,
-            state.read_zero,
-            state.read_errors,
-            state.seek_calls,
-            state.seek_errors,
-            state.last_seek_offset,
-            state.last_seek_whence,
-        );
-    }
+    tbr_debug!("[avdecode][avio] reads={} bytes={} short_reads={} eof_reads={} read_errors={} seeks={} seek_errors={} last_seek=(off={}, whence={})",
+        state.read_calls,
+        state.read_bytes,
+        state.read_short,
+        state.read_zero,
+        state.read_errors,
+        state.seek_calls,
+        state.seek_errors,
+        state.last_seek_offset,
+        state.last_seek_whence,
+    );
 
     // state drops here, after every libav resource that held its pointer is gone.
     let avio_bytes = state.read_bytes;
@@ -422,7 +432,7 @@ unsafe fn decode_inner(
     // ── AVIO buffer + context ─────────────────────────────────────────────────
     let avio_buf = av_malloc(AVIO_BUF) as *mut u8;
     if avio_buf.is_null() {
-        eprintln!("[avdecode] FAIL: av_malloc returned null");
+        tbr_debug!("[avdecode] FAIL: av_malloc returned null");
         return None;
     }
     *avio_ctx = avio_alloc_context(
@@ -435,7 +445,7 @@ unsafe fn decode_inner(
         Some(avio_seek_cb),
     );
     if (*avio_ctx).is_null() {
-        eprintln!("[avdecode] FAIL: avio_alloc_context returned null");
+        tbr_debug!("[avdecode] FAIL: avio_alloc_context returned null");
         av_free(avio_buf as *mut c_void);
         return None;
     }
@@ -443,7 +453,7 @@ unsafe fn decode_inner(
     // ── AVFormatContext ───────────────────────────────────────────────────────
     *fmt_ctx = avformat_alloc_context();
     if (*fmt_ctx).is_null() {
-        eprintln!("[avdecode] FAIL: avformat_alloc_context returned null");
+        tbr_debug!("[avdecode] FAIL: avformat_alloc_context returned null");
         return None;
     }
     (**fmt_ctx).pb    = *avio_ctx;
@@ -456,11 +466,11 @@ unsafe fn decode_inner(
     // a double-free in the caller's cleanup.
     let open_ret = avformat_open_input(fmt_ctx, ptr::null(), fmt_hint, ptr::null_mut());
     if open_ret < 0 {
-        eprintln!("[avdecode] FAIL: avformat_open_input returned {open_ret}");
+        tbr_debug!("[avdecode] FAIL: avformat_open_input returned {open_ret}");
         *fmt_ctx = ptr::null_mut();
         return None;
     }
-    eprintln!("[avdecode] avformat_open_input OK");
+    tbr_debug!("[avdecode] avformat_open_input OK");
 
     // Apply probe limit BEFORE find_stream_info so FFmpeg stops reading after
     // at most `limit` bytes.  For HEIF/HEIC/AVIF the codec parameters are
@@ -473,7 +483,7 @@ unsafe fn decode_inner(
 
     let info_ret = avformat_find_stream_info(*fmt_ctx, ptr::null_mut());
     if info_ret < 0 {
-        eprintln!("[avdecode] FAIL: avformat_find_stream_info returned {info_ret}");
+        tbr_debug!("[avdecode] FAIL: avformat_find_stream_info returned {info_ret}");
         return None;
     }
 
@@ -491,7 +501,7 @@ unsafe fn decode_inner(
     //    standalone, or both tile), pick the one with the most pixels.
     //    This selects the primary track for ordinary video / MOV files.
     let nb = (**fmt_ctx).nb_streams as usize;
-    eprintln!("[avdecode] {} stream(s) found", nb);
+    tbr_debug!("[avdecode] {} stream(s) found", nb);
 
     // Count how many video streams share each (w, h).
     let mut dim_freq: std::collections::HashMap<(i32, i32), usize> =
@@ -529,11 +539,11 @@ unsafe fn decode_inner(
         }
     }
     if stream_idx < 0 {
-        eprintln!("[avdecode] FAIL: no video/image stream found among {nb} streams");
+        tbr_debug!("[avdecode] FAIL: no video/image stream found among {nb} streams");
         return None;
     }
     let (standalone_flag, best_area) = best_score;
-    eprintln!("[avdecode] using stream {stream_idx} (area={best_area} standalone={standalone_flag})");
+    tbr_debug!("[avdecode] using stream {stream_idx} (area={best_area} standalone={standalone_flag})");
 
 
     let stream    = *(**fmt_ctx).streams.add(stream_idx as usize);
@@ -553,7 +563,7 @@ unsafe fn decode_inner(
             Some(CStr::from_ptr(p).to_string_lossy().into_owned())
         }
     };
-    eprintln!("[avdecode] codec={codec_name:?}  src={src_w}x{src_h} reported={reported_w}x{reported_h}");
+    tbr_debug!("[avdecode] codec={codec_name:?}  src={src_w}x{src_h} reported={reported_w}x{reported_h}");
 
     // Bits-per-pixel from the pixel-format descriptor.
     let depth = {
@@ -564,16 +574,16 @@ unsafe fn decode_inner(
     // ── Decoder ───────────────────────────────────────────────────────────────
     let dec = avcodec_find_decoder(codec_id);
     if dec.is_null() {
-        eprintln!("[avdecode] FAIL: no decoder for codec_id {codec_id:?}");
+        tbr_debug!("[avdecode] FAIL: no decoder for codec_id {codec_id:?}");
         return None;
     }
     *codec_ctx = avcodec_alloc_context3(dec);
     if (*codec_ctx).is_null() {
-        eprintln!("[avdecode] FAIL: avcodec_alloc_context3 returned null");
+        tbr_debug!("[avdecode] FAIL: avcodec_alloc_context3 returned null");
         return None;
     }
     if avcodec_parameters_to_context(*codec_ctx, codecpar) < 0 {
-        eprintln!("[avdecode] FAIL: avcodec_parameters_to_context failed");
+        tbr_debug!("[avdecode] FAIL: avcodec_parameters_to_context failed");
         return None;
     }
     // Auto-detect thread count (libdav1d etc. respect this).
@@ -581,7 +591,7 @@ unsafe fn decode_inner(
     unsafe { (*(*codec_ctx)).thread_count = 0; }
     let open2_ret = avcodec_open2(*codec_ctx, dec, ptr::null_mut());
     if open2_ret < 0 {
-        eprintln!("[avdecode] FAIL: avcodec_open2 returned {open2_ret}");
+        tbr_debug!("[avdecode] FAIL: avcodec_open2 returned {open2_ret}");
         return None;
     }
 
@@ -597,9 +607,9 @@ unsafe fn decode_inner(
             if seek_ret >= 0 {
                 avcodec_flush_buffers(*codec_ctx);
                 applied_seek_secs = Some(secs);
-                eprintln!("[avdecode] seek applied: {secs:.3}s (ts={target_ts})");
+                tbr_debug!("[avdecode] seek applied: {secs:.3}s (ts={target_ts})");
             } else {
-                eprintln!("[avdecode] seek skipped: av_seek_frame returned {seek_ret}");
+                tbr_debug!("[avdecode] seek skipped: av_seek_frame returned {seek_ret}");
             }
         }
     }
@@ -608,7 +618,7 @@ unsafe fn decode_inner(
     *packet = av_packet_alloc();
     *frame  = av_frame_alloc();
     if (*packet).is_null() || (*frame).is_null() {
-        eprintln!("[avdecode] FAIL: av_packet_alloc or av_frame_alloc returned null");
+        tbr_debug!("[avdecode] FAIL: av_packet_alloc or av_frame_alloc returned null");
         return None;
     }
 
@@ -619,7 +629,7 @@ unsafe fn decode_inner(
             // Seeked decode failed once; retry from stream start for robustness.
             let _ = av_seek_frame(*fmt_ctx, stream_idx, 0, AVSEEK_FLAG_BACKWARD as c_int);
             avcodec_flush_buffers(*codec_ctx);
-            eprintln!("[avdecode] retrying decode from stream start");
+            tbr_debug!("[avdecode] retrying decode from stream start");
         }
 
         while av_read_frame(*fmt_ctx, *packet) >= 0 {
@@ -650,7 +660,7 @@ unsafe fn decode_inner(
         }
     }
     if !decoded {
-        eprintln!("[avdecode] FAIL: could not decode a frame");
+        tbr_debug!("[avdecode] FAIL: could not decode a frame");
         return None;
     }
 
@@ -679,7 +689,7 @@ unsafe fn decode_inner(
         if display_matrix_degrees != 0 { display_matrix_degrees }
         else { rotation_hint.rem_euclid(360) }
     };
-    eprintln!("[avdecode] decoded frame {frame_w}x{frame_h}  rotation={rotation_degrees}°");
+    tbr_debug!("[avdecode] decoded frame {frame_w}x{frame_h}  rotation={rotation_degrees}°");
 
     // ── Scale to cover the canonical thumbnail size (RGB24) ─────────────────
     // Scale so that both dimensions are ≥ the canonical target while
@@ -713,7 +723,7 @@ unsafe fn decode_inner(
         ptr::null(),
     );
     if (*sws_ctx).is_null() {
-        eprintln!("[avdecode] FAIL: sws_getContext returned null");
+        tbr_debug!("[avdecode] FAIL: sws_getContext returned null");
         return None;
     }
 
@@ -737,7 +747,7 @@ unsafe fn decode_inner(
         match RgbaImage::from_raw(out_w as u32, out_h as u32, buf) {
             Some(i) => DynamicImage::ImageRgba8(i),
             None => {
-                eprintln!("[avdecode] FAIL: RgbaImage::from_raw failed (buffer size mismatch)");
+                tbr_debug!("[avdecode] FAIL: RgbaImage::from_raw failed (buffer size mismatch)");
                 return None;
             }
         }
@@ -745,13 +755,13 @@ unsafe fn decode_inner(
         match RgbImage::from_raw(out_w as u32, out_h as u32, buf) {
             Some(i) => DynamicImage::ImageRgb8(i),
             None => {
-                eprintln!("[avdecode] FAIL: RgbImage::from_raw failed (buffer size mismatch)");
+                tbr_debug!("[avdecode] FAIL: RgbImage::from_raw failed (buffer size mismatch)");
                 return None;
             }
         }
     };
     let img = apply_rotation(img, rotation_degrees);
-    eprintln!("[avdecode] success: {src_w}x{src_h} codec={codec_name:?} depth={depth} rotation={rotation_degrees}°");
+    tbr_debug!("[avdecode] success: {src_w}x{src_h} codec={codec_name:?} depth={depth} rotation={rotation_degrees}°");
     Some(RenderOutput {
         image:           img,
         renderer:        Some("ffmpeg".to_string()),

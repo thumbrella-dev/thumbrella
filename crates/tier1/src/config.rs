@@ -10,18 +10,15 @@
 //! |----------------------------|---------|--------------------------------------------------|
 //! | `TBR_PORT`                 | 3114    | HTTP listener port                               |
 //! | `TBR_SERVER`               | —       | Short server/colo identifier for traces          |
-//! | `TBR_DEVELOPER_MODE`       | false   | Verbose debug output in API responses            |
-//! | `TBR_ALLOW_FILES`          | false   | Accept `file://` URLs and bare absolute paths    |
+//! | `TBR_ALLOW_LOCAL`          | false   | Accept `file://` URLs, bare paths, and localhost |
 //! | `TBR_SCRATCH`              | $TMPDIR/thumbrella | Scratch root for tier3 CLI tool staging   |
 //! | `TBR_TIER2`                | —       | Tier-2 connect string (URL + optional headers)   |
 //! | `TBR_TIER3`                | —       | Tier-3 connect string (URL + optional headers)   |
-//! | `TBR_HANDSHAKE`           | —       | Shared secret required on all endpoints       |
-//! | `TBR_CACHE`                | —       | Cache backend DSN — `sqlite:<path>`, …          |
+//! | `TBR_HANDSHAKE`            | —       | Shared secret required on all endpoints          |
+//! | `TBR_CACHE`                | —       | Cache backend DSN — `sqlite:<path>`, …           |
 //! | `TBR_CACHE_MAX_ITEMS`      | —       | Max cache entries (backend-specific meaning)     |
-//! | `TBR_TRACE`                | —       | Trace sink DSN — `ndjson:<path>`, …             |
-//! | `TBR_FAILURE_TTL`          | 5       | URL failure debounce window (seconds)            |
-//! | `TBR_BACKOFF_DEFAULT`      | 60      | Origin back-off TTL when no `Retry-After` header |
-//! | `TBR_BACKOFF_CEILING`      | 3600    | Origin back-off maximum TTL cap (seconds)        |
+//! | `TBR_TRACE`                | —       | Trace sink DSN — `ndjson:<path>`, …              |
+//! | `TBR_LOG`                  | standard| Output level: `standard`, `minimal`, `full`      |
 //!
 //! # Connect-string syntax
 //!
@@ -52,14 +49,12 @@ pub struct AppConfig {
     /// Use a Cloudflare colo code (e.g. `"SJC"`) or an operator-assigned label
     /// (e.g. `"prod-1"`).
     pub server: Option<String>,
-    /// Emit verbose debug data in API responses.
-    pub developer_mode: bool,
-    /// Allow `file://` URLs and bare absolute paths in HTTP endpoint requests.
+    /// Allow `file://`, bare paths, and localhost/private-network URLs.
     ///
-    /// When `true`, callers may pass `file:///path/to/file` or a bare absolute
-    /// path such as `/data/image.png` and the server will read it directly from
-    /// the local filesystem.  **Only enable in trusted environments** — any
-    /// caller can read any file the server process has permission to open.
+    /// When `true`, callers may pass `file:///path/to/file`, bare absolute
+    /// paths, or `localhost` / private-IP URLs.  **Only enable in trusted
+    /// environments** — any caller can read any file the server process has
+    /// permission to open.
     pub allow_local: bool,
     /// Root directory for temporary scratch space used by tier3 CLI tool
     /// staging.  Defaults to `$TMPDIR/thumbrella` (or `/tmp/thumbrella`).
@@ -86,14 +81,12 @@ pub struct AppConfig {
     /// `ndjson:<path>`, etc.  `None` disables trace logging.
     pub trace_url: Option<String>,
 
-    // ── Fetch protection ──────────────────────────────────────────────────────
-    /// URL failure debounce window in seconds (`TBR_FAILURE_TTL`). Default: 5.
+    // ── Fetch protection (hardcoded defaults — not exposed as env vars) ────────
+    /// URL failure debounce window in seconds.
     pub failure_ttl: u32,
-    /// Default origin back-off TTL when no `Retry-After` header is present
-    /// (`TBR_BACKOFF_DEFAULT`). Default: 60.
+    /// Default origin back-off TTL when no `Retry-After` header is present.
     pub backoff_default: u32,
-    /// Maximum origin back-off TTL cap in seconds (`TBR_BACKOFF_CEILING`).
-    /// Default: 3600.
+    /// Maximum origin back-off TTL cap in seconds.
     pub backoff_ceiling: u32,
 
 }
@@ -103,7 +96,6 @@ impl Default for AppConfig {
         Self {
             port: 3114,
             server: None,
-            developer_mode: false,
             allow_local: false,
             scratch_dir: default_scratch_dir(),
             tier2: ConnectTarget::default(),
@@ -127,18 +119,18 @@ impl AppConfig {
         Self {
             port:                 env_u16("TBR_PORT", 3114),
             server:               std::env::var("TBR_SERVER").ok(),
-            developer_mode:       env_bool("TBR_DEVELOPER_MODE", false),
-            allow_local:          env_bool("TBR_ALLOW_FILES", false),
+            allow_local:          env_bool("TBR_ALLOW_LOCAL", false),
             scratch_dir:          env_scratch("TBR_SCRATCH"),
             tier2,
             tier3,
-            handshake:          env_opt_string("TBR_HANDSHAKE"),
+            handshake:            env_opt_string("TBR_HANDSHAKE"),
             cache_url:            std::env::var("TBR_CACHE").ok(),
             cache_max_items:      env_opt_u32("TBR_CACHE_MAX_ITEMS"),
             trace_url:            std::env::var("TBR_TRACE").ok(),
-            failure_ttl:          env_u32("TBR_FAILURE_TTL", 5),
-            backoff_default:      env_u32("TBR_BACKOFF_DEFAULT", 60),
-            backoff_ceiling:      env_u32("TBR_BACKOFF_CEILING", 3_600),
+            // Hardcoded — not exposed as env vars.
+            failure_ttl:          5,
+            backoff_default:      60,
+            backoff_ceiling:      3_600,
         }
     }
 }
@@ -146,26 +138,46 @@ impl AppConfig {
 // ── Env helpers ───────────────────────────────────────────────────────────────
 
 fn env_u16(name: &str, default: u16) -> u16 {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+    match std::env::var(name) {
+        Ok(v) => v.trim().parse().unwrap_or_else(|_| {
+            crate::ux::get().fatal(
+                &format!("{name} is set to \"{v}\", which is not a valid port number"),
+                &format!("set {name} to a number between 1 and 65535, or unset it to use the default ({default})"),
+            );
+        }),
+        Err(_) => default,
+    }
 }
 
 fn env_bool(name: &str, default: bool) -> bool {
     match std::env::var(name).as_deref() {
         Ok("1" | "true" | "yes") => true,
         Ok("0" | "false" | "no") => false,
-        _ => default,
+        Ok(other) => {
+            crate::ux::get().fatal(
+                &format!("{name} is set to \"{other}\", which is not a valid boolean"),
+                &format!("set {name} to true/false/1/0/yes/no, or unset it to use the default ({})",
+                    if default { "true" } else { "false" }),
+            );
+        }
+        Err(_) => default,
     }
 }
 
-fn env_u32(name: &str, default: u32) -> u32 {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
-}
-
 fn env_opt_u32(name: &str) -> Option<u32> {
-    std::env::var(name).ok().and_then(|v| v.parse().ok())
+    match std::env::var(name) {
+        Ok(v) => {
+            let trimmed = v.trim();
+            if trimmed.is_empty() { return None; }
+            Some(trimmed.parse().unwrap_or_else(|_| {
+                crate::ux::get().fatal(
+                    &format!("{name} is set to \"{trimmed}\", which is not a valid number"),
+                    &format!("set {name} to a number, or unset it"),
+                );
+            }))
+        }
+        Err(_) => None,
+    }
 }
 
 fn env_opt_string(name: &str) -> Option<String> {

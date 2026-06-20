@@ -1,8 +1,7 @@
 //! Tier 3 binary — starts tier 1's pipeline with the tier 3 renderer registered.
 //!
-//! At startup, the environment is probed and a capability report is printed
-//! to stderr.  The `tier3 diag` command prints a detailed report including
-//! tier-3 format support and backend availability.
+//! At startup the environment is probed for available backends (F3D, usd-core,
+//! etc.).  The `tier3 diag` command prints a detailed capability report.
 
 #[tokio::main]
 async fn main() {
@@ -44,7 +43,13 @@ async fn main() {
 
     // ── Probe the environment ────────────────────────────────────────────────
     let env_report = tier3::env_check::probe_environment();
-    eprintln!("[tier3] {}", env_report.summary);
+    let show_all = matches!(
+        std::env::var("TBR_LOG").as_deref(),
+        Ok("full")
+    );
+    if show_all {
+        eprintln!("[tier3] {}", env_report.summary);
+    }
 
     // ── Register diag sections ───────────────────────────────────────────────
     register_tier3_diag(&env_report);
