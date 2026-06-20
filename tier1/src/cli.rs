@@ -6,8 +6,8 @@
 //! ```text
 //! <binary> serve              # start the HTTP server
 //! <binary> thumb <url>...     # thumbnail one or more URLs
-//! <binary> render <src> <dst> # thumbnail a local file to disk
 //! <binary> diag               # print config and validate services
+//! <binary> version            # print build version
 //! ```
 
 use clap::{Parser, Subcommand};
@@ -56,28 +56,6 @@ enum Command {
         /// Emit machine-readable JSON instead of the default pretty text.
         #[arg(long)]
         json: bool,
-
-        /// Include full base64 thumbnail data in JSON output.
-        /// Without this flag, large thumbnails are replaced with a placeholder.
-        #[arg(long)]
-        raw: bool,
-
-        /// Show internal trace fields (download metrics, render path, IDs, …).
-        #[arg(long)]
-        trace: bool,
-    },
-
-    /// Render a single local file to a thumbnail JPEG and write it to disk.
-    ///
-    /// Input must be a local path or `file://` URL.  Output is the path where
-    /// the 250×200 JPEG thumbnail will be written.  Local filesystem access
-    /// is enabled automatically for this command.
-    Render {
-        /// Path to the source file to thumbnail.
-        src: String,
-
-        /// Path where the thumbnail JPEG will be written.
-        dst: String,
     },
 
     /// Print server configuration and validate connected services.
@@ -91,27 +69,8 @@ enum Command {
         json: bool,
     },
 
-    /// Submit a batch request in streaming mode and print result events as they arrive.
-    ///
-    /// Sends `Accept: application/x-ndjson` and prints one JSON line per
-    /// `item.result` event with client-measured elapsed milliseconds since submit.
-    #[command(name = "stream-batch")]
-    StreamBatch {
-        /// Tier server base URL.
-        ///
-        /// Can be supplied either as `--server <url>` or as the first
-        /// positional argument before the thumbnail URLs.
-        #[arg(long)]
-        server: Option<String>,
-
-        /// Source URLs to include in the batch.
-        #[arg(required = true, num_args = 1..)]
-        args: Vec<String>,
-
-        /// Previously returned cache hints JSON (from `ThumbResult.cache`).
-        #[arg(long)]
-        cache: Option<String>,
-    },
+    /// Print the build version.
+    Version,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -120,7 +79,7 @@ enum Command {
 ///
 /// Intended to be called directly from `#[tokio::main] async fn main()`.
 pub async fn run() {
-    run_with_hook(|rt| async { rt }).await;
+    run_with_hook(1, |rt| async { rt }).await;
 }
 
 /// Like [`run`], but allows the caller to inspect or modify the [`Runtime`]
@@ -136,7 +95,7 @@ pub async fn run() {
 ///     tier1::with_renderer(rt, std::sync::Arc::new(tier2::Tier2Renderer::new()))
 /// }).await;
 /// ```
-pub async fn run_with_hook<F, Fut>(hook: F)
+pub async fn run_with_hook<F, Fut>(tier: u8, hook: F)
 where
     F: FnOnce(Arc<Runtime>) -> Fut,
     Fut: std::future::Future<Output = Arc<Runtime>>,
@@ -155,7 +114,7 @@ where
 
     let cli = Cli::parse();
 
-    let runtime = if !matches!(cli.command, Command::Diag { .. } | Command::StreamBatch { .. }) {
+    let runtime = if !matches!(cli.command, Command::Diag { .. }) {
         let cfg = crate::config::AppConfig::from_env();
         let rt = crate::startup::startup(&cfg).await;
         Some(hook(rt).await)
@@ -165,41 +124,10 @@ where
 
     match cli.command {
         Command::Serve                                   => run_server(runtime.unwrap()).await,
-        Command::Thumb { urls, cache, json, raw, trace } => run_thumb(urls, cache, json, raw, trace, runtime.unwrap()).await,
-        Command::Render { src, dst }                     => run_render(src, dst, runtime.unwrap()).await,
+        Command::Thumb { urls, cache, json } => run_thumb(urls, cache, json, runtime.unwrap()).await,
         Command::Diag { json }                           => run_diag(json),
-        Command::StreamBatch { server, args, cache } => {
-            let (server, urls) = normalize_stream_batch_args(server, args);
-            run_stream_batch(server, urls, cache).await;
-        }
+        Command::Version                                 => run_version(tier),
     }
-}
-
-fn normalize_stream_batch_args(server: Option<String>, mut args: Vec<String>) -> (String, Vec<String>) {
-    const DEFAULT_SERVER: &str = "http://127.0.0.1:8001";
-
-    if let Some(server) = server {
-        return (server, args);
-    }
-
-    if args.len() >= 2 && looks_like_server_base(&args[0]) {
-        let server = args.remove(0);
-        return (server, args);
-    }
-
-    (DEFAULT_SERVER.to_string(), args)
-}
-
-fn looks_like_server_base(value: &str) -> bool {
-    let Ok(url) = reqwest::Url::parse(value) else {
-        return false;
-    };
-
-    if url.query().is_some() || url.fragment().is_some() {
-        return false;
-    }
-
-    matches!(url.path(), "" | "/")
 }
 
 // ── serve ─────────────────────────────────────────────────────────────────────
@@ -329,7 +257,7 @@ pub fn promote_url(raw: &str) -> String {
     format!("file://{}", abs.display())
 }
 
-async fn run_thumb(urls: Vec<String>, cache_str: Option<String>, json: bool, raw: bool, show_trace: bool, runtime: Arc<Runtime>) {
+async fn run_thumb(urls: Vec<String>, cache_str: Option<String>, json: bool, runtime: Arc<Runtime>) {
     use futures::stream::{FuturesUnordered, StreamExt};
     use crate::{ThumbCook, cook::InputSpec};
     use crate::source::CacheHints;
@@ -344,314 +272,94 @@ async fn run_thumb(urls: Vec<String>, cache_str: Option<String>, json: bool, raw
         pool.push(ThumbCook::from_input(input, Arc::clone(&runtime)).run());
     }
 
-    let mut items: Vec<(crate::ThumbResult, crate::ThumbTrace)> = Vec::with_capacity(pool.len());
-    while let Some((result, trace, mut after)) = pool.next().await {
+    let mut results: Vec<crate::ThumbResult> = Vec::with_capacity(pool.len());
+    while let Some((result, _trace, mut after)) = pool.next().await {
         after.drain_spawn();
-        items.push((result, trace));
+        results.push(result);
     }
 
     if json {
-        let json_items: Vec<serde_json::Value> = items.iter().map(|(result, trace)| {
-            let mut result_val = serde_json::to_value(result).unwrap();
-            if !raw {
-                if let Some(obj) = result_val.as_object_mut() {
-                    if let Some(media) = obj.get_mut("media").and_then(|m| m.as_object_mut()) {
-                        if let Some(thumb) = media.get("thumbnail") {
-                            if thumb.as_str().is_some_and(|s| !s.is_empty()) {
-                                media.insert("thumbnail".into(), serde_json::Value::String("<binary image data>".into()));
-                            }
+        let json_items: Vec<serde_json::Value> = results.iter().map(|result| {
+            let mut val = serde_json::to_value(result).unwrap();
+            if let Some(obj) = val.as_object_mut() {
+                if let Some(media) = obj.get_mut("media").and_then(|m| m.as_object_mut()) {
+                    if let Some(thumb) = media.get("thumbnail") {
+                        if thumb.as_str().is_some_and(|s| !s.is_empty()) {
+                            media.insert("thumbnail".into(), serde_json::Value::String("<binary image data>".into()));
                         }
                     }
                 }
             }
-            serde_json::json!({ "result": result_val, "trace": trace })
+            val
         }).collect();
         let out = serde_json::json!({ "items": json_items });
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
     } else {
-        print_thumb_items(&items, show_trace);
-    }
-}
-
-// ── render (CLI) ──────────────────────────────────────────────────────────────
-
-async fn run_render(src: String, dst: String, runtime: Arc<Runtime>) {
-    use crate::{ThumbCook, cook::InputSpec};
-
-    let url = promote_url(&src);
-    let input = InputSpec { url, cache: None, allow_local: true };
-    let (result, _trace, mut after) = ThumbCook::from_input(input, runtime).run().await;
-    after.drain_spawn();
-
-    let thumb_empty = result.media.as_ref().map_or(true, |m| m.thumbnail.is_empty());
-    if thumb_empty {
-        let reason = result.message.as_deref().filter(|m| !m.is_empty());
-        if let Some(msg) = reason {
-            eprintln!("render: no thumbnail produced ({msg})");
-        } else {
-            eprintln!("render: no thumbnail produced");
-        }
-        return;
-    }
-
-    let thumb = &result.media.as_ref().unwrap().thumbnail;
-    if let Err(e) = std::fs::write(&dst, thumb) {
-        eprintln!("render: failed to write {}: {e}", dst);
-        return;
-    }
-
-    println!("wrote {} bytes to {}", thumb.len(), dst);
-}
-
-async fn run_stream_batch(server: String, urls: Vec<String>, cache: Option<String>) {
-    use base64::Engine;
-    use base64::engine::general_purpose::STANDARD;
-    use futures::StreamExt;
-    use reqwest::header;
-    use tokio::time::Instant;
-
-    let endpoint = format!("{}/batch", server.trim_end_matches('/'));
-    let request = crate::CallRequest {
-        items: urls
-            .into_iter()
-            .map(|url| {
-                if let Some(ref c) = cache {
-                    crate::ThumbInput::Object(crate::ThumbObject {
-                        url,
-                        cache: Some(c.clone()),
-                    })
-                } else {
-                    crate::ThumbInput::Url(url)
-                }
-            })
-            .collect(),
-    };
-
-    let started = Instant::now();
-    let response = match reqwest::Client::new()
-        .post(endpoint)
-        .header(header::ACCEPT, "application/x-ndjson")
-        .json(&request)
-        .send()
-        .await
-    {
-        Ok(resp) => resp,
-        Err(err) => {
-            eprintln!("stream request failed: {err}");
-            return;
-        }
-    };
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        eprintln!("stream request failed with {status}: {body}");
-        return;
-    }
-
-    let mut stream = response.bytes_stream();
-    let mut pending = Vec::<u8>::new();
-    while let Some(chunk) = stream.next().await {
-        let Ok(bytes) = chunk else {
-            eprintln!("stream read failed");
-            return;
-        };
-        pending.extend_from_slice(&bytes);
-
-        while let Some(pos) = pending.iter().position(|b| *b == b'\n') {
-            let mut line = pending.drain(..=pos).collect::<Vec<u8>>();
-            while line.last().is_some_and(|b| *b == b'\n' || *b == b'\r') {
-                line.pop();
-            }
-            if line.is_empty() {
-                continue;
-            }
-            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&line) else {
-                continue;
-            };
-            let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            let is_result       = event_type == "item.result";
-            let is_intermediate = event_type == "item.intermediate";
-            if !is_result && !is_intermediate {
-                continue;
-            }
-            let Some(result) = value.get("result") else {
-                continue;
-            };
-
-            let mut result = result.clone();
-            if let Some(obj) = result.as_object_mut() {
-                if let Some(thumb) = obj.get("thumbnail").and_then(|v| v.as_str()) {
-                    if !thumb.is_empty() {
-                        let kb = STANDARD
-                            .decode(thumb)
-                            .ok()
-                            .map(|bytes| bytes.len().div_ceil(1024))
-                            .unwrap_or(0);
-                        obj.insert(
-                            "thumbnail".into(),
-                            serde_json::Value::String(format!("<binary thumbnail data {kb} kb>")),
-                        );
-                    }
-                }
-            }
-
-            let out = serde_json::json!({
-                "elapsed_ms": started.elapsed().as_millis(),
-                "event":      if is_intermediate { "loading" } else { "result" },
-                "result": result,
-            });
-            println!("{}", serde_json::to_string_pretty(&out).unwrap_or_else(|_| "{}".to_string()));
-        }
+        print_thumb_items(&results);
     }
 }
 
 // ── thumb pretty printer ──────────────────────────────────────────────────────
 
-pub fn print_thumb_items(items: &[(crate::ThumbResult, crate::ThumbTrace)], show_trace: bool) {
-    for (result, trace) in items {
-        let result_json = serde_json::to_value(result).unwrap_or_default();
-        let trace_json  = serde_json::to_value(trace).unwrap_or_default();
-        let get_str = |obj: &serde_json::Value, key: &str| -> String {
-            obj.get(key)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .replace('_', " ")
-        };
+pub fn print_thumb_items(results: &[crate::ThumbResult]) {
+    for result in results {
+        // Not-modified cache hit — compact single-line display.
+        if result.source == Some(crate::result::ResultSource::NotModified) {
+            println!("304  -  not modified");
+            continue;
+        }
 
-        let url_display = result.url.as_str();
-        let sep_len = (56usize).saturating_sub(url_display.len() + 4);
-        let sep = "─".repeat(sep_len.max(4));
-        println!("── {url_display} {sep}");
+        let http = result.http_status
+            .map(|s| format!("{s}"))
+            .unwrap_or_else(|| "---".into());
 
-        let status = get_str(&result_json, "status");
-        let status_str = if let Some(ref msg) = result.message {
-            format!("{status}  ({msg})")
+        let kind = result.media.as_ref()
+            .map(|m| serde_json::to_value(m.kind).ok()
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_default())
+            .unwrap_or_default();
+        let ext = result.media.as_ref()
+            .map(|m| m.extension.as_str())
+            .unwrap_or("");
+        let file_size = result.media.as_ref()
+            .map(|m| fmt_bytes(m.file_size))
+            .unwrap_or_default();
+        let thumb_size = result.media.as_ref()
+            .and_then(|m| if m.thumbnail.is_empty() { None } else { Some(fmt_bytes(m.thumbnail.len() as u64)) });
+
+        let type_col = if kind.is_empty() && ext.is_empty() {
+            "unknown".to_string()
+        } else if ext.is_empty() {
+            kind
         } else {
-            status
+            format!("{kind} {ext}")
         };
-        println!("  status    : {status_str}");
 
-        {
-            let kind = get_str(&result_json, "kind");
-            let media = result.media.as_ref();
-            let ext  = media.map(|m| m.extension.as_str()).unwrap_or("");
-            let mime = media.map(|m| m.mime.as_str()).unwrap_or("");
-            let size = media.map(|m| fmt_bytes(m.file_size)).unwrap_or_default();
-            let parts: Vec<&str> = [kind.as_str(), ext, mime, size.as_str()]
-                .iter().copied().filter(|s| !s.is_empty()).collect();
-            if !parts.is_empty() {
-                println!("  format    : {}", parts.join("  "));
-            }
+        let info_col = if let Some(ref placeholder) = result.placeholder {
+            format!("{file_size}  ->  {placeholder} placeholder")
+        } else if let Some(ref thumb) = thumb_size {
+            format!("{file_size}  ->  {thumb}")
+        } else {
+            file_size
+        };
+
+        let msg = result.message.as_deref()
+            .filter(|m| !m.is_empty())
+            .map(|m| format!("  -  {m}"))
+            .unwrap_or_default();
+
+        println!(
+            "{http:<4}  {dur:>8}  {type_col:<16}  {info_col}{msg}",
+            http = http,
+            dur = fmt_secs(result.duration),
+            type_col = type_col,
+            info_col = info_col,
+            msg = msg,
+        );
+
+        if let Some(cache) = result.media.as_ref().and_then(|m| m.cache.as_deref()) {
+            println!("cache {cache}");
         }
-
-        if let Some(ref media) = result.media {
-            if let Some(obj) = media.properties.as_object() {
-                let pairs: Vec<String> = obj.iter()
-                    .map(|(k, v)| {
-                        if let Some(s) = v.as_str() { format!("{k}={s}") }
-                        else { format!("{k}={v}") }
-                    })
-                    .collect();
-                if !pairs.is_empty() {
-                    println!("  properties: {}", pairs.join("  "));
-                }
-            }
-        }
-
-        if let Some(ref media) = result.media {
-            if !media.thumbnail.is_empty() {
-                println!("  thumbnail : <binary image data>  (250×200  {})",
-                    fmt_bytes(media.thumbnail.len() as u64));
-            }
-        }
-
-        if let Some(ref cache_str) = result.media.as_ref().and_then(|m| m.cache.as_deref()) {
-            if let Some(hints) = crate::source::CacheHints::decode(cache_str) {
-                if let Ok(val) = serde_json::to_value(&hints) {
-                    if let Some(obj) = val.as_object() {
-                        let pairs: Vec<String> = obj.iter()
-                            .map(|(k, v)| {
-                                if let Some(s) = v.as_str() { format!("{k}={s}") }
-                                else { format!("{k}={v}") }
-                            })
-                            .collect();
-                        if !pairs.is_empty() {
-                            println!("  cache     : {}", pairs.join("  "));
-                        }
-                    }
-                }
-            }
-        }
-
-        if let Some(ref p) = result.placeholder {
-            println!("  icon      : {p}");
-        }
-
-        if result.download_size > 0 {
-            println!("  download  : {}", fmt_bytes(result.download_size));
-        }
-
-        if result.duration > 0.0 {
-            println!("  time      : {}", fmt_secs(result.duration));
-        }
-
-        if show_trace {
-            println!("  ── trace");
-
-            if let Some(ref u) = trace.canonical_url {
-                println!("    canonical_url     : {u}");
-            }
-            if let Some(ref h) = trace.cache_key {
-                let src = trace.cache_key_source.as_deref().unwrap_or("url");
-                println!("    cache_key         : {h}  (from {src})");
-            }
-
-            if trace.download_tail_bytes > 0 {
-                let head = trace.download_bytes.saturating_sub(trace.download_tail_bytes);
-                println!(
-                    "    download_bytes    : {}  ({}  +  {} tail)",
-                    fmt_bytes(trace.download_bytes),
-                    fmt_bytes(head),
-                    fmt_bytes(trace.download_tail_bytes),
-                );
-            } else {
-                println!("    download_bytes    : {}", fmt_bytes(trace.download_bytes));
-            }
-            if trace.io_secs > 0.0 {
-                println!("    io_secs           : {}", fmt_secs(trace.io_secs));
-            }
-
-            if trace.inspect_secs > 0.0 {
-                println!("    inspect_secs      : {}", fmt_secs(trace.inspect_secs));
-            }
-            if trace.deliver_secs > 0.0 {
-                println!("    deliver_secs      : {}", fmt_secs(trace.deliver_secs));
-            }
-            if let Some(ref r) = trace.job_renderer {
-                println!("    job_renderer      : {r}");
-            }
-            let handler = get_str(&trace_json, "render_handler");
-            println!("    render_handler    : {handler}");
-            println!("    tier              : {}  v{}", trace.job_tier, trace.version);
-
-            let cache_hit = get_str(&trace_json, "cache_hit");
-            let cache_hit_display = if cache_hit.is_empty() { "—".to_string() } else { cache_hit };
-            println!("    cache_hit         : {cache_hit_display}");
-
-            if let Some(ref s) = trace.session_id {
-                println!("    session_id        : {s}");
-            }
-            if let Some(ref c) = trace.customer_id {
-                println!("    customer_id       : {c}");
-            }
-            if let Some(ref s) = trace.server {
-                println!("    server            : {s}");
-            }
-            println!("    cancelled         : {}", trace.cancelled);
-        }
-
-        println!();
     }
 }
 
@@ -672,6 +380,12 @@ fn run_diag(json: bool) {
     if !report.healthy {
         std::process::exit(1);
     }
+}
+
+// ── version ───────────────────────────────────────────────────────────────────
+
+fn run_version(tier: u8) {
+    println!("thumbrella {}  (tier {tier})", crate::TBR_VERSION);
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

@@ -54,7 +54,7 @@ async fn main() {
     // ── Register diag sections ───────────────────────────────────────────────
     register_tier3_diag(&env_report);
 
-    tier1::cli::run_with_hook(|rt| async move {
+    tier1::cli::run_with_hook(3, |rt| async move {
         let rt = tier1::with_renderer(rt, tier3::Tier3Renderer::shared());
         tier1::with_shortcut_limits(rt, tier1::ShortcutLimits::TIER2)
     }).await;

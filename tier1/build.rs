@@ -1,6 +1,6 @@
 // build.rs — placeholder icon generation
 //
-// Reruns only when scripts/gen_placeholders.py is edited.  If Python or the
+// Reruns only when tier1/build_placeholders.py is edited.  If Python or the
 // required pip packages are absent the build continues using the committed
 // JPEG files and emits a cargo warning instead of failing.
 
@@ -9,9 +9,8 @@ use std::process::Command;
 
 fn main() {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    let workspace = Path::new(&manifest).join("..").canonicalize().unwrap();
 
-    let script  = workspace.join("scripts/gen_placeholders.py");
+    let script  = Path::new(&manifest).join("build_placeholders.py");
     let out_dir = Path::new(&manifest).join("assets/placeholders");
 
     // Rerun only if the generator script itself is edited.
@@ -25,11 +24,11 @@ fn main() {
     {
         Ok(s) if s.success() => {}
         Ok(s) => println!(
-            "cargo:warning=gen_placeholders.py exited with {s}; \
+            "cargo:warning=build_placeholders.py exited with {s}; \
              using committed placeholder files"
         ),
         Err(e) => println!(
-            "cargo:warning=gen_placeholders.py could not run ({e}); \
+            "cargo:warning=build_placeholders.py could not run ({e}); \
              using committed placeholder files"
         ),
     }

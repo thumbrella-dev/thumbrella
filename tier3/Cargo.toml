@@ -5,7 +5,7 @@ edition.workspace = true
 description = "Thumbrella Tier 3 — full-featured thumbnail service with pluggable renderers"
 
 [[bin]]
-name = "tier3"
+name = "thumbrella"
 path = "src/bin/tier3.rs"
 required-features = ["native"]
 

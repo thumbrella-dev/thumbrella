@@ -1,7 +1,7 @@
 // build.rs for tier2
 //
 // FFmpeg's static .a files have unresolved references to a small set of
-// system libraries.  Our custom build (scripts/build-ffmpeg-static.sh)
+// system libraries.  Our custom build (tier2/build_static_ffmpeg.sh)
 // was configured with --enable-zlib --enable-bzlib --enable-lzma, so
 // we need to supply those archives.
 //
@@ -33,7 +33,7 @@ fn main() {
     println!("cargo:rustc-link-search=native=/opt/ffmpeg-static/lib");
 
     // dav1d (AV1/AVIF decoder) — optional.  Only linked when the static
-    // archive exists (built by scripts/build-ffmpeg-static.sh alongside FFmpeg).
+    // archive exists (built by tier2/build_static_ffmpeg.sh alongside FFmpeg).
     let has_dav1d = std::path::Path::new("/opt/ffmpeg-static/lib/libdav1d.a").exists();
     if has_dav1d {
         println!("cargo:rustc-link-lib=static=dav1d");
