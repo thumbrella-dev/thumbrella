@@ -13,8 +13,8 @@
 //! | `TBR_DEVELOPER_MODE`       | false   | Verbose debug output in API responses            |
 //! | `TBR_ALLOW_FILES`          | false   | Accept `file://` URLs and bare absolute paths    |
 //! | `TBR_SCRATCH`              | $TMPDIR/thumbrella | Scratch root for tier3 CLI tool staging   |
-//! | `TBR_TIER2`                | —       | Tier-2 URL with optional `#handshake` secret |
-//! | `TBR_TIER3`                | —       | Tier-3 URL with optional `#handshake` secret |
+//! | `TBR_TIER2`                | —       | Tier-2 connect string (URL + optional headers)   |
+//! | `TBR_TIER3`                | —       | Tier-3 connect string (URL + optional headers)   |
 //! | `TBR_HANDSHAKE`           | —       | Shared secret required on all endpoints       |
 //! | `TBR_CACHE`                | —       | Cache backend DSN — `sqlite:<path>`, …          |
 //! | `TBR_CACHE_MAX_ITEMS`      | —       | Max cache entries (backend-specific meaning)     |
@@ -22,8 +22,21 @@
 //! | `TBR_FAILURE_TTL`          | 5       | URL failure debounce window (seconds)            |
 //! | `TBR_BACKOFF_DEFAULT`      | 60      | Origin back-off TTL when no `Retry-After` header |
 //! | `TBR_BACKOFF_CEILING`      | 3600    | Origin back-off maximum TTL cap (seconds)        |
+//!
+//! # Connect-string syntax
+//!
+//! `TBR_TIER2` and `TBR_TIER3` use the same connect-string format as
+//! `TBR_CONNECT` in the TypeScript client:
+//!
+//! - Plain URL: `http://tier2:8000`
+//! - URL with headers: `http://tier2:8000,x-tbr-handshake=secret`
+//! - URL with Bearer token: `http://tier2:8000,token`
+//! - Backward-compat `#` fragment: `http://tier2:8000#secret`
+//!   (The fragment is treated as an `x-tbr-handshake` header value.)
 
 // ── AppConfig ─────────────────────────────────────────────────────────────────
+
+use crate::connect::{ConnectTarget, parse_connect_target};
 
 /// Full runtime configuration for a tier-1 server instance.
 ///
@@ -53,14 +66,10 @@ pub struct AppConfig {
     pub scratch_dir: String,
 
     // ── Handoff tiers ─────────────────────────────────────────────────────────
-    /// URL of the tier-2 handoff server (`TBR_TIER2`).
-    pub tier2_url: Option<String>,
-    /// Per-tier handshake parsed from `TBR_TIER2` URL fragment.
-    pub tier2_handshake: Option<String>,
-    /// URL of the tier-3 handoff server (`TBR_TIER3`).
-    pub tier3_url: Option<String>,
-    /// Per-tier handshake parsed from `TBR_TIER3` URL fragment.
-    pub tier3_handshake: Option<String>,
+    /// Tier-2 connect target parsed from `TBR_TIER2`.
+    pub tier2: ConnectTarget,
+    /// Tier-3 connect target parsed from `TBR_TIER3`.
+    pub tier3: ConnectTarget,
     /// Shared secret required on all endpoints when set.
     /// If `None`, the server is publicly accessible.
     pub handshake: Option<String>,
@@ -97,10 +106,8 @@ impl Default for AppConfig {
             developer_mode: false,
             allow_local: false,
             scratch_dir: default_scratch_dir(),
-            tier2_url: None,
-            tier2_handshake: None,
-            tier3_url: None,
-            tier3_handshake: None,
+            tier2: ConnectTarget::default(),
+            tier3: ConnectTarget::default(),
             handshake: None,
             cache_url: None,
             cache_max_items: None,
@@ -115,18 +122,16 @@ impl Default for AppConfig {
 impl AppConfig {
     /// Build config from environment variables, falling back to defaults.
     pub fn from_env() -> Self {
-        let (tier2_url, tier2_handshake) = parse_handoff_target(env_opt_string("TBR_TIER2"));
-        let (tier3_url, tier3_handshake) = parse_handoff_target(env_opt_string("TBR_TIER3"));
+        let tier2 = parse_connect_target(env_opt_string("TBR_TIER2"));
+        let tier3 = parse_connect_target(env_opt_string("TBR_TIER3"));
         Self {
             port:                 env_u16("TBR_PORT", 3114),
             server:               std::env::var("TBR_SERVER").ok(),
             developer_mode:       env_bool("TBR_DEVELOPER_MODE", false),
             allow_local:          env_bool("TBR_ALLOW_FILES", false),
             scratch_dir:          env_scratch("TBR_SCRATCH"),
-            tier2_url,
-            tier2_handshake,
-            tier3_url,
-            tier3_handshake,
+            tier2,
+            tier3,
             handshake:          env_opt_string("TBR_HANDSHAKE"),
             cache_url:            std::env::var("TBR_CACHE").ok(),
             cache_max_items:      env_opt_u32("TBR_CACHE_MAX_ITEMS"),
@@ -165,17 +170,6 @@ fn env_opt_u32(name: &str) -> Option<u32> {
 
 fn env_opt_string(name: &str) -> Option<String> {
     std::env::var(name).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
-}
-
-fn parse_handoff_target(raw: Option<String>) -> (Option<String>, Option<String>) {
-    let Some(raw) = raw else { return (None, None); };
-    let (base, code) = match raw.split_once('#') {
-        Some((u, c)) => (u.trim(), Some(c.trim())),
-        None => (raw.trim(), None),
-    };
-    let url = if base.is_empty() { None } else { Some(base.to_string()) };
-    let code = code.and_then(|c| if c.is_empty() { None } else { Some(c.to_string()) });
-    (url, code)
 }
 
 fn default_scratch_dir() -> String {

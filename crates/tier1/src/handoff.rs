@@ -76,9 +76,9 @@ pub type HandoffFut = Pin<Box<dyn Future<Output = Result<HandoffResponse, String
 /// Injected handoff function signature.
 ///
 /// Receives the handoff target base URL (`<url>/handoff` is the endpoint),
-/// an optional bearer secret, and the serialised `ThumbHandoff` payload.
+/// an optional map of HTTP headers, and the serialised `ThumbHandoff` payload.
 /// Returns a future that resolves to a `HandoffResponse` or an error string.
-pub type HandoffFn = dyn Fn(String, Option<String>, ThumbHandoff) -> HandoffFut + Send + Sync;
+pub type HandoffFn = dyn Fn(String, HashMap<String, String>, ThumbHandoff) -> HandoffFut + Send + Sync;
 
 /// Process-global injected handoff implementation.
 ///
@@ -99,43 +99,48 @@ pub fn register_handoff_fn(f: Box<HandoffFn>) {
 
 /// Send a handoff payload to another tier and return both result + trace.
 ///
+/// `headers` are additional HTTP headers to include in the handoff request
+/// (e.g. `x-tbr-handshake`, `Authorization`, custom auth keys).
+///
 /// Dispatch priority:
 /// 1. [`HANDOFF_IMPL`] — injected fn registered at startup (e.g. Workers).
 /// 2. `native_post_handoff` — reqwest implementation for `feature = "native"`.
 /// 3. Error — non-native build with no registered implementation.
 pub async fn post_handoff(
     base_url: &str,
-    handshake: Option<&str>,
+    headers: &HashMap<String, String>,
     payload: &ThumbHandoff,
 ) -> Result<HandoffResponse, String> {
     if let Some(f) = HANDOFF_IMPL.get() {
         return f(
             base_url.to_string(),
-            handshake.map(str::to_string),
+            headers.clone(),
             payload.clone(),
         )
         .await;
     }
-    native_post_handoff(base_url, handshake, payload).await
+    native_post_handoff(base_url, headers, payload).await
 }
 
 /// Reqwest-based handoff — used in native builds when no custom fn is registered.
 #[cfg(feature = "native")]
 async fn native_post_handoff(
     base_url: &str,
-    handshake: Option<&str>,
+    headers: &HashMap<String, String>,
     payload: &ThumbHandoff,
 ) -> Result<HandoffResponse, String> {
     let endpoint = format!("{}/handoff", base_url.trim_end_matches('/'));
     let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .read_timeout(std::time::Duration::from_secs(30))
         .http2_adaptive_window(true)
         .tcp_nodelay(true)
         .build()
         .map_err(|e| format!("handoff client init failed: {e}"))?;
 
     let mut req = client.post(&endpoint).json(payload);
-    if let Some(h) = handshake {
-        req = req.header(HANDSHAKE_HEADER, h);
+    for (k, v) in headers {
+        req = req.header(k.as_str(), v.as_str());
     }
 
     let resp = req
@@ -158,7 +163,7 @@ async fn native_post_handoff(
 #[cfg(not(feature = "native"))]
 async fn native_post_handoff(
     _base_url: &str,
-    _handshake: Option<&str>,
+    _headers: &HashMap<String, String>,
     _payload: &ThumbHandoff,
 ) -> Result<HandoffResponse, String> {
     Err(

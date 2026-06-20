@@ -54,7 +54,7 @@ pub async fn startup(cfg: &AppConfig) -> Arc<Runtime> {
     };
 
     // ── 4. Tier-2/3 reachability ──────────────────────────────────────────────
-    // TODO: send a HEAD or /health request to cfg.tier2_url / cfg.tier3_url
+    // TODO: send a HEAD or /health request to cfg.tier2.url / cfg.tier3.url
     // and log a warning if the response is not 200.
 
     tracing::debug!("startup: complete");
@@ -74,10 +74,8 @@ pub async fn startup(cfg: &AppConfig) -> Arc<Runtime> {
         trace,
         cfg.server.clone(),
         background_image,
-        cfg.tier2_url.clone(),
-        cfg.tier2_handshake.clone(),
-        cfg.tier3_url.clone(),
-        cfg.tier3_handshake.clone(),
+        cfg.tier2.clone(),
+        cfg.tier3.clone(),
         cfg.handshake.clone(),
         cfg.allow_local,
         cfg.failure_ttl as u64,

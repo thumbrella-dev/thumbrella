@@ -148,14 +148,10 @@ pub struct Runtime {
     /// out-of-process HTTP round-trip.
     #[cfg(feature = "native")]
     pub renderer: Option<SharedRenderer>,
-    /// Tier-2 handoff server base URL (e.g. `http://tier2:8000`).
-    pub handoff_tier2_url: Option<String>,
-    /// Per-tier handshake sent when calling tier-2 `/handoff`.
-    pub handoff_tier2_handshake: Option<String>,
-    /// Tier-3 handoff server base URL (e.g. `http://tier3:8000`).
-    pub handoff_tier3_url: Option<String>,
-    /// Per-tier handshake sent when calling tier-3 `/handoff`.
-    pub handoff_tier3_handshake: Option<String>,
+    /// Tier-2 handoff connect target (URL + optional headers).
+    pub handoff_tier2: crate::connect::ConnectTarget,
+    /// Tier-3 handoff connect target (URL + optional headers).
+    pub handoff_tier3: crate::connect::ConnectTarget,
     /// Shared secret required on all endpoints when set.
     /// If `None`, the server is publicly accessible.
     pub handshake: Option<String>,
@@ -188,10 +184,8 @@ impl Runtime {
         trace: TraceStore,
         server: Option<String>,
         background_image: Option<RgbImage>,
-        handoff_tier2_url: Option<String>,
-        handoff_tier2_handshake: Option<String>,
-        handoff_tier3_url: Option<String>,
-        handoff_tier3_handshake: Option<String>,
+        handoff_tier2: crate::connect::ConnectTarget,
+        handoff_tier3: crate::connect::ConnectTarget,
         handshake: Option<String>,
         allow_local: bool,
         failure_ttl: u64,
@@ -206,10 +200,8 @@ impl Runtime {
             background_image,
             #[cfg(feature = "native")]
             renderer: None,
-            handoff_tier2_url,
-            handoff_tier2_handshake,
-            handoff_tier3_url,
-            handoff_tier3_handshake,
+            handoff_tier2,
+            handoff_tier3,
             handshake,
             allow_local,
             shortcut_limits: ShortcutLimits::TIER1,
@@ -1092,19 +1084,26 @@ impl<S: HttpStream> ThumbCook<S> {
             // This avoids returning `unavailable` for large/progressive JPEGs.
             let target_tier = if routed_tier == 1
                 && self.media.kind == Some(FileKind::Image)
-                && self.runtime.handoff_tier2_url.is_some()
+                && self.runtime.handoff_tier2.url.is_some()
             {
                 2
             } else {
                 routed_tier
             };
-            let (target_url, target_handshake) = match target_tier {
-                2 => (self.runtime.handoff_tier2_url.clone(), self.runtime.handoff_tier2_handshake.clone()),
-                3 => (self.runtime.handoff_tier3_url.clone(), self.runtime.handoff_tier3_handshake.clone()),
-                _ => (None, None),
+            let target = match target_tier {
+                2 => self.runtime.handoff_tier2.clone(),
+                3 => self.runtime.handoff_tier3.clone(),
+                _ => {
+                    self.http_close().await;
+                    self.status = CookStatus::Complete;
+                    self.placeholder_source = Some(ResultSource::Placeholder);
+                    self.out_message = "no higher-tier renderer is configured".to_string();
+                    self.out_duration = t0.elapsed().as_secs_f64();
+                    return self.finish(after);
+                }
             };
 
-            if let Some(url) = target_url.as_deref() {
+            if let Some(url) = target.url.as_deref() {
                 // Emit intermediate progress before the async handoff gap.
                 if !self.ctx_handoff {
                     if let Some(progress) = on_progress.as_mut() {
@@ -1156,8 +1155,9 @@ impl<S: HttpStream> ThumbCook<S> {
                         // atomically — the live stream is relinquished before the
                         // JSON is serialised for the outbound HTTP request.
                         let payload = self.take_handoff().await;
+                        let headers = target.headers.clone();
                         let shared = Arc::new(
-                            crate::handoff::post_handoff(url, target_handshake.as_deref(), &payload).await,
+                            crate::handoff::post_handoff(url, &headers, &payload).await,
                         );
                         // Notify joiners before applying to self so they unblock ASAP.
                         self.runtime.handoff_inflight.complete(&hkey, Arc::clone(&shared));

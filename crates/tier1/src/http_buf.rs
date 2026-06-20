@@ -436,7 +436,26 @@ impl<S: HttpStream> HttpBuffer<S> {
     // ── Streaming-mode read ───────────────────────────────────────────────────
 
     async fn read_streaming(&mut self, buf: &mut [u8]) -> Result<usize, HttpError> {
-        // Serve from cache if this range was captured before streaming mode.
+        // Tail-fetch shortcut: when the cursor lands in the tail of a
+        // known-length file, issue a Range request instead of draining every
+        // byte in between.  Streaming mode uses a lower gap threshold than
+        // read_cached() because each chunk is an individual HTTP round-trip
+        // with no page-cache amortisation — even a modest gap of ~64 KB
+        // (16 pages) is cheaper to bridge with a Range request.
+        if let Some(total) = self.content_length {
+            let in_tail = self.cursor >= total.saturating_sub(TAIL_FETCH_SIZE);
+            // 16 pages: small enough to catch typical video-container tail
+            // seeks without triggering a second Range request for every
+            // sequential page read in the tail.
+            let streaming_skip_threshold: u64 = PAGE_SIZE as u64 * 16;
+            let big_gap = self.cursor.saturating_sub(self.stream_pos) > streaming_skip_threshold;
+            if in_tail && big_gap && self.accepts_ranges {
+                self.fetch_tail_into_pages(total).await?;
+            }
+        }
+
+        // Serve from cache if this range was captured before streaming mode
+        // (or just populated by the tail-fetch above).
         let page_index = self.cursor / PAGE_SIZE as u64;
         if let Some(page) = self.pages.get(&page_index) {
             let in_page = (self.cursor % PAGE_SIZE as u64) as usize;
@@ -803,6 +822,8 @@ fn http_client() -> &'static reqwest::Client {
 #[cfg(feature = "native")]
 fn build_http_client() -> reqwest::Client {
     reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .read_timeout(std::time::Duration::from_secs(30))
         .http2_adaptive_window(true)
         .tcp_nodelay(true)
         .pool_max_idle_per_host(8)

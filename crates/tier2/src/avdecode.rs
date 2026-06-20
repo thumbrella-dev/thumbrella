@@ -329,12 +329,13 @@ pub fn decode_with_libav(
     let mut frame:     *mut AVFrame         = ptr::null_mut();
     let mut sws_ctx:   *mut SwsContext      = ptr::null_mut();
 
-    // Limit probe reads for HEIF-family formats.  All codec parameters are
-    // stored in the `meta` box at the file start, so a 128 KB ceiling is more
-    // than enough to identify all streams without streaming the full mdat.
+    // Limit probe reads for container formats.
+    // HEIF-family: all codec parameters in the `meta` box at file start.
+    // Video containers: 256 KB is enough to find stream info + first keyframe
+    // without chasing MKV's end-of-file Cues or reading the full mdat.
     let probe_limit: Option<i64> = match ext_hint.as_deref() {
         Some("heic" | "heif" | "heics" | "heifs" | "avif") => Some(128 * 1024),
-        _ => None,
+        _ => Some(256 * 1024),
     };
 
     let result = unsafe {
@@ -447,6 +448,9 @@ unsafe fn decode_inner(
     }
     (**fmt_ctx).pb    = *avio_ctx;
     (**fmt_ctx).flags |= AVFMT_FLAG_CUSTOM_IO as i32;
+    // Prevent MKV/WebM from reading the end-of-file Cues index.
+    // We only need the first keyframe near the seek point.
+    (**fmt_ctx).flags |= AVFMT_FLAG_NOFILLIN as i32;
 
     // avformat_open_input frees *fmt_ctx on failure; null it to avoid
     // a double-free in the caller's cleanup.

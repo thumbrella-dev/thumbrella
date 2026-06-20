@@ -64,6 +64,8 @@ pub enum ValidationStatus {
     Ok,
     /// Dependency is not configured; no check was performed.
     NotConfigured,
+    /// Configuration is present but validation found a non-fatal issue.
+    Warn,
     /// Configuration is present but validation failed.
     Error,
     /// Validation was not attempted (e.g. earlier required step also failed).
@@ -88,6 +90,9 @@ impl Validation {
     }
     pub fn error(msg: impl Into<String>) -> Self {
         Self { status: ValidationStatus::Error, message: Some(msg.into()) }
+    }
+    pub fn warn(msg: impl Into<String>) -> Self {
+        Self { status: ValidationStatus::Warn, message: Some(msg.into()) }
     }
     pub fn skipped() -> Self {
         Self { status: ValidationStatus::Skipped, message: None }
@@ -288,8 +293,8 @@ pub fn collect(cfg: &crate::config::AppConfig) -> DiagReport {
     let (tier2, tier2_handoff, tier2_validation) = if TIER2_BUILTIN.load(std::sync::atomic::Ordering::Acquire) {
         (TierStatus::Builtin, None, Validation::ok())
     } else {
-        match cfg.tier2_url.as_ref() {
-            Some(url) => (TierStatus::Handoff, Some(url.clone()), validate_handoff_target(url, cfg.tier2_handshake.as_deref())),
+        match cfg.tier2.url.as_ref() {
+            Some(url) => (TierStatus::Handoff, Some(url.clone()), validate_handoff_target(url, &cfg.tier2.headers)),
             None      => (TierStatus::Missing, None,              Validation::not_configured()),
         }
     };
@@ -298,8 +303,8 @@ pub fn collect(cfg: &crate::config::AppConfig) -> DiagReport {
     let (tier3, tier3_handoff, tier3_validation) = if TIER3_BUILTIN.load(std::sync::atomic::Ordering::Acquire) {
         (TierStatus::Builtin, None, Validation::ok())
     } else {
-        match cfg.tier3_url.as_ref() {
-            Some(url) => (TierStatus::Handoff, Some(url.clone()), validate_handoff_target(url, cfg.tier3_handshake.as_deref())),
+        match cfg.tier3.url.as_ref() {
+            Some(url) => (TierStatus::Handoff, Some(url.clone()), validate_handoff_target(url, &cfg.tier3.headers)),
             None      => (TierStatus::Missing, None,              Validation::not_configured()),
         }
     };
@@ -583,14 +588,17 @@ impl DiagReport {
     }
 }
 
-/// Validate an external handoff target URL and local handoff secret config.
+/// Validate an external handoff target URL and local handoff auth config.
 #[cfg(feature = "native")]
-fn validate_handoff_target(url: &str, handshake: Option<&str>) -> Validation {
+fn validate_handoff_target(url: &str, headers: &std::collections::HashMap<String, String>) -> Validation {
     use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
     use std::time::Duration;
 
-    if handshake.is_none() {
-        return Validation::error("missing handshake fragment in tier URL (expected .../#handshake)");
+    if headers.is_empty() {
+        return Validation::warn(
+            "no auth headers configured for handoff target; \
+             add x-tbr-handshake=... or a Bearer token via the connect string",
+        );
     }
 
     let parsed = match reqwest::Url::parse(url) {
@@ -637,6 +645,7 @@ fn print_validation(label: &str, v: &Validation) {
     let s = match v.status {
         ValidationStatus::Ok            => "ok",
         ValidationStatus::NotConfigured => "not configured",
+        ValidationStatus::Warn          => "warn",
         ValidationStatus::Error         => "error",
         ValidationStatus::Skipped       => "skipped",
     };

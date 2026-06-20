@@ -30,10 +30,10 @@ enum Command {
     /// Start the HTTP server.
     ///
     /// Port and other options come from environment variables (defaults).
-    /// TBR_PORT (8001) serve port
+    /// TBR_PORT (3114) serve port
     /// TBR_HANDSHAKE shared secret required on all endpoints (when set)
-    /// TBR_TIER2 downstream tier2 url (optional #handshake fragment for outbound auth)
-    /// TBR_TIER3 downstream tier3 url (optional #handshake fragment for outbound auth)
+    /// TBR_TIER2 downstream tier2 connect string (URL + optional comma-separated headers)
+    /// TBR_TIER3 downstream tier3 connect string (URL + optional comma-separated headers)
     Serve,
 
     /// Thumbnail one or more URLs and print results to stdout.
@@ -207,7 +207,7 @@ async fn run_server(runtime: Arc<Runtime>) {
 
     let app = Router::new()
         .route("/health", get(routes::health))
-        .route("/placeholder/{kind}.jpeg", get(routes::placeholder))
+        .route("/placeholder/{kind}", get(routes::placeholder))
         .route("/thumb.jpeg", get(routes::thumb))
         .route("/thumb", get(routes::thumb))
         .route("/handoff", post(routes::handoff))

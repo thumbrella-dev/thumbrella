@@ -24,6 +24,7 @@
 pub mod assets;
 pub mod after;
 pub mod cache;
+pub mod connect;
 pub mod cook;
 pub mod dispatch;
 pub mod handoff;
