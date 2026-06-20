@@ -1,5 +1,7 @@
 # Thumbrella
 
+<img src="thumbrella.png" alt="Thumbrella Logo" width="224" height="224" align="right" />
+
 Fast thumbnail server for online media.
 
 https://thumbrella.dev
@@ -67,10 +69,10 @@ crates with reduced functionality.
 - `tier2/` adds support for formats with additional static dependencies. The
   tier2 server builds a completely staatic and standalone executable. The most
   notable dependency is a static, minimal  `ffmpeg` built with no external dependencies.
-- 'tier3/' is the fully functional server. It uses optional external applications
+- `tier3/` is the fully functional server. It uses optional external applications
   and libraries, discovered at startup time. The server will work without these
   optional dependencies, enabling support for whatever formats it can discover.
-- 'docker/' builds an easy to maintain and share docker image based on the
+- `docker/` builds an easy to maintain and share docker image based on the
   tier3 binary and a prebuilt media docker image. This does not enable full
   support for all Thumbrella formats, but makes an easy to maintain starting
   point for anyone needing a mostly-featured server.
