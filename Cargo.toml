@@ -1,5 +1,17 @@
+[workspace.package]
+name = "Thumbrella"
+homepage = "https://thumbrella.dev"
+repository = "https://github.com/thumbrella-dev/thumbrella"
+description = "Fast thumbnail server for online media"
+keywords = ["thumbnail", "media"]
+categories = ["web-programming::http-server", "multimedia", "graphics", "rendering"]
+license = "Apache-2.0"
+version = "0.3.0"
+edition = "2024"
+
 [workspace]
 resolver = "2"
+default-members = ["crates/tier3"]
 
 members = [
     "crates/tier1",
@@ -7,9 +19,6 @@ members = [
     "crates/tier3",
 ]
 
-[workspace.package]
-version = "0.1.0"
-edition = "2024"
 
 [profile.dev]
 opt-level = 0      # no optimizations — required for reliable variable inspection
@@ -17,9 +26,7 @@ debug = 2          # full debug info (variables, types, not just line tables)
 incremental = true
 codegen-units = 256
 
-# Compile dependencies with full optimization so heavy crates (image, jpeg-encoder,
-# ravif, etc.) run at near-release speed. They're cached after the first build so
-# this only adds time on a clean build.
+# Dev build uses optimized dependencies for efficiency
 [profile.dev.package."*"]
 opt-level = 3
 
