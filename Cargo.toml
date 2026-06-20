@@ -1,5 +1,4 @@
 [workspace.package]
-name = "Thumbrella"
 homepage = "https://thumbrella.dev"
 repository = "https://github.com/thumbrella-dev/thumbrella"
 description = "Fast thumbnail server for online media"
@@ -11,13 +10,8 @@ edition = "2024"
 
 [workspace]
 resolver = "2"
-default-members = ["crates/tier3"]
-
-members = [
-    "crates/tier1",
-    "crates/tier2",
-    "crates/tier3",
-]
+default-members = ["tier3"]
+members = ["tier1", "tier2", "tier3",]
 
 
 [profile.dev]

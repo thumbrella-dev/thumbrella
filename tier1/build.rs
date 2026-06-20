@@ -9,7 +9,7 @@ use std::process::Command;
 
 fn main() {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    let workspace = Path::new(&manifest).join("../..").canonicalize().unwrap();
+    let workspace = Path::new(&manifest).join("..").canonicalize().unwrap();
 
     let script  = workspace.join("scripts/gen_placeholders.py");
     let out_dir = Path::new(&manifest).join("assets/placeholders");

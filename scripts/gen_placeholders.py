@@ -3,7 +3,7 @@
 
 Usage
 -----
-    python3 scripts/gen_placeholders.py --out crates/tier1/assets/placeholders/
+    python3 scripts/gen_placeholders.py --out tier1/assets/placeholders/
 
 Writes one JPEG per media kind plus a generic 'failed' icon:
     image.jpeg  video.jpeg  audio.jpeg  vector.jpeg  document.jpeg
