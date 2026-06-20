@@ -51,7 +51,6 @@ BINARY="${BINARY:-${WORKSPACE}/target/release/tier3}"
 (cd "${WORKSPACE}" && cargo build --release --package tier3)
 #(cd "${WORKSPACE}" && cargo build --target ${TARGET} --release --package tier3)
 cp "${BINARY}" "${DOCKPATH}/thumbrella"
-chmod 777 "${DOCKPATH}/thumbrella"
 
 
 # Create image

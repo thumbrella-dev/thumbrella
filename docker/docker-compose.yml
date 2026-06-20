@@ -1,0 +1,21 @@
+# Thumbrella — self-hosted thumbnail server with persistent SQLite cache.
+#
+# Start:  docker compose up -d
+# Stop:   docker compose down
+#
+# The sqlite cache survives container restarts and upgrades.
+# To wipe the cache:  docker compose down -v
+
+services:
+  thumbrella:
+    image: thumbrella/server:latest
+    ports:
+      - "3114:3114"
+    volumes:
+      - thumbrella_cache:/var/lib/thumbrella
+    environment:
+      - TBR_CACHE=sqlite:/var/lib/thumbrella/cache.db
+    restart: unless-stopped
+
+volumes:
+  thumbrella_cache:
