@@ -6,7 +6,7 @@
 //! ```text
 //! <binary> serve              # start the HTTP server
 //! <binary> thumb <url>...     # thumbnail one or more URLs
-//! <binary> diag               # print config and validate services
+//! <binary> check              # print config and validate services
 //! <binary> version            # print build version
 //! ```
 
@@ -56,6 +56,11 @@ enum Command {
         /// Emit machine-readable JSON instead of the default pretty text.
         #[arg(long)]
         json: bool,
+
+        /// Emit raw result JSON (unwrapped, with base64 thumbnail intact).
+        /// Output is `{"result": {…}}` — one object per URL, no `items` wrapper.
+        #[arg(long)]
+        raw: bool,
     },
 
     /// Print server configuration and validate connected services.
@@ -63,7 +68,7 @@ enum Command {
     /// Reports tier status, cache config, account credentials, and concurrency
     /// limits.  Validates external dependencies (handoff servers, caches) where
     /// possible.  Output is private — not exposed on any HTTP endpoint.
-    Diag {
+    Check {
         /// Emit machine-readable JSON instead of the default pretty text.
         #[arg(long)]
         json: bool,
@@ -114,8 +119,21 @@ where
 
     let cli = Cli::parse();
 
-    let runtime = if !matches!(cli.command, Command::Diag { .. }) {
+    let runtime = if !matches!(cli.command, Command::Check { .. }) {
         let cfg = crate::config::AppConfig::from_env();
+
+        // Fail fast on handshake values that look like auth tokens.
+        if let Some(ref hs) = cfg.handshake {
+            if crate::config::looks_like_auth_token(hs) {
+                ux.fatal(
+                    "TBR_HANDSHAKE looks like an auth token — this is almost certainly a mistake",
+                    "Auth tokens start with 'tbr_' and belong in the connect string or \
+                     Authorization header, not in TBR_HANDSHAKE.  Set TBR_HANDSHAKE to a \
+                     simple shared secret instead.",
+                );
+            }
+        }
+
         let rt = crate::startup::startup(&cfg).await;
         Some(hook(rt).await)
     } else {
@@ -124,8 +142,8 @@ where
 
     match cli.command {
         Command::Serve                                   => run_server(runtime.unwrap()).await,
-        Command::Thumb { urls, cache, json } => run_thumb(urls, cache, json, runtime.unwrap()).await,
-        Command::Diag { json }                           => run_diag(json),
+        Command::Thumb { urls, cache, json, raw } => run_thumb(urls, cache, json, raw, runtime.unwrap()).await,
+        Command::Check { json }                          => run_check(json),
         Command::Version                                 => run_version(tier),
     }
 }
@@ -141,11 +159,10 @@ async fn run_server(runtime: Arc<Runtime>) {
     let ux = crate::ux::get();
 
     // Startup block — banner, hints, and connection info.
-    let has_handshake = cfg.handshake.is_some() || !cfg.tier2.headers.is_empty() || !cfg.tier3.headers.is_empty();
     ux.print_startup(
         cfg.port,
         crate::TBR_VERSION,
-        has_handshake,
+        cfg.handshake.as_deref(),
         cfg.cache_url.is_some(),
         cfg.tier2.url.is_some(),
         cfg.tier3.url.is_some(),
@@ -257,7 +274,7 @@ pub fn promote_url(raw: &str) -> String {
     format!("file://{}", abs.display())
 }
 
-async fn run_thumb(urls: Vec<String>, cache_str: Option<String>, json: bool, runtime: Arc<Runtime>) {
+async fn run_thumb(urls: Vec<String>, cache_str: Option<String>, json: bool, raw: bool, runtime: Arc<Runtime>) {
     use futures::stream::{FuturesUnordered, StreamExt};
     use crate::{ThumbCook, cook::InputSpec};
     use crate::source::CacheHints;
@@ -278,7 +295,15 @@ async fn run_thumb(urls: Vec<String>, cache_str: Option<String>, json: bool, run
         results.push(result);
     }
 
-    if json {
+    if raw {
+        // Emit raw result JSON — unwrapped, with base64 thumbnail intact.
+        // Matches the shape the Python post-processing in generate-thumbnails.sh
+        // reconstructs: {"result": {…}}.
+        for result in &results {
+            let out = serde_json::json!({ "result": result });
+            println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        }
+    } else if json {
         let json_items: Vec<serde_json::Value> = results.iter().map(|result| {
             let mut val = serde_json::to_value(result).unwrap();
             if let Some(obj) = val.as_object_mut() {
@@ -363,9 +388,9 @@ pub fn print_thumb_items(results: &[crate::ThumbResult]) {
     }
 }
 
-// ── diag ──────────────────────────────────────────────────────────────────────
+// ── check ─────────────────────────────────────────────────────────────────────
 
-fn run_diag(json: bool) {
+fn run_check(json: bool) {
     use crate::{config::AppConfig, diag};
 
     let cfg = AppConfig::from_env();

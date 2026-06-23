@@ -135,7 +135,7 @@ impl Ux {
         &self,
         port: u16,
         version: &str,
-        handshake_configured: bool,
+        handshake: Option<&str>,
         cache_configured: bool,
         tier2_configured: bool,
         tier3_configured: bool,
@@ -192,10 +192,13 @@ impl Ux {
         }
 
         // ── Connection ────────────────────────────────────────────────────
-        let connect = if handshake_configured {
-            Colour::dim(&format!("export TBR_CONNECT=http://localhost:{port},your-handshake-secret"))
+        let connect = if let Some(hs) = handshake {
+            let masked = Self::mask_handshake(hs);
+            Colour::dim(&format!(
+                "TBR_CONNECT=http://localhost:{port},{masked} (use secret handshake)"
+            ))
         } else {
-            Colour::dim(&format!("export TBR_CONNECT=http://localhost:{port}"))
+            Colour::dim(&format!("TBR_CONNECT=http://localhost:{port}"))
         };
         lines.push(format!(
             "  # clients:  {connect}",
@@ -219,6 +222,31 @@ impl Ux {
             let _ = io::stdout().write_all(b"\n");
         }
         let _ = io::stdout().write_all(b"\n");
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /// Mask a handshake value for display in the startup banner.
+    ///
+    /// Shows the first few characters followed by asterisks for the rest.
+    /// - < 6 chars → all asterisks
+    /// - < 12 chars → first 2 + `*` for remaining
+    /// - >= 12 chars → first 4 + `*` for remaining
+    fn mask_handshake(value: &str) -> String {
+        let len = value.len();
+        if len == 0 {
+            return "***".to_string();
+        }
+        let (show, rest) = if len < 6 {
+            (0, len)
+        } else if len < 12 {
+            (2, len - 2)
+        } else {
+            (4, len - 4)
+        };
+        let prefix = &value[..show.min(len)];
+        let stars = "*".repeat(rest);
+        format!("{prefix}{stars}")
     }
 
     // ── Request logging ───────────────────────────────────────────────────────

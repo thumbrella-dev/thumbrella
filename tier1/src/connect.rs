@@ -2,6 +2,24 @@
 //!
 //! Follows the same grammar as `parseConnect()` in the TypeScript client
 //! and is used by both `TBR_CONNECT`, `TBR_TIER2`, and `TBR_TIER3`.
+//!
+//! ## Syntax
+//!
+//! ```text
+//! <url>,<header>...
+//! ```
+//!
+//! - **URL only:** `http://tier2:8000`
+//! - **URL + key=value headers:** `http://tier2:8000,x-custom=hdr`
+//! - **URL + auth token:** `http://tier2:8000,tbr_s_AbCd...`
+//!   Tokens starting with `tbr_[a-z]_` are recognised as Bearer auth.
+//! - **URL + handshake:** `http://tier2:8000,mysecret`
+//!   Any bare value that does *not* look like an auth token is treated as
+//!   an `x-tbr-handshake` header — a shorthand for the common case.
+//! - **Backward-compat `#` fragment:** `http://tier2:8000#secret`
+//!   (converted to `x-tbr-handshake: secret`)
+//! - **Bare token:** `tbr_s_AbCd...` → `Authorization: Bearer`
+//!   `mysecret` → `x-tbr-handshake: mysecret` (no URL)
 
 use std::collections::HashMap;
 
@@ -22,19 +40,27 @@ pub struct ConnectTarget {
 ///
 /// - Plain URL: `http://tier2:8000`
 /// - URL with `key=value` headers: `http://tier2:8000,x-tbr-handshake=s3cret`
-/// - URL with bare token (becomes Bearer): `http://tier2:8000,tok`
+/// - URL with auth token (recognised by `tbr_[a-z]_` prefix):
+///   `http://tier2:8000,tbr_s_AbCd...` → `Authorization: Bearer`
+/// - URL with bare handshake value: `http://tier2:8000,mysecret`
+///   → `x-tbr-handshake: mysecret`
 /// - Backward-compat `#` fragment: `http://tier2:8000#secret`
 ///   (fragment is converted to `x-tbr-handshake: secret` header)
 ///
-/// Bare tokens without a `://` URL return `url: None` and the token
-/// as `Authorization: Bearer <token>`.
+/// Bare tokens without a `://` URL:
+/// - Auth token (`tbr_[a-z]_` prefix) → `Authorization: Bearer <token>`, `url: None`
+/// - Otherwise → `x-tbr-handshake: <value>`, `url: None`
 pub fn parse_connect_target(raw: Option<String>) -> ConnectTarget {
     let Some(raw) = raw else { return ConnectTarget::default(); };
 
-    // Bearer token — no scheme.
+    // Bare value (no scheme) — either an auth token or a handshake.
     if !raw.contains("://") {
         let mut headers = HashMap::new();
-        headers.insert("Authorization".to_string(), format!("Bearer {raw}"));
+        if crate::config::looks_like_auth_token(&raw) {
+            headers.insert("Authorization".to_string(), format!("Bearer {raw}"));
+        } else {
+            headers.insert("x-tbr-handshake".to_string(), raw.to_string());
+        }
         return ConnectTarget { url: None, headers };
     }
 
@@ -66,8 +92,10 @@ pub fn parse_connect_target(raw: Option<String>) -> ConnectTarget {
         }
         if let Some((k, v)) = s.split_once('=') {
             headers.insert(k.trim().to_string(), v.trim().to_string());
-        } else {
+        } else if crate::config::looks_like_auth_token(s) {
             headers.insert("Authorization".to_string(), format!("Bearer {s}"));
+        } else {
+            headers.insert("x-tbr-handshake".to_string(), s.to_string());
         }
     }
 

@@ -9,14 +9,14 @@
 //! The report is intentionally **not** exposed on any HTTP endpoint — it
 //! contains configuration values, handoff URLs, and account identifiers that
 //! must not leak to the public internet.  The only supported surface is the
-//! `tier1 diag` CLI subcommand.  A future opt-in via a secret token may be
+//! `tier1 check` CLI subcommand.  A future opt-in via a secret token may be
 //! added for remote ops tooling, but requires explicit design.
 //!
 //! # Usage
 //!
 //! ```bash
-//! tier1 diag           # pretty human-readable output
-//! tier1 diag --json    # machine-readable JSON (same struct)
+//! tier1 check          # pretty human-readable output
+//! tier1 check --json   # machine-readable JSON (same struct)
 //! ```
 
 use serde::{Deserialize, Serialize};
@@ -203,6 +203,11 @@ pub struct DiagReport {
     pub trace_file_check: Option<FileCheck>,
     /// Whether this server requires a handshake on all endpoints (`TBR_HANDSHAKE`).
     pub handshake_set: bool,
+    /// Validation result for the handshake value.
+    ///
+    /// Checks whether the configured `TBR_HANDSHAKE` value looks like an auth
+    /// token (starts with `tbr_[a-z]_`), which would indicate a misconfiguration.
+    pub handshake_validation: Validation,
 
 
     // ── Tier 1 ────────────────────────────────────────────────────────────────
@@ -348,12 +353,25 @@ pub fn collect(cfg: &crate::config::AppConfig) -> DiagReport {
     // Container / Docker image detection
     let container_image = detect_container_image();
 
+    // Handshake validation — flag values that look like auth tokens.
+    let handshake_validation = match cfg.handshake.as_deref() {
+        None => Validation::not_configured(),
+        Some(hs) if crate::config::looks_like_auth_token(hs) => {
+            Validation::error(
+                "looks like an auth token (starts with 'tbr_'); \
+                 set a simple shared secret instead",
+            )
+        }
+        Some(_) => Validation::ok(),
+    };
+
     let healthy = !matches!(tier2, TierStatus::Error)
         && !matches!(tier3, TierStatus::Error)
         && !matches!(tier2_validation.status, ValidationStatus::Error)
         && !matches!(tier3_validation.status, ValidationStatus::Error)
         && !matches!(cache_validation.status, ValidationStatus::Error)
         && !matches!(trace_validation.status, ValidationStatus::Error)
+        && !matches!(handshake_validation.status, ValidationStatus::Error)
         && port_available
         && cache_file_check.as_ref()
             .and_then(|fc| fc.sqlite_validation.as_ref())
@@ -372,6 +390,7 @@ pub fn collect(cfg: &crate::config::AppConfig) -> DiagReport {
         trace_validation,
         trace_file_check,
         handshake_set: cfg.handshake.is_some(),
+        handshake_validation,
         tier1: TierStatus::Builtin,
         tier2,
         tier2_handoff,
@@ -562,6 +581,7 @@ impl DiagReport {
             print_file_check("trace_file", fc);
         }
         println!("  handshake       : {}", if self.handshake_set { "set" } else { "—" });
+        print_validation("  handshake_check ", &self.handshake_validation);
         println!();
 
         println!("Tiers");

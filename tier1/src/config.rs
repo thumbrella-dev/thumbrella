@@ -26,8 +26,14 @@
 //! `TBR_CONNECT` in the TypeScript client:
 //!
 //! - Plain URL: `http://tier2:8000`
-//! - URL with headers: `http://tier2:8000,x-tbr-handshake=secret`
-//! - URL with Bearer token: `http://tier2:8000,token`
+//! - URL with explicit headers: `http://tier2:8000,x-tbr-handshake=secret`
+//! - URL with auth token: `http://tier2:8000,tbr_s_AbCd...`
+//!   Bare values starting with `tbr_[a-z]_` are sent as `Authorization: Bearer`.
+//! - URL with handshake shorthand: `http://tier2:8000,mysecret`
+//!   Any bare value that does *not* match the auth-token prefix is treated as
+//!   an `x-tbr-handshake` header.
+//! - Bare auth token without URL: `tbr_s_AbCd...` → `Authorization: Bearer`
+//! - Bare handshake without URL: `mysecret` → `x-tbr-handshake: mysecret`
 //! - Backward-compat `#` fragment: `http://tier2:8000#secret`
 //!   (The fragment is treated as an `x-tbr-handshake` header value.)
 
@@ -198,4 +204,17 @@ fn env_scratch(name: &str) -> String {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(default_scratch_dir)
+}
+
+/// Check if a value looks like a Thumbrella auth token.
+///
+/// Auth tokens follow the pattern `tbr_[a-z]_` + base64url body (e.g.
+/// `tbr_s_...` for secret, `tbr_p_...` for publishable).  If a handshake
+/// value matches this prefix, it was almost certainly set by mistake.
+pub(crate) fn looks_like_auth_token(value: &str) -> bool {
+    let b = value.as_bytes();
+    b.len() >= 6
+        && b.starts_with(b"tbr_")
+        && b[4].is_ascii_lowercase()
+        && b[5] == b'_'
 }
