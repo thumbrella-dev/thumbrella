@@ -356,7 +356,7 @@ pub fn collect(cfg: &crate::config::AppConfig) -> DiagReport {
     // Handshake validation — flag values that look like auth tokens.
     let handshake_validation = match cfg.handshake.as_deref() {
         None => Validation::not_configured(),
-        Some(hs) if crate::config::looks_like_auth_token(hs) => {
+        Some(hs) if crate::connect::looks_like_auth_token(hs) => {
             Validation::error(
                 "looks like an auth token (starts with 'tbr_'); \
                  set a simple shared secret instead",

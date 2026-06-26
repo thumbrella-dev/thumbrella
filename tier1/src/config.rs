@@ -205,16 +205,3 @@ fn env_scratch(name: &str) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(default_scratch_dir)
 }
-
-/// Check if a value looks like a Thumbrella auth token.
-///
-/// Auth tokens follow the pattern `tbr_[a-z]_` + base64url body (e.g.
-/// `tbr_s_...` for secret, `tbr_p_...` for publishable).  If a handshake
-/// value matches this prefix, it was almost certainly set by mistake.
-pub(crate) fn looks_like_auth_token(value: &str) -> bool {
-    let b = value.as_bytes();
-    b.len() >= 6
-        && b.starts_with(b"tbr_")
-        && b[4].is_ascii_lowercase()
-        && b[5] == b'_'
-}

@@ -108,7 +108,14 @@ fn log_result(result: &crate::ThumbResult, duration_ms: u64) {
 
 // ── GET /health ───────────────────────────────────────────────────────────────
 
-/// Liveness probe.  Always returns `{"status":"ok"}`.
+/// Liveness probe.  Returns server metadata:
+///
+/// ```json
+/// {"status":"ok","thumbrella":0}
+/// ```
+///
+/// The `thumbrella` field is the major version only — no minor or patch,
+/// for safety against version-based targeting.
 ///
 /// Logging is rate-limited: after 20 health checks, further requests are
 /// suppressed and a one-time hint is printed.
@@ -132,7 +139,8 @@ pub async fn health(
         let _ = std::io::Write::write_all(&mut std::io::stdout(), line.as_bytes());
     }
 
-    Json(json!({ "status": "ok" }))
+    let major: u32 = env!("CARGO_PKG_VERSION_MAJOR").parse().unwrap_or(0);
+    Json(json!({ "status": "ok", "thumbrella": major }))
 }
 
 // ── Fallback — 404 for unknown routes ─────────────────────────────────────────

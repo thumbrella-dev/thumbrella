@@ -124,7 +124,7 @@ where
 
         // Fail fast on handshake values that look like auth tokens.
         if let Some(ref hs) = cfg.handshake {
-            if crate::config::looks_like_auth_token(hs) {
+            if crate::connect::looks_like_auth_token(hs) {
                 ux.fatal(
                     "TBR_HANDSHAKE looks like an auth token — this is almost certainly a mistake",
                     "Auth tokens start with 'tbr_' and belong in the connect string or \

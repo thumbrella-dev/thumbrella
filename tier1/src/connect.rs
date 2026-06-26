@@ -56,7 +56,7 @@ pub fn parse_connect_target(raw: Option<String>) -> ConnectTarget {
     // Bare value (no scheme) — either an auth token or a handshake.
     if !raw.contains("://") {
         let mut headers = HashMap::new();
-        if crate::config::looks_like_auth_token(&raw) {
+        if looks_like_auth_token(&raw) {
             headers.insert("Authorization".to_string(), format!("Bearer {raw}"));
         } else {
             headers.insert("x-tbr-handshake".to_string(), raw.to_string());
@@ -92,7 +92,7 @@ pub fn parse_connect_target(raw: Option<String>) -> ConnectTarget {
         }
         if let Some((k, v)) = s.split_once('=') {
             headers.insert(k.trim().to_string(), v.trim().to_string());
-        } else if crate::config::looks_like_auth_token(s) {
+        } else if looks_like_auth_token(s) {
             headers.insert("Authorization".to_string(), format!("Bearer {s}"));
         } else {
             headers.insert("x-tbr-handshake".to_string(), s.to_string());
@@ -106,4 +106,17 @@ pub fn parse_connect_target(raw: Option<String>) -> ConnectTarget {
     };
 
     ConnectTarget { url, headers }
+}
+
+/// Check if a value looks like a Thumbrella auth token.
+///
+/// Auth tokens follow the pattern `tbr_[a-z]_` + base64url body (e.g.
+/// `tbr_s_...` for secret, `tbr_p_...` for publishable).  If a handshake
+/// value matches this prefix, it was almost certainly set by mistake.
+pub(crate) fn looks_like_auth_token(value: &str) -> bool {
+    let b = value.as_bytes();
+    b.len() >= 6
+        && b.starts_with(b"tbr_")
+        && b[4].is_ascii_lowercase()
+        && b[5] == b'_'
 }

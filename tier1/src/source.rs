@@ -8,7 +8,7 @@
 //! need to persist after the connection closes (`final_url`, the upstream etag)
 //! are stored in `ThumbTrace`.
 
-use std::time::SystemTime;
+use web_time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
