@@ -716,7 +716,6 @@ impl<S: HttpStream> ThumbCook<S> {
     /// structurally impossible to send a handoff while the connection is
     /// still open — the caller cannot obtain a `ThumbHandoff` without
     /// first relinquishing the live stream.
-    #[cfg(feature = "native")]
     pub async fn take_handoff(&mut self) -> crate::handoff::ThumbHandoff
     where
         S: Send + 'static,
@@ -1065,16 +1064,13 @@ impl<S: HttpStream> ThumbCook<S> {
                 return self.finish(after);
             }
             // Renderer returned false (format not recognised).
-            // It must not have called take_reader() in this case.
-            self.status = CookStatus::Complete;
+            // Contract: the renderer did not call take_reader(), so the
+            // connection is still open.  Fall through to out-of-process
+            // handoff — a higher tier may still be able to handle this.
             self.placeholder_source = Some(ResultSource::Fallback);
-            self.out_message = "format not handled by the registered renderer".to_string();
-            self.out_duration = t0.elapsed().as_secs_f64();
-            return self.finish(after);
         }
 
         // No in-process renderer — try out-of-process handoff when a target is configured.
-        #[cfg(feature = "native")]
         {
             let routed_tier = self
                 .media

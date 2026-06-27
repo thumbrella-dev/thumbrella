@@ -523,8 +523,13 @@ fn as_ndjson_line(value: Value) -> Bytes {
 /// layer; this handler does not perform its own auth check.
 pub async fn handoff(
     State(runtime): State<Arc<Runtime>>,
+    headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
     Json(payload): Json<ThumbHandoff>,
 ) -> axum::response::Response {
+    let t0 = Instant::now();
+    let ip = client_ip(&headers, Some(&connect_info.0));
+    let url = payload.input.url.clone();
 
     // Handoff cooks do not own cache reads/writes or trace emission.
     // The entry tier is the authority for cache + trace in this request chain.
@@ -535,6 +540,20 @@ pub async fn handoff(
 
     let (mut result, trace, mut after) = ThumbCook::<PlatformStream>::from_handoff(payload, handoff_runtime).run().await;
     after.drain_spawn();
+    let duration_ms = t0.elapsed().as_millis() as u64;
+
+    let media = result.media.as_ref();
+    let _ux = ux::get();
+    _ux.log_single_thumb(
+        "POST", "/handoff", &url,
+        if result.status == crate::result::ResultStatus::Success { 200 } else { 500 },
+        duration_ms,
+        media.and_then(|m| Some(kind_str(m.kind))),
+        media.and_then(|m| Some(m.extension.as_str())),
+        result.source.as_ref().map(source_label),
+        result.message.as_deref(),
+        ip.as_deref(),
+    );
 
     // Save bandwidth on tier-to-tier responses: send placeholder token only.
     if result.placeholder.is_some() {

@@ -103,6 +103,7 @@ fn tier2_handles_image(ext: &str) -> bool {
     matches!(ext,
         "jpeg" | "jpg" | "png" | "webp" | "bmp" | "tiff" | "tif"
         | "gif" | "ico" | "psd" | "avif" | "heic" | "heif"
+        | "exr" | "hdr"
         | "dng" | "cr2" | "nef" | "arw" | "orf" | "rw2"
         | "pef" | "srw" | "raf" | "3fr" | "fff" | "iiq" | "raw"
     )
