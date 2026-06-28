@@ -180,6 +180,7 @@ async fn run_server(runtime: Arc<Runtime>) {
         .route("/handoff", post(routes::handoff))
         .route("/batch", post(routes::batch))
         .fallback(routes::not_found)
+        .layer(tower_http::cors::CorsLayer::permissive())
         .layer(axum::middleware::from_fn_with_state(
             runtime.clone(),
             routes::require_handshake,
