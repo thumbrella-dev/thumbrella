@@ -10,8 +10,8 @@ Serve fast, cached thumbnails from over 100 formats: photographs, video,
 documents, even 3D models. Feed it your media libraries and get a thumbnail
 back, every time.
 
-One command runs it locally or in Docker. [Thumbrella Cloud](https://thumbrella.dev/account)
-is efficient enough to keep a real free tier genuinely useful.
+One command runs it locally or in Docker. Our [Thumbrella Cloud](https://thumbrella.dev/account)
+is efficient enough to offer a genuinely useful free tier.
 
 Start with [client packages](https://thumbrella.dev/docs/client/) for the
 languages you already use. [Docs](https://thumbrella.dev/docs/) and
