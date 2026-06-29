@@ -127,6 +127,15 @@ pub struct Ux {
 }
 
 impl Ux {
+    // ── Public colour helpers (for CLI output) ────────────────────────────────
+
+    pub fn green(&self, s: &str) -> String  { Colour::green(s) }
+    pub fn red(&self, s: &str) -> String    { Colour::red(s) }
+    pub fn yellow(&self, s: &str) -> String { Colour::yellow(s) }
+    pub fn cyan(&self, s: &str) -> String   { Colour::cyan(s) }
+    pub fn dim(&self, s: &str) -> String    { Colour::dim(s) }
+    pub fn bold(&self, s: &str) -> String   { Colour::bold(s) }
+
     // ── Startup banner ────────────────────────────────────────────────────────
 
     /// Print the startup block — banner, hints, and connection info.
@@ -161,7 +170,7 @@ impl Ux {
 
         // ── Docs ──────────────────────────────────────────────────────────
         lines.push(format!(
-            "  # docs: https://thumbrella.dev/docs",
+            "  # docs: https://thumbrella.dev/docs/",
         ));
 
         // ── Hints ─────────────────────────────────────────────────────────
@@ -174,7 +183,7 @@ impl Ux {
                     Colour::bold("TBR_CACHE=sqlite:/var/lib/thumbrella/cache.db"),
                 ));
             }
-            if !tier2_configured && !tier3_configured && !crate::diag::has_builtin_renderer() {
+            if !tier2_configured && !tier3_configured && !crate::check::has_builtin_renderer() {
                 lines.push(format!(
                     "  # hint: {} {} {}",
                     "No higher tiers configured - only basic formats will render.",
@@ -232,7 +241,7 @@ impl Ux {
     /// - < 6 chars → all asterisks
     /// - < 12 chars → first 2 + `*` for remaining
     /// - >= 12 chars → first 4 + `*` for remaining
-    fn mask_handshake(value: &str) -> String {
+    pub fn mask_handshake(value: &str) -> String {
         let len = value.len();
         if len == 0 {
             return "***".to_string();
@@ -360,5 +369,15 @@ impl Ux {
             suggestion = suggestion,
         );
         let _ = io::stderr().write_all(msg.as_bytes());
+    }
+
+    /// Print a single-line startup issue (used by `serve` after the banner).
+    pub fn print_startup_issue(&self, msg: &str) {
+        let line = format!(
+            "  {} {}\n",
+            Colour::yellow("warn:"),
+            msg,
+        );
+        let _ = io::stdout().write_all(line.as_bytes());
     }
 }

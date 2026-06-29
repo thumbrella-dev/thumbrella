@@ -6,7 +6,8 @@
 //! ```text
 //! <binary> serve              # start the HTTP server
 //! <binary> thumb <url>...     # thumbnail one or more URLs
-//! <binary> check              # print config and validate services
+//! <binary> check              # validate runtime config and dependencies
+//! <binary> formats            # list all supported formats by kind
 //! <binary> version            # print build version
 //! ```
 
@@ -74,6 +75,19 @@ enum Command {
         json: bool,
     },
 
+    /// List all supported and known formats grouped by media kind.
+    ///
+    /// Shows every format extension the server can process, organised by
+    /// FileKind category (image, video, audio, vector, document, geometry,
+    /// archive, text, binary).  For tier 3 formats, shows which are
+    /// available (subcommand found at startup) and which are disabled
+    /// (subcommand missing).
+    Formats {
+        /// Emit machine-readable JSON instead of the default pretty text.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Print the build version.
     Version,
 }
@@ -119,7 +133,7 @@ where
 
     let cli = Cli::parse();
 
-    let runtime = if !matches!(cli.command, Command::Check { .. }) {
+    let runtime = if !matches!(cli.command, Command::Check { .. } | Command::Formats { .. }) {
         let cfg = crate::config::AppConfig::from_env();
 
         // Fail fast on handshake values that look like auth tokens.
@@ -143,7 +157,8 @@ where
     match cli.command {
         Command::Serve                                   => run_server(runtime.unwrap()).await,
         Command::Thumb { urls, cache, json, raw } => run_thumb(urls, cache, json, raw, runtime.unwrap()).await,
-        Command::Check { json }                          => run_check(json),
+        Command::Check { json }                          => run_check(json, tier),
+        Command::Formats { json }                        => run_formats(json),
         Command::Version                                 => run_version(tier),
     }
 }
@@ -157,20 +172,6 @@ async fn run_server(runtime: Arc<Runtime>) {
 
     let cfg = AppConfig::from_env();
     let ux = crate::ux::get();
-
-    // Startup block — banner, hints, and connection info.
-    ux.print_startup(
-        cfg.port,
-        crate::TBR_VERSION,
-        cfg.handshake.as_deref(),
-        cfg.cache_url.is_some(),
-        cfg.tier2.url.is_some(),
-        cfg.tier3.url.is_some(),
-    );
-
-    if ux.style.show_raw_logs() {
-        tracing::info!(version = crate::TBR_VERSION, "thumbrella starting");
-    }
 
     let app = Router::new()
         .route("/health", get(routes::health))
@@ -201,6 +202,62 @@ async fn run_server(runtime: Arc<Runtime>) {
             );
         }
     };
+
+    // Report the actual port (port 0 means the OS assigned an ephemeral port).
+    let actual_port = listener.local_addr().map(|a| a.port()).unwrap_or(cfg.port);
+
+    // Startup block — banner, hints, and connection info.
+    ux.print_startup(
+        actual_port,
+        crate::TBR_VERSION,
+        cfg.handshake.as_deref(),
+        cfg.cache_url.is_some(),
+        cfg.tier2.url.is_some(),
+        cfg.tier3.url.is_some(),
+    );
+
+    // Run a lightweight diagnostic check and print a one-liner for each issue.
+    {
+        let report = crate::check::collect(&cfg);
+        let mut issues: Vec<String> = Vec::new();
+
+        if !report.port_available {
+            issues.push(format!("port {} is already in use", cfg.port));
+        }
+        if matches!(report.tier2, crate::check::TierStatus::Error) {
+            issues.push("tier 2 handoff target is unreachable".into());
+        }
+        if matches!(report.tier3, crate::check::TierStatus::Error) {
+            issues.push("tier 3 handoff target is unreachable".into());
+        }
+        if matches!(report.tier2_validation.status, crate::check::ValidationStatus::Error) {
+            issues.push("tier 2 validation failed".into());
+        }
+        if matches!(report.tier3_validation.status, crate::check::ValidationStatus::Error) {
+            issues.push("tier 3 validation failed".into());
+        }
+        if matches!(report.cache_validation.status, crate::check::ValidationStatus::Error) {
+            issues.push("cache backend is unreachable or misconfigured".into());
+        }
+        if matches!(report.trace_validation.status, crate::check::ValidationStatus::Error) {
+            issues.push("trace log sink is misconfigured".into());
+        }
+        if matches!(report.handshake_validation.status, crate::check::ValidationStatus::Error) {
+            issues.push("handshake value looks like an auth token".into());
+        }
+        if let Some(ref fc) = report.cache_file_check {
+            if !fc.writable {
+                issues.push(format!("cache file path is not writable: {}", fc.path));
+            }
+        }
+
+        for issue in &issues {
+            ux.print_startup_issue(issue);
+        }
+        if !issues.is_empty() {
+            let _ = std::io::Write::write_all(&mut std::io::stdout(), b"\n");
+        }
+    }
 
     if ux.style.show_raw_logs() {
         tracing::info!(%addr, "listening");
@@ -391,11 +448,12 @@ pub fn print_thumb_items(results: &[crate::ThumbResult]) {
 
 // ── check ─────────────────────────────────────────────────────────────────────
 
-fn run_check(json: bool) {
-    use crate::{config::AppConfig, diag};
+fn run_check(json: bool, tier: u8) {
+    use crate::{config::AppConfig, check};
 
     let cfg = AppConfig::from_env();
-    let report = diag::collect(&cfg);
+    let mut report = check::collect(&cfg);
+    report.build_tier = Some(tier);
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report).unwrap());
@@ -406,6 +464,159 @@ fn run_check(json: bool) {
     if !report.healthy {
         std::process::exit(1);
     }
+}
+
+// ── formats ───────────────────────────────────────────────────────────────────
+
+/// Run the `formats` CLI command: print every known format grouped by media kind.
+fn run_formats(json: bool) {
+    use crate::config::AppConfig;
+    use crate::dispatch::format_manifest;
+    use crate::media::FileKind;
+    use std::collections::BTreeMap;
+
+    let cfg = AppConfig::from_env();
+    let manifest = format_manifest();
+    let ux = crate::ux::get();
+
+    // Determine tier availability for the availability column.
+    let tier2_available = cfg.tier2.url.is_some()
+        || crate::check::TIER2_BUILTIN.load(std::sync::atomic::Ordering::Acquire);
+    let tier3_available = cfg.tier3.url.is_some()
+        || crate::check::TIER3_BUILTIN.load(std::sync::atomic::Ordering::Acquire);
+
+    // Group entries by FileKind, picking the lowest tier for each extension
+    // (some extensions appear under multiple tiers).
+    let mut by_kind: BTreeMap<FileKind, BTreeMap<&str, &crate::dispatch::FormatEntry>> = BTreeMap::new();
+    for entry in manifest {
+        let exts = by_kind.entry(entry.kind).or_default();
+        // Keep the lowest-tier entry for each extension.
+        exts.entry(entry.extension)
+            .and_modify(|existing| {
+                if entry.tier < existing.tier {
+                    *existing = entry;
+                }
+            })
+            .or_insert(entry);
+    }
+
+    if json {
+        #[derive(serde::Serialize)]
+        struct FormatsOutput {
+            tier2_available: bool,
+            tier3_available: bool,
+            groups: Vec<KindGroup>,
+        }
+        #[derive(serde::Serialize)]
+        struct KindGroup {
+            kind: String,
+            extensions: Vec<ExtEntry>,
+        }
+        #[derive(serde::Serialize)]
+        struct ExtEntry {
+            extension: String,
+            label: String,
+            tier: u8,
+            renderer: String,
+            shortcut: bool,
+            available: bool,
+        }
+
+        let groups: Vec<KindGroup> = by_kind.iter().map(|(kind, exts)| {
+            let mut entries: Vec<ExtEntry> = exts.values().map(|e| {
+                let available = match e.tier {
+                    1 => true,
+                    2 => tier2_available,
+                    3 => tier3_available,
+                    _ => false,
+                };
+                ExtEntry {
+                    extension: e.extension.to_string(),
+                    label: e.label.to_string(),
+                    tier: e.tier,
+                    renderer: e.renderer.to_string(),
+                    shortcut: e.shortcut,
+                    available,
+                }
+            }).collect();
+            entries.sort_by(|a, b| a.extension.cmp(&b.extension));
+            KindGroup { kind: format!("{:?}", kind).to_lowercase(), extensions: entries }
+        }).collect();
+
+        println!("{}", serde_json::to_string_pretty(&FormatsOutput {
+            tier2_available,
+            tier3_available,
+            groups,
+        }).unwrap());
+        return;
+    }
+
+    // Pretty-print.
+    // Kind ordering: Image, Video, Audio, Vector, Document, Geometry,
+    //                Archive, Text, Binary, Unknown
+    let kind_order: &[FileKind] = &[
+        FileKind::Image, FileKind::Video, FileKind::Audio,
+        FileKind::Vector, FileKind::Document, FileKind::Geometry,
+        FileKind::Archive, FileKind::Text, FileKind::Binary, FileKind::Unknown,
+    ];
+
+    println!("Thumbrella — Supported Formats\n");
+
+    let mut total_defined: usize = 0;
+    let mut total_enabled: usize = 0;
+
+    for &kind in kind_order {
+        let Some(exts) = by_kind.get(&kind) else { continue };
+        let kind_name = format!("{:?}", kind);
+        let count = exts.len();
+        println!("  {} {}",
+            ux.bold(&kind_name),
+            ux.dim(&format!("({count} {})", if count == 1 { "format" } else { "formats" })),
+        );
+
+        let mut sorted: Vec<_> = exts.values().collect();
+        sorted.sort_by_key(|e| e.extension);
+
+        for e in &sorted {
+            let tier_str = format!("tier {}", e.tier);
+            let (tier_col, enabled) = match e.tier {
+                1 => (ux.green(&tier_str), true),
+                2 if tier2_available => (ux.green(&tier_str), true),
+                2 => (ux.yellow(&format!("{tier_str} (unavailable)")), false),
+                3 if tier3_available && crate::dispatch::tier3_can_handle(e.extension) => (ux.green(&tier_str), true),
+                3 => (ux.yellow(&format!("{tier_str} (unavailable)")), false),
+                _ => (tier_str.to_string(), false),
+            };
+            if enabled { total_enabled += 1; }
+            total_defined += 1;
+            let shortcut_mark = if e.shortcut { ux.dim(" [shortcut]") } else { String::new() };
+            println!("    {:<8}  {:<24}  {}{}",
+                e.extension,
+                e.label,
+                tier_col,
+                shortcut_mark,
+            );
+        }
+        println!();
+    }
+
+    // Summary
+    println!("  {}  {} defined, {} enabled",
+        ux.bold("Summary:"),
+        total_defined,
+        ux.green(&total_enabled.to_string()),
+    );
+    println!();
+
+    // Legend
+    println!("  Legend:");
+    println!("    {}  tier available and configured", ux.green("tier N"));
+    println!("    {}  tier not configured (format will use placeholder)", ux.yellow("tier N (unavailable)"));
+    println!("    {}  shortcut: tier 1 can extract embedded thumbnail without full decode", ux.dim("[shortcut]"));
+    println!();
+    println!("  Tier 1 formats are always available.");
+    if !tier2_available { println!("  Tier 2 is NOT configured — set TBR_TIER2 to enable."); }
+    if !tier3_available { println!("  Tier 3 is NOT configured — set TBR_TIER3 to enable."); }
 }
 
 // ── version ───────────────────────────────────────────────────────────────────

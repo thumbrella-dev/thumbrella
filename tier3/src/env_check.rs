@@ -12,7 +12,7 @@
 //! handler specifies its name, the command path, and which file extensions
 //! it handles.  The probe walks all registered handlers and checks whether
 //! the command exists and is executable.  Results are cached in the
-//! [`EnvReport`] and consumed by the renderer dispatch and `tier3 diag`.
+//! [`EnvReport`] and consumed by the renderer dispatch and `tier3 check`.
 //!
 //! # Design
 //!
@@ -40,7 +40,7 @@ use std::sync::RwLock;
 pub struct HandlerDecl {
     /// Unique name (e.g. `"3drender"`, `"usdrender"`).
     pub name: &'static str,
-    /// Broad category for diag grouping (e.g. `"geometry"`).
+    /// Broad category for check grouping (e.g. `"geometry"`).
     pub category: &'static str,
     /// Executable name or absolute path to the command.
     pub command: &'static str,

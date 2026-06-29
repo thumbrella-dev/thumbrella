@@ -1,6 +1,6 @@
 //! Server diagnostics — configuration report and service validation.
 //!
-//! [`DiagReport`] is a structured snapshot of the server's configuration and
+//! [`CheckReport`] is a structured snapshot of the server's configuration and
 //! the reachability / health of every external dependency (cache backends,
 //! handoff tiers, account service).  It is intended for operator use only.
 //!
@@ -50,7 +50,7 @@ pub enum TierStatus {
     /// No renderer is configured; this tier will be skipped.
     Missing,
     /// Configured but validation failed; see the accompanying `*_validation`
-    /// field on [`DiagReport`] for the error message.
+    /// field on [`CheckReport`] for the error message.
     Error,
 }
 
@@ -125,23 +125,23 @@ pub struct FileCheck {
     pub sqlite_validation: Option<Validation>,
 }
 
-// ── DiagReport ────────────────────────────────────────────────────────────────
+// ── CheckReport ────────────────────────────────────────────────────────────────
 
 /// A diagnostic section contributed by a higher tier.
 ///
-/// Each tier can register sections at startup.  The `diag` command collects
+/// Each tier can register sections at startup.  The `check` command collects
 /// and prints all sections after the main tier1 report.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DiagSection {
+pub struct CheckSection {
     /// Section heading (e.g. `"Tier 2 — Supported Formats"`).
     pub heading: String,
     /// One entry per line item.
-    pub entries: Vec<DiagEntry>,
+    pub entries: Vec<CheckEntry>,
 }
 
 /// A single line item in a diagnostic section.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DiagEntry {
+pub struct CheckEntry {
     /// Format / extension / name (e.g. `"glb"`, `"video/mp4"`).
     pub label: String,
     /// Short status string (e.g. `"available"`, `"missing"`, `"builtin"`).
@@ -152,25 +152,25 @@ pub struct DiagEntry {
 }
 
 /// Global registry of diagnostic sections contributed by higher tiers.
-static DIAG_SECTIONS: std::sync::RwLock<Vec<DiagSection>> = std::sync::RwLock::new(Vec::new());
+static CHECK_SECTIONS: std::sync::RwLock<Vec<CheckSection>> = std::sync::RwLock::new(Vec::new());
 
 /// Register a diagnostic section.  Called at startup by tier2/tier3 before
 /// `collect()` runs.
-pub fn register_section(section: DiagSection) {
-    DIAG_SECTIONS.write().unwrap().push(section);
+pub fn register_section(section: CheckSection) {
+    CHECK_SECTIONS.write().unwrap().push(section);
 }
 
 /// Snapshot of all registered diagnostic sections.
-pub fn collect_sections() -> Vec<DiagSection> {
-    DIAG_SECTIONS.read().unwrap().clone()
+pub fn collect_sections() -> Vec<CheckSection> {
+    CHECK_SECTIONS.read().unwrap().clone()
 }
 
 /// Full server diagnostic report.
 ///
 /// Collected by [`collect`] from environment variables and `AppConfig`.
-/// Never sent over HTTP; printed by the `tier1 diag` CLI subcommand.
+/// Never sent over HTTP; printed by the `tier1 check` CLI subcommand.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DiagReport {
+pub struct CheckReport {
     // ── Identity ──────────────────────────────────────────────────────────────
     /// How this build is running.
     pub runtime: RuntimeMode,
@@ -248,31 +248,23 @@ pub struct DiagReport {
     // ── Runtime environment ───────────────────────────────────────────────────
     /// Docker image or container runtime name, if the process appears to be
     /// running inside a container.  `None` when no container heuristics match.
-    ///
-    /// Detection order:
-    /// 1. `TBR_CONTAINER_IMAGE` env var (operator-set label)
-    /// 2. `/etc/thumbrella-release` custom image descriptor
-    /// 3. `/.dockerenv` present → Docker
-    /// 4. `/.containerenv` present → Podman
-    /// 5. `/proc/1/cgroup` contains "docker" / "containerd" / "kubepods"
-    /// 6. Generic `"container (unknown image)"` when any indicator fires
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container_image: Option<String>,
 
-    // ── Extension sections (tier2 / tier3 contributions) ──────────────────────
-    /// Diagnostic sections contributed by higher tiers.  Each tier registers
-    /// sections at startup describing its format support and backend status.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub extensions: Vec<DiagSection>,
+    // ── Build info ────────────────────────────────────────────────────────────
+    /// Which tier binary this is (1, 2, or 3).  `None` when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_tier: Option<u8>,
+
 }
 
 // ── Collector ────────────────────────────────────────────────────────────────
 
 /// Whether tier 2 is compiled into this binary (set at startup by tier2/tier3).
-static TIER2_BUILTIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static TIER2_BUILTIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Whether tier 3 is compiled into this binary (set at startup by tier3).
-static TIER3_BUILTIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static TIER3_BUILTIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Signal that tier 2 is built into this binary.  Call at startup from
 /// `tier2` or `tier3` binaries.
@@ -300,7 +292,7 @@ pub fn has_builtin_renderer() -> bool {
 /// servers, connect to cache) are stubbed as `Skipped` until those subsystems
 /// are wired up.
 #[cfg(feature = "native")]
-pub fn collect(cfg: &crate::config::AppConfig) -> DiagReport {
+pub fn collect(cfg: &crate::config::AppConfig) -> CheckReport {
     // Tier 2 — prefer builtin when the renderer is compiled in, otherwise
     // check for a handoff URL, otherwise missing.
     let (tier2, tier2_handoff, tier2_validation) = if TIER2_BUILTIN.load(std::sync::atomic::Ordering::Acquire) {
@@ -378,7 +370,7 @@ pub fn collect(cfg: &crate::config::AppConfig) -> DiagReport {
             .map(|v| v.status != ValidationStatus::Error)
             .unwrap_or(true);
 
-    DiagReport {
+    CheckReport {
         runtime: RuntimeMode::Cli,
         version: env!("CARGO_PKG_VERSION").to_string(),
         build_timestamp,
@@ -403,7 +395,7 @@ pub fn collect(cfg: &crate::config::AppConfig) -> DiagReport {
         cache_file_check,
         healthy,
         container_image,
-        extensions: collect_sections(),
+        build_tier: None,
     }
 }
 
@@ -414,7 +406,7 @@ pub fn collect(cfg: &crate::config::AppConfig) -> DiagReport {
 /// is tested instead — that is where the file will ultimately be created.
 /// Free space is queried via `statvfs(2)` on the deepest existing ancestor.
 ///
-/// Called by backend `diag()` implementations in [`crate::cache`] and
+/// Called by backend `check()` implementations in [`crate::cache`] and
 /// [`crate::tracelog`].
 #[cfg(feature = "native")]
 pub(crate) fn check_file_path(path: &str) -> FileCheck {
@@ -553,154 +545,234 @@ fn detect_container_image() -> Option<String> {
 
 // ── Pretty printer ────────────────────────────────────────────────────────────
 
-impl DiagReport {
+impl CheckReport {
     /// Print a human-readable diagnostic report to stdout.
     pub fn print_pretty(&self) {
-        println!("Thumbrella — Diagnostics");
-        println!("{}", "─".repeat(48));
+        let ux = crate::ux::get();
 
-        println!("  runtime         : {:?}", self.runtime);
-        println!("  version         : {}", self.version);
-        if let Some(ref ts) = self.build_timestamp {
-            println!("  build_timestamp : {ts}");
+        // Title line.  Hide tier when it's 3 (the common case).
+        let mut title = format!("Thumbrella  {}", self.version);
+        if let Some(t) = self.build_tier {
+            if t != 3 {
+                title.push_str(&format!("  (tier {t})"));
+            }
         }
         if let Some(ref ci) = self.container_image {
-            println!("  container_image : {ci}");
+            title.push_str(&format!("  container: {ci}"));
         }
-        println!();
-
-        println!("Server");
-        println!("  port            : {}", self.server_port);
-        let port_ok = if self.port_available { "available" } else { "UNAVAILABLE (already in use or permission denied)" };
-        println!("  port_available  : {port_ok}");
-        println!("  server_id       : {}", self.server_id.as_deref().unwrap_or("—"));
-        println!("  allow_local     : {}", self.allow_local);
-        println!("  trace_url       : {}", self.trace_url.as_deref().unwrap_or("none"));
-        print_validation("  trace_validation", &self.trace_validation);
-        if let Some(ref fc) = self.trace_file_check {
-            print_file_check("trace_file", fc);
+        if let Some(ref ts) = self.build_timestamp {
+            title.push_str(&format!("  built {ts}"));
         }
-        println!("  handshake       : {}", if self.handshake_set { "set" } else { "—" });
-        print_validation("  handshake_check ", &self.handshake_validation);
-        println!();
+        println!("{title}");
 
-        println!("Tiers");
-        print_tier("tier1", &self.tier1, None, &Validation::ok());
-        print_tier("tier2", &self.tier2, self.tier2_handoff.as_deref(), &self.tier2_validation);
-        print_tier("tier3", &self.tier3, self.tier3_handoff.as_deref(), &self.tier3_validation);
-        println!();
+        // TBR_PORT
+        print_env_line("TBR_PORT", &self.server_port.to_string(), &self.port_ok_label());
 
-        println!("Cache");
-        println!("  config          : {}", self.cache_config.as_deref().unwrap_or("—"));
-        print_validation("  validation", &self.cache_validation);
-        if let Some(ref fc) = self.cache_file_check {
-            print_file_check("file", fc);
-            if let Some(ref sv) = fc.sqlite_validation {
-                print_validation("    schema      ", sv);
+        // TBR_HANDSHAKE
+        if self.handshake_set {
+            let raw = std::env::var("TBR_HANDSHAKE").unwrap_or_default();
+            let masked = crate::ux::Ux::mask_handshake(&raw);
+            print_env_line("TBR_HANDSHAKE", &masked, "");
+            if matches!(self.handshake_validation.status, ValidationStatus::Error) {
+                let msg = self.handshake_validation.message.as_deref().unwrap_or("invalid");
+                println!("  {}: {msg}", ux.red("error"));
             }
+        } else {
+            print_env_default("TBR_HANDSHAKE", "none");
         }
+
+        // TBR_ALLOW_LOCAL
+        let local_val = if self.allow_local { "allowed" } else { "denied" };
+        print_env_line("TBR_ALLOW_LOCAL", local_val, "");
+
+        // TBR_TRACE
+        print_dsn_var("TBR_TRACE", &self.trace_url, &self.trace_validation, &self.trace_file_check);
+
+        // TBR_CACHE
+        print_dsn_var("TBR_CACHE", &self.cache_config, &self.cache_validation, &self.cache_file_check);
+
+        // TBR_TIER2
+        print_tier_var("TBR_TIER2", &self.tier2, self.tier2_handoff.as_deref(), &self.tier2_validation);
+
+        // TBR_TIER3
+        print_tier_var("TBR_TIER3", &self.tier3, self.tier3_handoff.as_deref(), &self.tier3_validation);
+
+        // ── Status ────────────────────────────────────────────────────────
         println!();
+        let status = if self.healthy {
+            ux.green("ready")
+        } else {
+            ux.red("error")
+        };
+        println!("status: {status}");
+    }
 
-        // ── Extension sections (tier2 / tier3 contributions) ──────────────────
-        for section in &self.extensions {
-            println!("{}", section.heading);
-            for entry in &section.entries {
-                let detail = entry.detail.as_deref().unwrap_or("");
-                println!("  {:<16} {:<12} {detail}", entry.label, entry.status);
-            }
-            println!();
+    fn port_ok_label(&self) -> String {
+        let ux = crate::ux::get();
+        if self.server_port == 0 {
+            String::new() // OS-picked ephemeral port — can't check
+        } else if self.port_available {
+            ux.green("available")
+        } else {
+            ux.red("in use")
         }
-
-        let status = if self.healthy { "OK ✓" } else { "DEGRADED ✗" };
-        println!("Overall: {status}");
     }
 }
 
-/// Validate an external handoff target URL and local handoff auth config.
+/// Check whether an env var was explicitly set.
+fn env_is_set(name: &str) -> bool {
+    std::env::var(name).is_ok()
+}
+
+/// Print a config line.  Bold name if explicitly set, normal if default.
+/// No leading indent.
+fn print_env_line(name: &str, value: &str, suffix: &str) {
+    let ux = crate::ux::get();
+    let display_name = if env_is_set(name) { ux.bold(name) } else { name.to_string() };
+    let default_note = if env_is_set(name) { String::new() } else { " (default)".to_string() };
+    if suffix.is_empty() {
+        println!("{display_name}: {value}{default_note}");
+    } else {
+        println!("{display_name}: {value}{default_note} ({suffix})");
+    }
+}
+
+/// Print a config line for an env var using its default.  No leading indent.
+fn print_env_default(name: &str, value: &str) {
+    println!("{name}: {value} (default)");
+}
+
+/// Print a DSN-backed env var (TBR_TRACE, TBR_CACHE).
+///
+/// When the value contains commas, each segment is printed on its own line
+/// with an index suffix (e.g. `TBR_CACHE[1]`, `TBR_CACHE[2]`).
+fn print_dsn_var(
+    name: &str,
+    dsn: &Option<String>,
+    validation: &Validation,
+    file_check: &Option<FileCheck>,
+) {
+    let ux = crate::ux::get();
+
+    let Some(raw) = dsn else {
+        println!("{name}: not set");
+        return;
+    };
+
+    let bold_name = if env_is_set(name) { ux.bold(name) } else { name.to_string() };
+
+    // Split on commas for multi-value support.
+    let segments: Vec<&str> = raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+
+    if segments.len() <= 1 {
+        let ok = !matches!(validation.status, ValidationStatus::Error | ValidationStatus::Warn);
+        let label = if ok { ux.green("ok") } else { ux.red("failed") };
+        println!("{bold_name}: {raw} ({label})");
+        if !ok {
+            let msg = validation.message.as_deref().unwrap_or("validation failed");
+            println!("  {}: {msg}", ux.red("error"));
+        }
+    } else {
+        for (i, seg) in segments.iter().enumerate() {
+            let idx = i + 1;
+            println!("{bold_name}[{idx}]: {seg}");
+        }
+    }
+
+    // File-backed backend details.
+    if let Some(fc) = file_check {
+        if !fc.writable {
+            println!("  {} file {}: not writable", ux.red("error"), fc.path);
+        }
+        if let Some(ref sv) = fc.sqlite_validation {
+            if matches!(sv.status, ValidationStatus::Error) {
+                let msg = sv.message.as_deref().unwrap_or("schema check failed");
+                println!("  {}: {msg}", ux.red("error"));
+            }
+        }
+    }
+}
+
+/// Print a tier env var line (TBR_TIER2, TBR_TIER3).
+fn print_tier_var(
+    name: &str,
+    status: &TierStatus,
+    handoff: Option<&str>,
+    validation: &Validation,
+) {
+    let ux = crate::ux::get();
+
+    match status {
+        TierStatus::Builtin => {
+            let display_name = if env_is_set(name) { ux.bold(name) } else { name.to_string() };
+            if env_is_set(name) {
+                println!("{display_name}: (ignored, builtin)");
+            } else {
+                println!("{display_name}: (builtin)");
+            }
+        }
+        TierStatus::Missing => {
+            println!("{name}: not set");
+        }
+        TierStatus::Error => {
+            println!("{name}: {}", ux.red("error"));
+        }
+        TierStatus::Handoff => {
+            let url = handoff.unwrap_or("?");
+            let bold_name = if env_is_set(name) { ux.bold(name) } else { name.to_string() };
+            let ok = !matches!(validation.status, ValidationStatus::Error | ValidationStatus::Warn);
+            let label = if ok { ux.green("ok") } else { ux.red("failed") };
+            println!("{bold_name}: {url} ({label})");
+            if !ok {
+                let msg = validation.message.as_deref().unwrap_or("validation failed");
+                println!("  {}: {msg}", ux.red("error"));
+            }
+        }
+    }
+}
+
+/// Validate an external handoff target URL — connectivity check only.
+///
+/// Auth headers are optional for handoff; the tier may be open or use a
+/// shared secret.  We only check that the URL resolves and the port accepts
+/// a TCP connection.
 #[cfg(feature = "native")]
-fn validate_handoff_target(url: &str, headers: &std::collections::HashMap<String, String>) -> Validation {
+fn validate_handoff_target(url: &str, _headers: &std::collections::HashMap<String, String>) -> Validation {
     use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
     use std::time::Duration;
 
-    if headers.is_empty() {
-        return Validation::warn(
-            "no auth headers configured for handoff target; \
-             add x-tbr-handshake=... or a Bearer token via the connect string",
-        );
-    }
-
     let parsed = match reqwest::Url::parse(url) {
         Ok(u) => u,
-        Err(e) => return Validation::error(format!("invalid handoff URL: {e}")),
+        Err(e) => return Validation::error(format!("invalid URL: {e}")),
     };
+
+    // Reject schemes that reqwest can't actually fetch.
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Validation::error(format!(
+            "unsupported scheme ({}://) — must be http or https",
+            parsed.scheme()
+        ));
+    }
+
     let host = match parsed.host_str() {
         Some(h) => h,
-        None => return Validation::error("handoff URL has no host"),
+        None => return Validation::error("URL has no host"),
     };
     let port = match parsed.port_or_known_default() {
         Some(p) => p,
-        None => return Validation::error("handoff URL has no usable port"),
+        None => return Validation::error("URL has no usable port"),
     };
 
     let addr: SocketAddr = match (host, port).to_socket_addrs() {
         Ok(mut addrs) => match addrs.next() {
             Some(a) => a,
-            None => return Validation::error("handoff host resolved to no addresses"),
+            None => return Validation::error("host resolved to no addresses"),
         },
-        Err(e) => return Validation::error(format!("handoff DNS resolve failed: {e}")),
+        Err(e) => return Validation::error(format!("DNS resolve failed: {e}")),
     };
 
     match TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
         Ok(_) => Validation::ok(),
-        Err(e) => Validation::error(format!("handoff target unreachable ({host}:{port}): {e}")),
+        Err(e) => Validation::error(format!("unreachable ({host}:{port}): {e}")),
     }
-}
-fn print_tier(label: &str, status: &TierStatus, handoff: Option<&str>, validation: &Validation) {
-    let status_str = match status {
-        TierStatus::Builtin  => "builtin",
-        TierStatus::Handoff  => "handoff",
-        TierStatus::Missing  => "missing",
-        TierStatus::Error    => "error",
-    };
-    println!("  {label:<16}: {status_str}");
-    if let Some(url) = handoff {
-        println!("    handoff       : {url}");
-    }
-    print_validation(&format!("    validation  "), validation);
-}
-
-fn print_validation(label: &str, v: &Validation) {
-    let s = match v.status {
-        ValidationStatus::Ok            => "ok",
-        ValidationStatus::NotConfigured => "not configured",
-        ValidationStatus::Warn          => "warn",
-        ValidationStatus::Error         => "error",
-        ValidationStatus::Skipped       => "skipped",
-    };
-    if let Some(ref msg) = v.message {
-        println!("{label}: {s} — {msg}");
-    } else {
-        println!("{label}: {s}");
-    }
-}
-fn print_file_check(label: &str, fc: &FileCheck) {
-    let writable_str = if fc.writable { "yes" } else { "NO (permission denied)" };
-    let note_suffix = fc.note.as_deref()
-        .map(|n| format!("  ({n})"))
-        .unwrap_or_default();
-    println!("  {label:<16}: {}", fc.path);
-    println!("    writable      : {writable_str}{note_suffix}");
-    if let Some(free) = fc.free_bytes {
-        println!("    free          : {}", fmt_diag_bytes(free));
-    }
-}
-
-fn fmt_diag_bytes(b: u64) -> String {
-    const GIB: u64 = 1 << 30;
-    const MIB: u64 = 1 << 20;
-    const KIB: u64 = 1 << 10;
-    if      b >= GIB { format!("{:.1} GiB", b as f64 / GIB as f64) }
-    else if b >= MIB { format!("{:.1} MiB", b as f64 / MIB as f64) }
-    else if b >= KIB { format!("{:.1} KiB", b as f64 / KIB as f64) }
-    else             { format!("{b} B") }
 }

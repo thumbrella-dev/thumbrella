@@ -15,7 +15,7 @@
 //! # Environment check
 //!
 //! Tier 3 probes the host environment at startup and caches the results.
-//! The `tier3 diag` command prints a human-readable capability report.
+//! The `tier3 check` command prints a human-readable capability report.
 //!
 //! # Pipeline integration
 //!

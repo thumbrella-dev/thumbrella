@@ -187,13 +187,13 @@ pub fn open_from_dsn(dsn: &str) -> Result<Vec<Arc<dyn CacheBackend>>, String> {
 ///   (deeper per-file checks live in `file_check`)
 /// - `file_check` is `Some` for file-backed schemes, `None` otherwise
 #[cfg(feature = "native")]
-pub fn validate_dsn(dsn: &str) -> (crate::diag::Validation, Option<crate::diag::FileCheck>) {
+pub fn validate_dsn(dsn: &str) -> (crate::check::Validation, Option<crate::check::FileCheck>) {
     if let Some(path) = dsn.strip_prefix("sqlite:") {
-        return (crate::diag::Validation::skipped(), Some(sqlite::SqliteCacheBackend::diag(path)));
+        return (crate::check::Validation::skipped(), Some(sqlite::SqliteCacheBackend::check(path)));
     }
     let scheme = dsn.split(':').next().unwrap_or(dsn);
     (
-        crate::diag::Validation::error(format!(
+        crate::check::Validation::error(format!(
             "unknown cache DSN scheme '{scheme}' — supported: sqlite:<path>"
         )),
         None,

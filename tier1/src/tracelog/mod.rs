@@ -98,13 +98,13 @@ pub fn open_from_dsn(dsn: &str) -> Result<Vec<Arc<dyn TraceBackend>>, String> {
 /// - `validation` is `Error` for unknown schemes, `Skipped` for known ones
 /// - `file_check` is `Some` for file-backed schemes, `None` otherwise
 #[cfg(feature = "native")]
-pub fn validate_dsn(dsn: &str) -> (crate::diag::Validation, Option<crate::diag::FileCheck>) {
+pub fn validate_dsn(dsn: &str) -> (crate::check::Validation, Option<crate::check::FileCheck>) {
     if let Some(path) = dsn.strip_prefix("ndjson:") {
-        return (crate::diag::Validation::skipped(), Some(ndjson::NdjsonTraceBackend::diag(path)));
+        return (crate::check::Validation::skipped(), Some(ndjson::NdjsonTraceBackend::check(path)));
     }
     let scheme = dsn.split(':').next().unwrap_or(dsn);
     (
-        crate::diag::Validation::error(format!(
+        crate::check::Validation::error(format!(
             "unknown trace DSN scheme '{scheme}' — supported: ndjson:<path>"
         )),
         None,

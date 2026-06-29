@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// This is a product-visible enumeration; keep the variants stable and add new
 /// ones conservatively.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileKind {
     /// Raster still pixel data.

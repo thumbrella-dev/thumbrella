@@ -38,7 +38,6 @@ use crate::handoff::{HANDSHAKE_HEADER, HandoffResponse, ThumbHandoff};
 use crate::media::FileKind;
 use crate::request::CallRequest;
 use crate::result::ResultSource;
-use crate::source::CacheHints;
 use crate::tracelog::TraceStore;
 use crate::ux;
 
@@ -241,7 +240,6 @@ pub async fn placeholder(
 ///
 /// ```text
 /// GET /thumb.jpeg?url=http%3A%2F%2Fexample.com%2Fimage.jpg
-/// If-None-Match: <etag>   # optional — supply the ETag returned by a prior response
 /// ```
 ///
 /// The `.jpeg` suffix on the path is the canonical form — it allows CDNs, social
@@ -249,16 +247,18 @@ pub async fn placeholder(
 /// image from the URL alone without fetching it.  `/thumb` is an alias that maps
 /// to the same handler for callers that prefer extension-free URLs.
 ///
+/// This endpoint does not accept or return cache hints — use `/batch` for
+/// conditional requests.
+///
 /// **CDN note**: if routing through a CDN, ensure the cache key includes the full
 /// query string.  Without this, all `?url=…` values would collapse to one cached
 /// response.
 ///
 /// # Response
 ///
-/// | ResultStatus | Body                | Meaning                            |
+/// | Status | Body                | Meaning                            |
 /// |--------|---------------------|------------------------------------|
 /// | 200    | JPEG bytes          | Thumbnail produced                 |
-/// | 304    | empty               | Source unchanged (etag matched)    |
 /// | 400    | JSON error          | Bad request (missing/bad URL)      |
 /// | 404    | JSON error          | Source not found                   |
 /// | 500    | JSON error          | Pipeline or upstream server error  |
@@ -292,12 +292,7 @@ pub async fn thumb(
         }
     };
 
-    let cache: Option<CacheHints> = headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|v| v.to_str().ok())
-        .map(|etag| CacheHints { etag: Some(etag.to_owned()), ..Default::default() });
-
-    let input = InputSpec { url: url.clone(), cache, allow_local: runtime.allow_local };
+    let input = InputSpec { url: url.clone(), cache: None, allow_local: runtime.allow_local };
     let (result, _trace, mut after) = ThumbCook::<PlatformStream>::from_input(input, runtime).run().await;
     after.drain_spawn();
     let duration_ms = t0.elapsed().as_millis() as u64;
@@ -306,7 +301,7 @@ pub async fn thumb(
     let _ux = ux::get();
     _ux.log_single_thumb(
         method.as_str(), "/thumb.jpeg", &url,
-        if result.source == Some(ResultSource::NotModified) { 304 } else { 200 },
+        200,
         duration_ms,
         media.and_then(|m| Some(kind_str(m.kind))),
         media.and_then(|m| Some(m.extension.as_str())),
@@ -314,10 +309,6 @@ pub async fn thumb(
         result.message.as_deref(),
         ip.as_deref(),
     );
-
-    if result.source == Some(ResultSource::NotModified) {
-        return StatusCode::NOT_MODIFIED.into_response();
-    }
 
     let thumb = result.media.as_ref().map(|m| &m.thumbnail);
     if thumb.map_or(true, |t| t.is_empty()) {

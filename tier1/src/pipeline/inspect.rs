@@ -299,9 +299,19 @@ pub fn canonical_extension(raw: &str) -> String {
         "sxr" | "mxr"   => "exr",
         "rgbe"          => "hdr",
         "rgb" | "rgba" | "int" | "inta" => "sgi",
+        "pgm" | "ppm" | "pfm" => "pbm",
+        "heics"         => "heic",
+        "heif"          => "heic",
         // video / audio
         "mpg" | "mpe"   => "mpeg",
+        "m4v"           => "mp4",
         "mid"           => "midi",
+        "aifc"          => "aiff",
+        // documents
+        "doc"           => "docx",
+        "xls"           => "xlsx",
+        "xlsm"          => "xlsx",
+        "ppt"           => "pptx",
         // vector
         "svg" | "svgz"  => "svg",
         // 3D geometry
@@ -309,6 +319,9 @@ pub fn canonical_extension(raw: &str) -> String {
         "stp" | "stpnc" | "p21" | "210" => "step",
         "igs"           => "iges",
         "ex2" | "e"     => "exo",
+        "usda" | "usdc" => "usd",
+        // camera raw — uncommon aliases
+        "crw"           => "cr2",
         // web
         "htm"           => "html",
         other           => other,
@@ -389,9 +402,9 @@ fn mime_to_kind(mime: &str, ext: &str) -> FileKind {
 fn ext_to_kind(ext: &str) -> FileKind {
     match ext {
         "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff"
-        | "avif" | "heic" | "heif" | "exr" | "hdr"
+        | "avif" | "heic" | "exr" | "hdr"
         | "apng" | "ico" | "xcf" | "jxl" | "psd"
-        | "ppm" | "pgm" | "pbm" | "tga"                    => FileKind::Image,
+        | "pbm" | "tga"                    => FileKind::Image,
         // JPEG 2000
         "jp2"                                               => FileKind::Image,
         // Studio / VFX image formats (via oiiotool).
@@ -403,14 +416,14 @@ fn ext_to_kind(ext: &str) -> FileKind {
         | "raf" | "fff" | "iiq" | "raw"                    => FileKind::Image,
         "svg" | "emf" | "wmf"                              => FileKind::Vector,
         "mp4" | "mov" | "mkv" | "avi" | "webm" | "mpeg"
-        | "ogv" | "flv" | "ts" | "m4v" | "3gp" | "wmv"    => FileKind::Video,
+        | "ogv" | "flv" | "ts" | "3gp" | "wmv" | "m2ts" | "mxf" | "av1"    => FileKind::Video,
         "mp3" | "ogg" | "flac" | "wav" | "m4a"
         | "aac" | "midi" | "opus" | "oga" | "weba"
         | "wma" | "aiff"                                    => FileKind::Audio,
         "pdf" | "docx" | "xlsx" | "pptx" | "odt"
         | "doc" | "xls" | "ppt" | "odp" | "ods"
         | "epub" | "rtf" | "html" | "xhtml"                 => FileKind::Document,
-        "usdz" | "glb" | "gltf" | "obj" | "stl" | "fbx" | "dae" | "dxf"
+        "usdz" | "usd" | "glb" | "gltf" | "obj" | "stl" | "fbx" | "dae" | "dxf"
         | "off" | "3ds" | "gml" | "ply" | "pts" | "vrml"
         | "vtk" | "vtu" | "vtp" | "vti" | "vtr" | "vts" | "vtm"
         | "step" | "iges" | "brep" | "exo"                 => FileKind::Geometry,
@@ -428,7 +441,7 @@ fn mime_to_extension(mime: &str) -> &'static str {
         "image/gif"        => "gif",  "image/webp"       => "webp",
         "image/bmp"        => "bmp",  "image/tiff"       => "tiff",
         "image/avif"       => "avif", "image/heic"       => "heic",
-        "image/heif"       => "heif", "image/svg+xml"    => "svg",
+        "image/heif"       => "heic", "image/svg+xml"    => "svg",
         "image/emf"        => "emf",
         "image/x-xcf"      => "xcf",
         "image/apng"       => "apng", "image/vnd.microsoft.icon" => "ico",
@@ -439,6 +452,7 @@ fn mime_to_extension(mime: &str) -> &'static str {
         "video/ogg"        => "ogv",  "video/x-flv"      => "flv",
         "video/mp2t"       => "ts",   "video/3gpp"      => "3gp",
         "video/x-ms-wmv"   => "wmv",
+        "video/mxf"        => "mxf",  "video/av1"        => "av1",
         "audio/mpeg"       => "mp3",  "audio/ogg"        => "ogg",
         "audio/flac"       => "flac", "audio/wav"        => "wav",
         "audio/mp4"        => "m4a",  "audio/aac"        => "aac",
@@ -476,12 +490,10 @@ fn ext_to_mime(ext: &str) -> &'static str {
         "gif"  => "image/gif",    "webp" => "image/webp",
         "bmp"  => "image/bmp",    "tiff" => "image/tiff",
         "avif" => "image/avif",   "heic" => "image/heic",
-        "heif" => "image/heif",   "exr"  => "image/x-exr",
+        "exr"  => "image/x-exr",
         "hdr"  => "image/vnd.radiance",
         "jxl"  => "image/jxl",    "psd"  => "image/vnd.adobe.photoshop",
         "jp2"  => "image/jp2",
-        "ppm"  => "image/x-portable-pixmap",
-        "pgm"  => "image/x-portable-graymap",
         "pbm"  => "image/x-portable-bitmap",
         "tga"  => "image/x-tga",
         "xcf"  => "image/x-xcf",
@@ -503,8 +515,8 @@ fn ext_to_mime(ext: &str) -> &'static str {
         "mkv"  => "video/x-matroska", "avi" => "video/x-msvideo",
         "webm" => "video/webm",   "mpeg" => "video/mpeg",
         "ogv"  => "video/ogg",    "flv"  => "video/x-flv",
-        "ts"   => "video/mp2t",   "m4v"  => "video/mp4",
-        "3gp"  => "video/3gpp",   "wmv"  => "video/x-ms-wmv",
+        "ts"   => "video/mp2t",   "3gp"  => "video/3gpp",   "wmv"  => "video/x-ms-wmv",
+        "m2ts" => "video/mp2t",  "mxf"  => "video/mxf",      "av1"  => "video/av1",
         "mp3"  => "audio/mpeg",   "ogg"  => "audio/ogg",
         "flac" => "audio/flac",   "wav"  => "audio/wav",
         "m4a"  => "audio/mp4",    "aac"  => "audio/aac",
@@ -532,7 +544,7 @@ fn ext_to_mime(ext: &str) -> &'static str {
         "xml"  => "text/xml",
         "json" => "application/json", "txt" => "text/plain",
         "csv"  => "text/csv",     "md"   => "text/markdown",
-        "usdz" => "model/vnd.usdz+zip", "glb" => "model/gltf-binary",
+        "usdz" => "model/vnd.usdz+zip", "usd" => "model/vnd.usdz+zip", "glb" => "model/gltf-binary",
         "gltf" => "model/gltf+json",    "obj" => "model/obj",
         "fbx"  => "application/vnd.fbx", "dae" => "model/vnd.collada+xml",
         "stl"  => "model/stl",    "vrml"  => "model/vrml",

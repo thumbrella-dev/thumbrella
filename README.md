@@ -1,22 +1,21 @@
-# Thumbrella
+# [Thumbrella](https://thumbrella.dev)
 
 <img src="thumbrella.png" alt="Thumbrella Logo" width="224" height="224" align="right" />
 
 Fast thumbnail server for online media.
 
-https://thumbrella.dev
+[Thumbrella](https://thumbrella.dev) is the open source server for online thumbnails.
 
-Thumbrella is the open source thumbnail server. Get fast, cached thumbnails from
-large files and obscure media formats . Many client libraries integrate your
-stack with streaming and batching out of the box. Self-host or use a public
-service for free. 
+Serve fast, cached thumbnails from over 100 formats: photographs, video,
+documents, even 3D models. Feed it your media libraries and get a thumbnail
+back, every time.
 
-This project represents the Thumbrella server. See the 
-[clients package]() for
-a set of simple libraries for various languages and environments.
+One command runs it locally or in Docker. [Thumbrella Cloud](https://thumbrella.dev/account)
+is efficient enough to keep a real free tier genuinely useful.
 
-Thumbrella is focused on a clean and simple developer experience. Get started
-immediately and grow into features as needed.
+Start with [client packages](https://thumbrella.dev/docs/client/) for the
+languages you already use. [Docs](https://thumbrella.dev/docs/) and
+examples get you streaming thumbnails immediately.
 
 ## Quickstart
 
@@ -79,11 +78,11 @@ crates with reduced functionality.
 
 ## Service
 
-The online Docker service makes a fully featured Thumbrella server available for
+Thumbrella Cloud makes a fully featured Thumbrella server available for
 developers to use for free. Register for a free account at
-[thumbrella.dev](http://thumbrella.dev/account) with no payment info or
+[thumbrella.dev](https://thumbrella.dev/account) with no payment info or
 subscriptions.
 
-Even self hosted users can fallback on the online service to add support for
+Even self-hosted users can fall back on Thumbrella Cloud to add support for
 complicated file formats and a globally distributed cache for your
 application's users.

@@ -46,8 +46,8 @@ impl NdjsonTraceBackend {
     ///
     /// Checks write access and free disk space without opening or creating
     /// the file.  Safe to call at any time.
-    pub fn diag(path: &str) -> crate::diag::FileCheck {
-        crate::diag::check_file_path(path)
+    pub fn check(path: &str) -> crate::check::FileCheck {
+        crate::check::check_file_path(path)
     }
 }
 

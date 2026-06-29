@@ -1070,118 +1070,132 @@ impl<S: HttpStream> ThumbCook<S> {
             self.placeholder_source = Some(ResultSource::Fallback);
         }
 
-        // No in-process renderer — try out-of-process handoff when a target is configured.
+        // ── handoff fallback chain ────────────────────────────────────────────
+        // Build the handoff payload once (closes the HTTP connection), then
+        // try tiers in ascending order: start with the routing recommendation
+        // and escalate upward on failure.  Tier 2 never falls back on its own;
+        // tier 1 drives the entire chain.
         {
-            let routed_tier = self
-                .media
-                .kind
-                .map(|kind| crate::dispatch::route(kind, self.media.extension.as_deref()).tier)
+            let payload = self.take_handoff().await;
+            let local_bytes = self.http_bytes_fetched();
+            let ext = self.media.extension.clone().unwrap_or_default();
+            let kind = self.media.kind;
+
+            let routed_tier = kind
+                .map(|k| crate::dispatch::route(k, Some(&ext)).tier)
                 .unwrap_or(2);
-            // If tier 1 couldn't produce a render locally (no shortcut/render_image)
-            // and tier 2 is available, escalate unresolved image inputs to tier 2.
-            // This avoids returning `unavailable` for large/progressive JPEGs.
-            let target_tier = if routed_tier == 1
-                && self.media.kind == Some(FileKind::Image)
+
+            // Escalate tier-1 images to tier 2 when tier 2 is available.
+            let start_tier = if routed_tier == 1
+                && kind == Some(FileKind::Image)
                 && self.runtime.handoff_tier2.url.is_some()
             {
                 2
             } else {
                 routed_tier
             };
-            let target = match target_tier {
-                2 => self.runtime.handoff_tier2.clone(),
-                3 => self.runtime.handoff_tier3.clone(),
-                _ => {
-                    self.http_close().await;
-                    self.status = CookStatus::Complete;
-                    self.placeholder_source = Some(ResultSource::Placeholder);
-                    self.out_message = "no higher-tier renderer is configured".to_string();
-                    self.out_duration = t0.elapsed().as_secs_f64();
-                    return self.finish(after);
-                }
-            };
 
-            if let Some(url) = target.url.as_deref() {
+            // Build the ordered list of tiers to try.
+            let mut tried_any = false;
+            let mut first_attempt = true;
+            for attempt_tier in start_tier..=3 {
+                if attempt_tier == 1 {
+                    continue; // tier 1 already tried locally
+                }
+
+                // Tier 3 gate: check the dynamic availability registry.
+                // External tier 3 servers are assumed full-capability.
+                if attempt_tier == 3 && !crate::dispatch::tier3_can_handle(&ext) {
+                    continue;
+                }
+
+                let target = match attempt_tier {
+                    2 => self.runtime.handoff_tier2.clone(),
+                    3 => self.runtime.handoff_tier3.clone(),
+                    _ => continue,
+                };
+                let Some(url) = target.url.as_deref() else {
+                    continue;
+                };
+                tried_any = true;
+
                 // Emit intermediate progress before the async handoff gap.
                 if !self.ctx_handoff {
-                    if let Some(progress) = on_progress.as_mut() {
+                    if let Some(ref mut progress) = on_progress {
                         progress(self.to_progress_result(t0.elapsed().as_secs_f64()));
                     }
                 }
 
-                // ── Single-flight deduplication ───────────────────────────────────
-                // Use the content-addressed cache_key as the dedup key so all
-                // concurrent requests for the same content version share one
-                // outbound handoff, regardless of URL variations (redirects, CDN).
-                let hkey = self.src.cache_key.clone()
-                    .or_else(|| self.src.canonical_url.clone())
-                    .unwrap_or_else(|| self.input.url.clone());
-                let local_bytes = self.http_bytes_fetched();
-
-                match self.runtime.handoff_inflight.try_lead(&hkey) {
-                    Some(rx) => {
-                        // ── Joiner ────────────────────────────────────────────────
-                        // A handoff for this key is already in flight.
-                        // Release our HTTP connection and suspend until the leader
-                        // resolves (cooperative yield — other tasks run while we wait).
-                        self.http_close().await;
-                        match rx.await {
-                            Ok(shared) => match &*shared {
-                                Ok(remote) => {
-                                    self.apply_handoff_response(remote, target_tier, local_bytes);
-                                }
-                                Err(e) => {
-                                    self.status = CookStatus::Failed;
-                                    self.out_message =
-                                        format!("handoff to tier {target_tier} failed: {e}");
-                                }
-                            },
-                            Err(_) => {
-                                // Leader was dropped without completing (cancelled).
-                                self.status = CookStatus::Failed;
-                                self.out_message = format!(
-                                    "handoff to tier {target_tier} was cancelled before completing"
-                                );
+                let outcome: Result<HandoffResponse, String> = if first_attempt {
+                    first_attempt = false;
+                    // ── Single-flight dedup (first attempt only) ─────────────
+                    let hkey = self.src.cache_key.clone()
+                        .or_else(|| self.src.canonical_url.clone())
+                        .unwrap_or_else(|| self.input.url.clone());
+                    match self.runtime.handoff_inflight.try_lead(&hkey) {
+                        Some(rx) => {
+                            // Joiner: an in-flight handoff exists for this key.
+                            match rx.await {
+                                Ok(shared) => match &*shared {
+                                    Ok(remote) => Ok(remote.clone()),
+                                    Err(e) => Err(e.clone()),
+                                },
+                                Err(_) => Err("handoff was cancelled before completing".into()),
+                            }
+                        }
+                        None => {
+                            // Leader: perform the handoff, wake joiners.
+                            let result = crate::handoff::post_handoff(
+                                url, &target.headers, &payload,
+                            ).await;
+                            let shared = Arc::new(result);
+                            self.runtime.handoff_inflight
+                                .complete(&hkey, Arc::clone(&shared));
+                            match &*shared {
+                                Ok(remote) => Ok(remote.clone()),
+                                Err(e) => Err(e.clone()),
                             }
                         }
                     }
-                    None => {
-                        // ── Leader ────────────────────────────────────────────────
-                        // No handoff is in flight for this key; perform it and
-                        // wake any joiners that registered while we were awaiting.
-                        // take_handoff() closes the connection and builds the payload
-                        // atomically — the live stream is relinquished before the
-                        // JSON is serialised for the outbound HTTP request.
-                        let payload = self.take_handoff().await;
-                        let headers = target.headers.clone();
-                        let shared = Arc::new(
-                            crate::handoff::post_handoff(url, &headers, &payload).await,
-                        );
-                        // Notify joiners before applying to self so they unblock ASAP.
-                        self.runtime.handoff_inflight.complete(&hkey, Arc::clone(&shared));
-                        match &*shared {
-                            Ok(remote) => {
-                                self.apply_handoff_response(remote, target_tier, local_bytes);
-                            }
-                            Err(e) => {
-                                self.status = CookStatus::Failed;
-                                self.out_message =
-                                    format!("handoff to tier {target_tier} failed: {e}");
-                            }
+                } else {
+                    // ── Fallback attempt (no dedup) ──────────────────────────
+                    crate::handoff::post_handoff(url, &target.headers, &payload)
+                        .await
+                };
+
+                match outcome {
+                    Ok(ref remote) if remote.result.status == ResultStatus::Success => {
+                        self.apply_handoff_response(remote, attempt_tier, local_bytes);
+                        if self.status == CookStatus::Complete {
+                            self.out_duration = t0.elapsed().as_secs_f64();
+                            return self.finish(after);
                         }
+                        // Remote tier returned a non-OK status — escalate.
+                        self.out_message.clear();
+                    }
+                    Ok(ref remote) => {
+                        self.out_message = remote.result.message
+                            .clone()
+                            .unwrap_or_else(|| format!("tier {attempt_tier} returned status {:?}", remote.result.status));
+                    }
+                    Err(e) => {
+                        self.out_message = format!("handoff to tier {attempt_tier} failed: {e}");
                     }
                 }
+            }
+
+            if tried_any {
+                self.status = CookStatus::Failed;
                 self.out_duration = t0.elapsed().as_secs_f64();
                 return self.finish(after);
             }
-        }
 
-        self.http_close().await;
-        self.status = CookStatus::Complete;
-        self.placeholder_source = Some(ResultSource::Placeholder);
-        self.out_message = "no higher-tier renderer is configured".to_string();
-        self.out_duration = t0.elapsed().as_secs_f64();
-        self.finish(after)
+            self.status = CookStatus::Complete;
+            self.placeholder_source = Some(ResultSource::Placeholder);
+            self.out_message = "no higher-tier renderer is configured".to_string();
+            self.out_duration = t0.elapsed().as_secs_f64();
+            return self.finish(after);
+        }
     }
 
     fn finish(mut self, mut after: AfterResponse) -> (ThumbResult, ThumbTrace, AfterResponse) {

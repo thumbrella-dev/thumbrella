@@ -82,6 +82,10 @@ pub struct ThumbRoute {
 
 /// Route a (kind, extension) pair to the appropriate processing tier.
 ///
+/// Uses [`format_manifest`] as the single source of truth: searches for the
+/// lowest-tier entry matching `(kind, extension)`, then falls back to
+/// kind-based defaults when the extension is not in the manifest.
+///
 /// Called during the inspect step once the file kind and canonical extension
 /// are known.  Returns a best-effort recommendation — the cook may still
 /// escalate to a higher tier at runtime based on file size, detected codec,
@@ -90,70 +94,33 @@ pub struct ThumbRoute {
 /// When the required tier is not available the cook degrades gracefully:
 /// it uses the `Fallback` strategy and returns a placeholder icon.
 pub fn route(kind: FileKind, extension: Option<&str>) -> ThumbRoute {
-    match (kind, extension) {
-        // ── Tier 1 — pure Rust (image crate) ─────────────────────────────────
-        // ico is decoded as a small-image shortcut; listed explicitly so it
-        // appears in diagnostics and the route recommendation is accurate.
-        (FileKind::Image, Some("png" | "gif" | "webp" | "bmp" | "tiff" | "ico"))
-        | (FileKind::Image, None) =>
-            ThumbRoute { tier: 1 },
-
-        // ── Tier 2 — JPEG and specialty images via libav ──────────────────────
-        // JPEG is listed in both tier 2 and tier 3.  Tier 2 handles standard
-        // Huffman-coded JPEGs; tier 3's ffmpeg CLI fallback handles arithmetic-
-        // coded JPEGs (SOF9) that libav's mjpeg decoder rejects.
-        (FileKind::Image, Some("jpeg" | "jpg")) =>
-            ThumbRoute { tier: 2 },
-
-        // ── Tier 1 — archives and text: placeholder icon, no pixel work ───────
-        (FileKind::Archive | FileKind::Text | FileKind::Binary | FileKind::Unknown, _) =>
-            ThumbRoute { tier: 1 },
-
-        // ── Tier 2 — SVG/vector (resvg CPU cost exceeds Workers budget) ───────
-        (FileKind::Vector, _) =>
-            ThumbRoute { tier: 2 },
-
-        // ── Tier 2 — libav: HDR/specialty images ──────────────────────────────
-        (FileKind::Image, Some("exr" | "hdr" | "avif" | "heic" | "heif" | "jxl"
-            | "ppm" | "pgm" | "pbm" | "tga")) =>
-            ThumbRoute { tier: 2 },
-
-        // ── Tier 2 — camera raw containers (tier1 may still shortcut first) ─
-        // Union of dispatch route() and shortcut.rs raw preview list.
-        (FileKind::Image, Some(
-            "dng" | "cr2" | "nef" | "arw" | "orf" | "rw2"
-            | "pef" | "srw" | "raf" | "3fr" | "fff" | "iiq" | "raw"
-            | "mef" | "rwl"
-        )) =>
-            ThumbRoute { tier: 2 },
-
-        // ── Tier 2 — libav: video keyframe extraction ─────────────────────────
-        (FileKind::Video, _) =>
-            ThumbRoute { tier: 2 },
-
-        // ── Tier 2 — libav: audio waveform ───────────────────────────────────
-        (FileKind::Audio, _) =>
-            ThumbRoute { tier: 2 },
-
-        // ── Tier 2 — documents (LibreOffice headless or similar) ──────────────
-        (FileKind::Document, _) =>
-            ThumbRoute { tier: 2 },
-
-        // ── Tier 3 — subprocess renderers: 3-D geometry ───────────────────────
-        // Requires a display server (xvfb) and heavy render dependencies.
-        // Specific extensions map to individual subprocess handlers.
-        (FileKind::Geometry, _) =>
-            ThumbRoute { tier: 3 },
-
-        // ── Tier 3 — ffmpeg CLI: formats not in tier2's slim static build ────
-        // JPEG2000 is supported by the system ffmpeg in the tier3 Docker image
-        // (--enable-libopenjpeg) but not by tier2's minimal static build.
-        (FileKind::Image, Some("jp2" | "j2k")) =>
-            ThumbRoute { tier: 3 },
-
-        // Catch-all: tier-1 placeholder.
-        _ => ThumbRoute { tier: 1 },
+    // Primary lookup: search the manifest for the lowest-tier match.
+    // Some formats appear under multiple tiers (e.g. JPEG is tier 2 for
+    // standard Huffman, tier 3 for arithmetic-coded fallback).  We always
+    // route to the *lowest* tier that can handle the format.
+    if let Some(ext) = extension {
+        let manifest_tier = format_manifest()
+            .iter()
+            .filter(|e| e.kind == kind && e.extension == ext)
+            .map(|e| e.tier)
+            .min();
+        if let Some(t) = manifest_tier {
+            return ThumbRoute { tier: t };
+        }
     }
+
+    // Fallback: kind-based defaults for extensions not in the manifest.
+    let tier = match kind {
+        // Archives, text, binary, unknown: placeholder icon, no pixel work.
+        FileKind::Archive | FileKind::Text | FileKind::Binary | FileKind::Unknown => 1,
+        // Images: try image crate first (tier 1).
+        FileKind::Image => 1,
+        // Vector, video, audio, documents: require libav / resvg / headless.
+        FileKind::Vector | FileKind::Video | FileKind::Audio | FileKind::Document => 2,
+        // 3-D geometry: subprocess renderers with display server.
+        FileKind::Geometry => 3,
+    };
+    ThumbRoute { tier }
 }
 
 // ── Format manifest ───────────────────────────────────────────────────────────
@@ -162,8 +129,11 @@ pub fn route(kind: FileKind, extension: Option<&str>) -> ThumbRoute {
 ///
 /// This is the authoritative list of every format Thumbrella can process
 /// and the tier responsible for it.  Tier 1 servers use this to know what
-/// formats exist (even if they can't render them).  The diag command uses
-/// it to report tier-level format coverage.
+/// formats exist (even if they can't render them).  The `check` and `formats`
+/// CLI commands use it to report tier-level format coverage.
+///
+/// This table is the single source of truth for both runtime routing
+/// ([`route`]) and diagnostic reporting.
 #[derive(Debug, Clone)]
 pub struct FormatEntry {
     /// Canonical file extension (e.g. `"glb"`, `"exr"`).
@@ -177,150 +147,148 @@ pub struct FormatEntry {
     /// Renderer name for trace attribution (e.g. `"3drender"`, `"libav"`).
     #[allow(dead_code)]
     pub renderer: &'static str,
+    /// Whether tier 1 can extract an embedded thumbnail from this format
+    /// without a full decode (shortcut pipeline).
+    pub shortcut: bool,
 }
 
 /// Static manifest of every format Thumbrella knows about.
 ///
 /// This is a fixed, hardcoded list — Tier 1 servers do not probe the
 /// environment, so they must know the full universe of formats statically.
-/// This list is consumed by the `diag` command to report tier coverage.
+/// This is the single source of truth for both [`route`] and CLI diagnostics.
 pub fn format_manifest() -> &'static [FormatEntry] {
     &[
         // ── Tier 1 — pure Rust (image crate) ─────────────────────────────────
-        FormatEntry { extension: "png",  label: "PNG",              kind: FileKind::Image, tier: 1, renderer: "image_crate" },
-        FormatEntry { extension: "gif",  label: "GIF",              kind: FileKind::Image, tier: 1, renderer: "image_crate" },
-        FormatEntry { extension: "webp", label: "WebP",             kind: FileKind::Image, tier: 1, renderer: "image_crate" },
-        FormatEntry { extension: "bmp",  label: "BMP",              kind: FileKind::Image, tier: 1, renderer: "image_crate" },
-        FormatEntry { extension: "tiff", label: "TIFF",             kind: FileKind::Image, tier: 1, renderer: "image_crate" },
-        FormatEntry { extension: "ico",  label: "ICO",              kind: FileKind::Image, tier: 1, renderer: "image_crate" },
+        FormatEntry { extension: "png",  label: "PNG",              kind: FileKind::Image, tier: 1, renderer: "image_crate", shortcut: true },
+        FormatEntry { extension: "gif",  label: "GIF",              kind: FileKind::Image, tier: 1, renderer: "image_crate", shortcut: true },
+        FormatEntry { extension: "webp", label: "Google",             kind: FileKind::Image, tier: 1, renderer: "image_crate", shortcut: true },
+        FormatEntry { extension: "bmp",  label: "Windows Bitmap",   kind: FileKind::Image, tier: 1, renderer: "image_crate", shortcut: true },
+        FormatEntry { extension: "tiff", label: "Tagged interchange",kind: FileKind::Image, tier: 1, renderer: "image_crate", shortcut: true },
+        FormatEntry { extension: "ico",  label: "Windows Icon",     kind: FileKind::Image, tier: 1, renderer: "image_crate", shortcut: true },
 
         // ── Tier 2 — JPEG (baseline/progressive) via libav ───────────────────
-        FormatEntry { extension: "jpeg", label: "JPEG (standard)",  kind: FileKind::Image, tier: 2, renderer: "libav" },
+        FormatEntry { extension: "jpeg", label: "JPEG",  kind: FileKind::Image, tier: 2, renderer: "libav",        shortcut: true },
 
         // ── Tier 2 — libav / resvg / jxl-oxide ───────────────────────────────
-        FormatEntry { extension: "svg",  label: "SVG",              kind: FileKind::Vector,  tier: 2, renderer: "resvg" },
-        FormatEntry { extension: "jxl",  label: "JPEG XL",         kind: FileKind::Image,   tier: 2, renderer: "jxl_oxide" },
-        FormatEntry { extension: "exr",  label: "OpenEXR",         kind: FileKind::Image,   tier: 2, renderer: "libav" },
-        FormatEntry { extension: "hdr",  label: "HDR / Radiance",  kind: FileKind::Image,   tier: 2, renderer: "libav" },
-        FormatEntry { extension: "avif", label: "AVIF",            kind: FileKind::Image,   tier: 2, renderer: "libav" },
-        FormatEntry { extension: "heic", label: "HEIC",            kind: FileKind::Image,   tier: 2, renderer: "libav" },
-        FormatEntry { extension: "heif", label: "HEIF",            kind: FileKind::Image,   tier: 2, renderer: "libav" },
-        FormatEntry { extension: "dng",  label: "DNG (raw)",       kind: FileKind::Image,   tier: 2, renderer: "raw_preview" },
-        FormatEntry { extension: "cr2",  label: "CR2 (raw)",       kind: FileKind::Image,   tier: 2, renderer: "raw_preview" },
-        FormatEntry { extension: "nef",  label: "NEF (raw)",       kind: FileKind::Image,   tier: 2, renderer: "raw_preview" },
-        FormatEntry { extension: "mef",  label: "Mamiya RAW",      kind: FileKind::Image,   tier: 2, renderer: "raw_preview" },
-        FormatEntry { extension: "rwl",  label: "Leica RAW",       kind: FileKind::Image,   tier: 2, renderer: "raw_preview" },
-        FormatEntry { extension: "psd",  label: "PSD",             kind: FileKind::Image,   tier: 2, renderer: "libav" },
-        FormatEntry { extension: "ppm",  label: "PPM image",       kind: FileKind::Image,   tier: 2, renderer: "libav" },
-        FormatEntry { extension: "pgm",  label: "PGM image",       kind: FileKind::Image,   tier: 2, renderer: "libav" },
-        FormatEntry { extension: "pbm",  label: "PBM image",       kind: FileKind::Image,   tier: 2, renderer: "libav" },
-        FormatEntry { extension: "tga",  label: "Targa",           kind: FileKind::Image,   tier: 2, renderer: "libav" },
+        FormatEntry { extension: "svg",  label: "Scalable Vector", kind: FileKind::Vector,  tier: 2, renderer: "resvg",   shortcut: false },
+        FormatEntry { extension: "jxl",  label: "JPEG XL",         kind: FileKind::Image,   tier: 2, renderer: "jxl_oxide", shortcut: false },
+        FormatEntry { extension: "exr",  label: "OpenEXR",         kind: FileKind::Image,   tier: 2, renderer: "libav",    shortcut: false },
+        FormatEntry { extension: "hdr",  label: "Radiance",  kind: FileKind::Image,   tier: 2, renderer: "libav",    shortcut: false },
+        FormatEntry { extension: "avif", label: "AVIF",            kind: FileKind::Image,   tier: 2, renderer: "libav",    shortcut: false },
+        FormatEntry { extension: "heic", label: "HEIC",            kind: FileKind::Image,   tier: 2, renderer: "libav",    shortcut: false },
+        FormatEntry { extension: "dng",  label: "DNG (raw)",       kind: FileKind::Image,   tier: 2, renderer: "raw_preview", shortcut: true },
+        FormatEntry { extension: "cr2",  label: "Canon (raw)",     kind: FileKind::Image,   tier: 2, renderer: "raw_preview", shortcut: true },
+        FormatEntry { extension: "nef",  label: "Nikon (raw)",     kind: FileKind::Image,   tier: 2, renderer: "raw_preview", shortcut: true },
+        FormatEntry { extension: "arw",  label: "Sony (raw)",      kind: FileKind::Image,   tier: 2, renderer: "raw_preview", shortcut: true },
+        FormatEntry { extension: "orf",  label: "Olympus (raw)",   kind: FileKind::Image,   tier: 2, renderer: "raw_preview", shortcut: true },
+        FormatEntry { extension: "rw2",  label: "Panasonic (raw)", kind: FileKind::Image,   tier: 2, renderer: "raw_preview", shortcut: true },
+        FormatEntry { extension: "pef",  label: "Pentax (raw)",    kind: FileKind::Image,   tier: 2, renderer: "raw_preview", shortcut: true },
+        FormatEntry { extension: "srw",  label: "Samsung (raw)",   kind: FileKind::Image,   tier: 2, renderer: "raw_preview", shortcut: true },
+        FormatEntry { extension: "raf",  label: "Fuji (raw)",      kind: FileKind::Image,   tier: 2, renderer: "raw_preview", shortcut: true },
+        FormatEntry { extension: "3fr",  label: "Hasselblad (raw)", kind: FileKind::Image,  tier: 2, renderer: "raw_preview", shortcut: true },
+        FormatEntry { extension: "fff",  label: "Hasselblad (raw)", kind: FileKind::Image,  tier: 2, renderer: "raw_preview", shortcut: true },
+        FormatEntry { extension: "iiq",  label: "Phase One (raw)", kind: FileKind::Image,   tier: 2, renderer: "raw_preview", shortcut: true },
+        FormatEntry { extension: "mef",  label: "Mamiya (raw)",    kind: FileKind::Image,   tier: 2, renderer: "raw_preview", shortcut: true },
+        FormatEntry { extension: "rwl",  label: "Leica (raw)",     kind: FileKind::Image,   tier: 2, renderer: "raw_preview", shortcut: true },
+        FormatEntry { extension: "raw",  label: "Generic (raw)",     kind: FileKind::Image,   tier: 2, renderer: "raw_preview", shortcut: true },
+        FormatEntry { extension: "psd",  label: "Photoshop",       kind: FileKind::Image,   tier: 2, renderer: "libav",    shortcut: false },
+        FormatEntry { extension: "pbm",  label: "NetPBM",          kind: FileKind::Image,   tier: 2, renderer: "libav",    shortcut: false },
+        FormatEntry { extension: "tga",  label: "Targa",           kind: FileKind::Image,   tier: 2, renderer: "libav",    shortcut: false },
         // ── Tier 2 — video (libav / ffmpeg) ───────────────────────────
-        FormatEntry { extension: "mp4",  label: "MP4 video",       kind: FileKind::Video,   tier: 2, renderer: "libav" },
-        FormatEntry { extension: "mov",  label: "QuickTime",       kind: FileKind::Video,   tier: 2, renderer: "libav" },
-        FormatEntry { extension: "avi",  label: "AVI",             kind: FileKind::Video,   tier: 2, renderer: "libav" },
-        FormatEntry { extension: "webm", label: "WebM",            kind: FileKind::Video,   tier: 2, renderer: "libav" },
-        FormatEntry { extension: "mkv",  label: "Matroska",        kind: FileKind::Video,   tier: 2, renderer: "libav" },
-        FormatEntry { extension: "flv",  label: "Flash Video",     kind: FileKind::Video,   tier: 2, renderer: "libav" },
-        FormatEntry { extension: "ts",   label: "MPEG Transport Stream", kind: FileKind::Video, tier: 2, renderer: "libav" },
-        FormatEntry { extension: "m4v",  label: "MPEG-4 Video",   kind: FileKind::Video,   tier: 2, renderer: "libav" },
-        FormatEntry { extension: "3gp",  label: "3GPP video",     kind: FileKind::Video,   tier: 2, renderer: "libav" },
-        FormatEntry { extension: "ogv",  label: "Ogg video",      kind: FileKind::Video,   tier: 2, renderer: "libav" },
-        FormatEntry { extension: "wmv",  label: "Windows Media Video", kind: FileKind::Video, tier: 2, renderer: "libav" },
-        FormatEntry { extension: "mpeg", label: "MPEG video",     kind: FileKind::Video,   tier: 2, renderer: "libav" },
+        FormatEntry { extension: "mp4",  label: "MPEG-4",       kind: FileKind::Video,   tier: 2, renderer: "libav",    shortcut: false },
+        FormatEntry { extension: "mov",  label: "QuickTime",       kind: FileKind::Video,   tier: 2, renderer: "libav",    shortcut: false },
+        FormatEntry { extension: "avi",  label: "Windows",             kind: FileKind::Video,   tier: 2, renderer: "libav",    shortcut: false },
+        FormatEntry { extension: "webm", label: "Google",            kind: FileKind::Video,   tier: 2, renderer: "libav",    shortcut: false },
+        FormatEntry { extension: "mkv",  label: "Matroska",        kind: FileKind::Video,   tier: 2, renderer: "libav",    shortcut: false },
+        FormatEntry { extension: "flv",  label: "Flash Video",     kind: FileKind::Video,   tier: 2, renderer: "libav",    shortcut: false },
+        FormatEntry { extension: "ts",   label: "MPEG Transport Stream", kind: FileKind::Video, tier: 2, renderer: "libav", shortcut: false },
+        FormatEntry { extension: "3gp",  label: "3GPP",     kind: FileKind::Video,   tier: 2, renderer: "libav",    shortcut: false },
+        FormatEntry { extension: "ogv",  label: "Ogg",      kind: FileKind::Video,   tier: 2, renderer: "libav",    shortcut: false },
+        FormatEntry { extension: "wmv",  label: "Windows Media", kind: FileKind::Video, tier: 2, renderer: "libav", shortcut: false },
+        FormatEntry { extension: "mpeg", label: "MPEG",     kind: FileKind::Video,   tier: 2, renderer: "libav",    shortcut: false },
+        FormatEntry { extension: "m2ts", label: "Blu-ray Transport Stream", kind: FileKind::Video, tier: 2, renderer: "libav", shortcut: false },
+        FormatEntry { extension: "mxf",  label: "Material Exchange Format", kind: FileKind::Video, tier: 2, renderer: "libav", shortcut: false },
+        FormatEntry { extension: "av1",  label: "AV1 bitstream",           kind: FileKind::Video, tier: 2, renderer: "libav", shortcut: false },
         // ── Tier 2 — audio (libav / ffmpeg) ───────────────────────────
-        FormatEntry { extension: "mp3",  label: "MP3 audio",       kind: FileKind::Audio,   tier: 2, renderer: "libav" },
-        FormatEntry { extension: "wav",  label: "WAV audio",       kind: FileKind::Audio,   tier: 2, renderer: "libav" },
-        FormatEntry { extension: "flac", label: "FLAC audio",      kind: FileKind::Audio,   tier: 2, renderer: "libav" },
-        FormatEntry { extension: "ogg",  label: "Ogg audio",       kind: FileKind::Audio,   tier: 2, renderer: "libav" },
-        FormatEntry { extension: "m4a",  label: "MPEG-4 Audio",   kind: FileKind::Audio,   tier: 2, renderer: "libav" },
-        FormatEntry { extension: "aac",  label: "AAC audio",       kind: FileKind::Audio,   tier: 2, renderer: "libav" },
-        FormatEntry { extension: "wma",  label: "Windows Media Audio", kind: FileKind::Audio, tier: 2, renderer: "libav" },
-        FormatEntry { extension: "aiff", label: "AIFF audio",      kind: FileKind::Audio,   tier: 2, renderer: "libav" },
-        FormatEntry { extension: "opus", label: "Opus audio",      kind: FileKind::Audio,   tier: 2, renderer: "libav" },
+        FormatEntry { extension: "mp3",  label: "MPEG",          kind: FileKind::Audio,   tier: 2, renderer: "libav",    shortcut: true },
+        FormatEntry { extension: "wav",  label: "Windows",       kind: FileKind::Audio,   tier: 2, renderer: "libav",    shortcut: false },
+        FormatEntry { extension: "flac", label: "Free Lossless", kind: FileKind::Audio,   tier: 2, renderer: "libav",    shortcut: false },
+        FormatEntry { extension: "ogg",  label: "Vorbis",        kind: FileKind::Audio,   tier: 2, renderer: "libav",    shortcut: false },
+        FormatEntry { extension: "m4a",  label: "MPEG-4",        kind: FileKind::Audio,   tier: 2, renderer: "libav",    shortcut: false },
+        FormatEntry { extension: "aac",  label: "Apple",        kind: FileKind::Audio,   tier: 2, renderer: "libav",    shortcut: false },
+        FormatEntry { extension: "wma",  label: "Windows Media", kind: FileKind::Audio, tier: 2, renderer: "libav", shortcut: false },
+        FormatEntry { extension: "aiff", label: "Interchange",   kind: FileKind::Audio,   tier: 2, renderer: "libav",    shortcut: false },
+        FormatEntry { extension: "opus", label: "Opus",      kind: FileKind::Audio,   tier: 2, renderer: "libav",    shortcut: false },
         // ── Tier 2 — documents (thumbnail extraction from ZIP) ────────
-        FormatEntry { extension: "odt",  label: "ODT document",    kind: FileKind::Document, tier: 2, renderer: "builtin" },
-        FormatEntry { extension: "ods",  label: "ODS spreadsheet", kind: FileKind::Document, tier: 2, renderer: "builtin" },
-        FormatEntry { extension: "odp",  label: "ODP presentation",kind: FileKind::Document, tier: 2, renderer: "builtin" },
-        FormatEntry { extension: "docx", label: "DOCX document",   kind: FileKind::Document, tier: 2, renderer: "builtin" },
-        FormatEntry { extension: "xlsx", label: "XLSX spreadsheet",kind: FileKind::Document, tier: 2, renderer: "builtin" },
-        FormatEntry { extension: "pptx", label: "PPTX presentation",kind: FileKind::Document, tier: 2, renderer: "builtin" },
+        FormatEntry { extension: "odt",  label: "OpenOffice Document",    kind: FileKind::Document, tier: 2, renderer: "builtin", shortcut: true },
+        FormatEntry { extension: "ods",  label: "OpenOffice Spreadsheet", kind: FileKind::Document, tier: 2, renderer: "builtin", shortcut: true },
+        FormatEntry { extension: "odp",  label: "OpenOffice Presentation",kind: FileKind::Document, tier: 2, renderer: "builtin", shortcut: true },
+        FormatEntry { extension: "docx", label: "Office Document",   kind: FileKind::Document, tier: 2, renderer: "builtin", shortcut: true },
+        FormatEntry { extension: "xlsx", label: "Office Spreadsheet",kind: FileKind::Document, tier: 2, renderer: "builtin", shortcut: true },
+        FormatEntry { extension: "pptx", label: "Office presentation",kind: FileKind::Document, tier: 2, renderer: "builtin", shortcut: true },
 
         // ── Tier 3 — ffmpeg CLI: arithmetic JPEG + all image formats ──────────
-        FormatEntry { extension: "jpeg", label: "JPEG (arithmetic)", kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli" },
-        FormatEntry { extension: "png",  label: "PNG (via ffmpeg)",  kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli" },
-        FormatEntry { extension: "webp", label: "WebP (via ffmpeg)", kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli" },
-        FormatEntry { extension: "bmp",  label: "BMP (via ffmpeg)",  kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli" },
-        FormatEntry { extension: "tiff", label: "TIFF (via ffmpeg)", kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli" },
-        FormatEntry { extension: "psd",  label: "PSD (via ffmpeg)",  kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli" },
-        FormatEntry { extension: "gif",  label: "GIF (via ffmpeg)",  kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli" },
-        FormatEntry { extension: "jp2",  label: "JPEG 2000",         kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli" },
-        FormatEntry { extension: "j2k",  label: "JPEG 2000",         kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli" },
-        FormatEntry { extension: "pcx",  label: "PCX",               kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli" },
-        FormatEntry { extension: "qoi",  label: "QOI",               kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli" },
-        FormatEntry { extension: "xbm",  label: "XBM",               kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli" },
-        FormatEntry { extension: "xpm",  label: "XPM",               kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli" },
-        FormatEntry { extension: "xwd",  label: "XWD",               kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli" },
-        FormatEntry { extension: "pam",  label: "PAM",               kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli" },
-        FormatEntry { extension: "svg",  label: "SVG (via ffmpeg)",  kind: FileKind::Vector, tier: 3, renderer: "ffmpeg_cli" },
-        FormatEntry { extension: "avif", label: "AVIF (via ffmpeg)", kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli" },
-        FormatEntry { extension: "heic", label: "HEIC (via ffmpeg)", kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli" },
-        FormatEntry { extension: "heif", label: "HEIF (via ffmpeg)", kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli" },
+        FormatEntry { extension: "jpeg", label: "JPEG (arithmetic)", kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli", shortcut: false },
+        FormatEntry { extension: "png",  label: "PNG (via ffmpeg)",  kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli", shortcut: false },
+        FormatEntry { extension: "webp", label: "WebP (via ffmpeg)", kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli", shortcut: false },
+        FormatEntry { extension: "bmp",  label: "BMP (via ffmpeg)",  kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli", shortcut: false },
+        FormatEntry { extension: "tiff", label: "TIFF (via ffmpeg)", kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli", shortcut: false },
+        FormatEntry { extension: "psd",  label: "PSD (via ffmpeg)",  kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli", shortcut: false },
+        FormatEntry { extension: "gif",  label: "GIF (via ffmpeg)",  kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli", shortcut: false },
+        FormatEntry { extension: "jp2",  label: "JPEG 2000",         kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli", shortcut: false },
+        FormatEntry { extension: "pcx",  label: "PCX",               kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli", shortcut: false },
+        FormatEntry { extension: "qoi",  label: "QOI",               kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli", shortcut: false },
+        FormatEntry { extension: "xbm",  label: "XBM",               kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli", shortcut: false },
+        FormatEntry { extension: "xpm",  label: "XPM",               kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli", shortcut: false },
+        FormatEntry { extension: "xwd",  label: "XWD",               kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli", shortcut: false },
+        FormatEntry { extension: "pam",  label: "PAM",               kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli", shortcut: false },
+        FormatEntry { extension: "svg",  label: "SVG (via ffmpeg)",  kind: FileKind::Vector, tier: 3, renderer: "ffmpeg_cli", shortcut: false },
+        FormatEntry { extension: "avif", label: "AVIF (via ffmpeg)", kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli", shortcut: false },
+        FormatEntry { extension: "heic", label: "HEIC (via ffmpeg)", kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli", shortcut: false },
+        FormatEntry { extension: "heic", label: "HEIC (via ffmpeg)", kind: FileKind::Image, tier: 3, renderer: "ffmpeg_cli", shortcut: false },
 
         // ── Tier 3 — oiiotool: studio image formats ──────────────────────────
-        FormatEntry { extension: "exr",  label: "OpenEXR",           kind: FileKind::Image, tier: 3, renderer: "oiiotool" },
-        FormatEntry { extension: "sxr",  label: "OpenEXR",           kind: FileKind::Image, tier: 3, renderer: "oiiotool" },
-        FormatEntry { extension: "mxr",  label: "OpenEXR",           kind: FileKind::Image, tier: 3, renderer: "oiiotool" },
-        FormatEntry { extension: "hdr",  label: "Radiance HDR",      kind: FileKind::Image, tier: 3, renderer: "oiiotool" },
-        FormatEntry { extension: "rgbe", label: "Radiance HDR",      kind: FileKind::Image, tier: 3, renderer: "oiiotool" },
-        FormatEntry { extension: "dpx",  label: "DPX",               kind: FileKind::Image, tier: 3, renderer: "oiiotool" },
-        FormatEntry { extension: "cin",  label: "Cineon",            kind: FileKind::Image, tier: 3, renderer: "oiiotool" },
-        FormatEntry { extension: "dds",  label: "DirectDraw Surface",kind: FileKind::Image, tier: 3, renderer: "oiiotool" },
-        FormatEntry { extension: "fits", label: "FITS",              kind: FileKind::Image, tier: 3, renderer: "oiiotool" },
-        FormatEntry { extension: "iff",  label: "IFF",               kind: FileKind::Image, tier: 3, renderer: "oiiotool" },
-        FormatEntry { extension: "pic",  label: "Softimage PIC",     kind: FileKind::Image, tier: 3, renderer: "oiiotool" },
-        FormatEntry { extension: "rla",  label: "RLA",               kind: FileKind::Image, tier: 3, renderer: "oiiotool" },
-        FormatEntry { extension: "sgi",  label: "SGI",               kind: FileKind::Image, tier: 3, renderer: "oiiotool" },
-        FormatEntry { extension: "rgb",  label: "SGI RGB",           kind: FileKind::Image, tier: 3, renderer: "oiiotool" },
-        FormatEntry { extension: "rgba", label: "SGI RGBA",          kind: FileKind::Image, tier: 3, renderer: "oiiotool" },
-        FormatEntry { extension: "zfile",label: "Renderman Z-file",  kind: FileKind::Image, tier: 3, renderer: "oiiotool" },
+        FormatEntry { extension: "exr",  label: "OpenEXR",           kind: FileKind::Image, tier: 3, renderer: "oiiotool", shortcut: false },
+        FormatEntry { extension: "hdr",  label: "Radiance HDR",      kind: FileKind::Image, tier: 3, renderer: "oiiotool", shortcut: false },
+        FormatEntry { extension: "dpx",  label: "DPX",               kind: FileKind::Image, tier: 3, renderer: "oiiotool", shortcut: false },
+        FormatEntry { extension: "cin",  label: "Cineon",            kind: FileKind::Image, tier: 3, renderer: "oiiotool", shortcut: false },
+        FormatEntry { extension: "dds",  label: "DirectDraw Surface",kind: FileKind::Image, tier: 3, renderer: "oiiotool", shortcut: false },
+        FormatEntry { extension: "dcm",  label: "DICOM",             kind: FileKind::Image, tier: 3, renderer: "oiiotool", shortcut: false },
+        FormatEntry { extension: "fits", label: "FITS",              kind: FileKind::Image, tier: 3, renderer: "oiiotool", shortcut: false },
+        FormatEntry { extension: "iff",  label: "Interchange",       kind: FileKind::Image, tier: 3, renderer: "oiiotool", shortcut: false },
+        FormatEntry { extension: "pic",  label: "Softimage",         kind: FileKind::Image, tier: 3, renderer: "oiiotool", shortcut: false },
+        FormatEntry { extension: "rla",  label: "Wavefront image",   kind: FileKind::Image, tier: 3, renderer: "oiiotool", shortcut: false },
+        FormatEntry { extension: "sgi",  label: "Silicon Graphics",  kind: FileKind::Image, tier: 3, renderer: "oiiotool", shortcut: false },
+        FormatEntry { extension: "zfile",label: "RenderMan Depth",   kind: FileKind::Image, tier: 3, renderer: "oiiotool", shortcut: false },
 
         // ── Tier 3 — subprocess: 3D geometry ──────────────────────────────────
-        FormatEntry { extension: "glb",  label: "glTF Binary",     kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
-        FormatEntry { extension: "gltf", label: "glTF JSON",       kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
-        FormatEntry { extension: "fbx",  label: "Filmbox",         kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
-        FormatEntry { extension: "dae",  label: "Collada",         kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
-        FormatEntry { extension: "dxf",  label: "AutoCAD DXF",     kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
-        FormatEntry { extension: "off",  label: "Object File Format", kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
-        FormatEntry { extension: "exo",  label: "Exodus II",       kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
-        FormatEntry { extension: "ex2",  label: "Exodus II",       kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
-        FormatEntry { extension: "e",    label: "Exodus II",       kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
-        FormatEntry { extension: "3ds",  label: "Autodesk 3D Studio", kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
-        FormatEntry { extension: "gml",  label: "CityGML",         kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
-        FormatEntry { extension: "ply",  label: "Polygon",         kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
-        FormatEntry { extension: "pts",  label: "Point Cloud",     kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
-        FormatEntry { extension: "usdz", label: "USDZ",            kind: FileKind::Geometry, tier: 3, renderer: "usdz" },
-        FormatEntry { extension: "usdc", label: "USDC",            kind: FileKind::Geometry, tier: 3, renderer: "usdz" },
-        FormatEntry { extension: "usda", label: "USDA",            kind: FileKind::Geometry, tier: 3, renderer: "usdz" },
-        FormatEntry { extension: "stl",  label: "STL",             kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
-        FormatEntry { extension: "obj",  label: "Wavefront OBJ",   kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
-        FormatEntry { extension: "wrl",  label: "VRML",            kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
-        FormatEntry { extension: "vrml", label: "VRML",            kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
-        FormatEntry { extension: "vtk",  label: "VTK Legacy",      kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
-        FormatEntry { extension: "vtu",  label: "VTK XML UnstructuredGrid", kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
-        FormatEntry { extension: "vtp",  label: "VTK XML PolyData", kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
-        FormatEntry { extension: "vti",  label: "VTK XML ImageData", kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
-        FormatEntry { extension: "vtr",  label: "VTK XML RectGrid", kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
-        FormatEntry { extension: "vts",  label: "VTK XML StructGrid", kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
-        FormatEntry { extension: "vtm",  label: "VTK XML MultiBlock", kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
-        FormatEntry { extension: "stp",  label: "STEP",            kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
-        FormatEntry { extension: "step", label: "STEP",            kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
-        FormatEntry { extension: "stpnc", label: "STEP",           kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
-        FormatEntry { extension: "p21",  label: "STEP",            kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
-        FormatEntry { extension: "210",  label: "STEP",            kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
-        FormatEntry { extension: "igs",  label: "IGES",            kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
-        FormatEntry { extension: "iges", label: "IGES",            kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
-        FormatEntry { extension: "brep", label: "Open CASCADE BRep", kind: FileKind::Geometry, tier: 3, renderer: "f3d" },
+        FormatEntry { extension: "glb",  label: "Khronos Binary",     kind: FileKind::Geometry, tier: 3, renderer: "f3d",  shortcut: false },
+        FormatEntry { extension: "gltf", label: "Khronos Asset",       kind: FileKind::Geometry, tier: 3, renderer: "f3d",  shortcut: false },
+        FormatEntry { extension: "fbx",  label: "Filmbox",         kind: FileKind::Geometry, tier: 3, renderer: "f3d",  shortcut: false },
+        FormatEntry { extension: "dae",  label: "Collada",         kind: FileKind::Geometry, tier: 3, renderer: "f3d",  shortcut: false },
+        FormatEntry { extension: "dxf",  label: "AutoCAD",     kind: FileKind::Geometry, tier: 3, renderer: "f3d",  shortcut: false },
+        FormatEntry { extension: "off",  label: "Object File Format", kind: FileKind::Geometry, tier: 3, renderer: "f3d", shortcut: false },
+        FormatEntry { extension: "exo",  label: "Exodus II",          kind: FileKind::Geometry, tier: 3, renderer: "f3d",  shortcut: false },
+        FormatEntry { extension: "3ds",  label: "Autodesk 3D Studio", kind: FileKind::Geometry, tier: 3, renderer: "f3d", shortcut: false },
+        FormatEntry { extension: "gml",  label: "CityGML",            kind: FileKind::Geometry, tier: 3, renderer: "f3d",  shortcut: false },
+        FormatEntry { extension: "ply",  label: "Stanford Polygon",   kind: FileKind::Geometry, tier: 3, renderer: "f3d",  shortcut: false },
+        FormatEntry { extension: "pts",  label: "Point Cloud",     kind: FileKind::Geometry, tier: 3, renderer: "f3d",  shortcut: false },
+        FormatEntry { extension: "usdz", label: "OpenUSD Archive",    kind: FileKind::Geometry, tier: 3, renderer: "usdz", shortcut: false },
+        FormatEntry { extension: "usd",  label: "OpenUSD",            kind: FileKind::Geometry, tier: 3, renderer: "usdz", shortcut: false },
+        FormatEntry { extension: "stl",  label: "Stereolithography",  kind: FileKind::Geometry, tier: 3, renderer: "f3d",  shortcut: false },
+        FormatEntry { extension: "obj",  label: "Wavefront",   kind: FileKind::Geometry, tier: 3, renderer: "f3d",  shortcut: false },
+        FormatEntry { extension: "vrml", label: "Virtual Reality Markup",            kind: FileKind::Geometry, tier: 3, renderer: "f3d",  shortcut: false },
+        FormatEntry { extension: "vtk",  label: "VTK Legacy",      kind: FileKind::Geometry, tier: 3, renderer: "f3d",  shortcut: false },
+        FormatEntry { extension: "vtu",  label: "VTK XML UnstructuredGrid", kind: FileKind::Geometry, tier: 3, renderer: "f3d", shortcut: false },
+        FormatEntry { extension: "vtp",  label: "VTK XML PolyData", kind: FileKind::Geometry, tier: 3, renderer: "f3d", shortcut: false },
+        FormatEntry { extension: "vti",  label: "VTK XML ImageData", kind: FileKind::Geometry, tier: 3, renderer: "f3d", shortcut: false },
+        FormatEntry { extension: "vtr",  label: "VTK XML RectGrid", kind: FileKind::Geometry, tier: 3, renderer: "f3d", shortcut: false },
+        FormatEntry { extension: "vts",  label: "VTK XML StructGrid", kind: FileKind::Geometry, tier: 3, renderer: "f3d", shortcut: false },
+        FormatEntry { extension: "vtm",  label: "VTK XML MultiBlock", kind: FileKind::Geometry, tier: 3, renderer: "f3d", shortcut: false },
+        FormatEntry { extension: "step", label: "CAD",            kind: FileKind::Geometry, tier: 3, renderer: "f3d",  shortcut: false },
+        FormatEntry { extension: "iges", label: "Graphics Exchange",kind: FileKind::Geometry, tier: 3, renderer: "f3d",  shortcut: false },
+        FormatEntry { extension: "brep", label: "CASCADE",        kind: FileKind::Geometry, tier: 3, renderer: "f3d", shortcut: false },
     ]
 }
 
@@ -335,4 +303,39 @@ pub fn format_manifest() -> &'static [FormatEntry] {
 /// tier.
 pub fn bypass() -> ThumbRoute {
     ThumbRoute { tier: 2 }
+}
+
+// ── Tier 3 format-availability registry ───────────────────────────────────────
+
+/// Which extensions tier 3 can handle *in the current process*.
+///
+/// Populated at startup by tier 3 based on the environment probe
+/// ([`probe_environment`]).  When `None` (the default), tier 3 is
+/// assumed to handle everything — this is correct for the hosted-service
+/// case where tier 3 runs as a separate, fully-provisioned server.
+///
+/// When `Some`, only the listed extensions are considered available.
+/// Extensions not in the set will cause the fallback chain to skip tier 3
+/// and go directly to a placeholder.
+static TIER3_AVAILABLE_EXTS: std::sync::RwLock<Option<std::collections::HashSet<String>>> =
+    std::sync::RwLock::new(None);
+
+/// Register the set of extensions tier 3 can handle in this process.
+///
+/// Call once at startup, before any requests are served.  Passing an
+/// empty set means "tier 3 handles nothing" — every tier-3 format will
+/// fall through to a placeholder.
+pub fn set_tier3_available_extensions(exts: std::collections::HashSet<String>) {
+    *TIER3_AVAILABLE_EXTS.write().unwrap() = Some(exts);
+}
+
+/// Return `true` if tier 3 can handle `extension`.
+///
+/// When the registry has never been populated (external tier 3 server),
+/// returns `true` unconditionally.
+pub fn tier3_can_handle(extension: &str) -> bool {
+    match TIER3_AVAILABLE_EXTS.read().unwrap().as_ref() {
+        None => true,  // external tier3 server — assume full support
+        Some(set) => set.contains(extension),
+    }
 }

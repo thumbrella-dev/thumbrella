@@ -1,14 +1,14 @@
 //! Tier 3 binary — starts tier 1's pipeline with the tier 3 renderer registered.
 //!
 //! At startup the environment is probed for available backends (F3D, usd-core,
-//! etc.).  The `tier3 diag` command prints a detailed capability report.
+//! etc.).  The `tier3 check` command prints a detailed capability report.
 
 #[tokio::main]
 async fn main() {
     // ── Mark tiers as builtin ────────────────────────────────────────────────
     // Tier 3 includes tier 2 functionality, so both are builtin.
-    tier1::diag::mark_tier2_builtin();
-    tier1::diag::mark_tier3_builtin();
+    tier1::check::mark_tier2_builtin();
+    tier1::check::mark_tier3_builtin();
 
     // ── Register subprocess handlers ─────────────────────────────────────────
     // These are probed at startup.  Only handlers whose command exists and is
@@ -43,6 +43,43 @@ async fn main() {
 
     // ── Probe the environment ────────────────────────────────────────────────
     let env_report = tier3::env_check::probe_environment();
+
+    // ── Populate tier 1's tier-3 format-availability registry ────────────────
+    // Collect all extensions from handlers whose backend executable was found
+    // at startup.  The fallback dispatch chain in tier 1 uses this to decide
+    // whether it should try tier 3 for a given format.
+    {
+        let handlers = tier3::env_check::registered_handlers();
+        let mut available: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for h in &handlers {
+            let backend_ok = env_report.backends.get(h.name)
+                .map(|b| b.available)
+                .unwrap_or(false);
+            if backend_ok {
+                for ext in h.extensions {
+                    available.insert(ext.to_string());
+                }
+            }
+            // usdz handler: also depends on python3 + usd-core + f3d
+            if h.name == "usdz" {
+                let f3d_ok = env_report.backends.get("f3d")
+                    .map(|b| b.available).unwrap_or(false);
+                let py_ok = env_report.backends.get("python3")
+                    .map(|b| b.available).unwrap_or(false);
+                let usd_ok = env_report.backends.get("python3")
+                    .and_then(|b| b.details.as_deref())
+                    .map(|d| d.contains("usd-core available"))
+                    .unwrap_or(false);
+                if f3d_ok && py_ok && usd_ok {
+                    for ext in h.extensions {
+                        available.insert(ext.to_string());
+                    }
+                }
+            }
+        }
+        tier1::set_tier3_available_extensions(available);
+    }
+
     let show_all = matches!(
         std::env::var("TBR_LOG").as_deref(),
         Ok("full")
@@ -51,8 +88,8 @@ async fn main() {
         eprintln!("[tier3] {}", env_report.summary);
     }
 
-    // ── Register diag sections ───────────────────────────────────────────────
-    register_tier3_diag(&env_report);
+    // ── Register check sections ───────────────────────────────────────────────
+    register_tier3_check(&env_report);
 
     tier1::cli::run_with_hook(3, |rt| async move {
         let rt = tier1::with_renderer(rt, tier3::Tier3Renderer::shared());
@@ -61,7 +98,7 @@ async fn main() {
 }
 
 /// Build tier-3 diagnostic sections from the format manifest and env report.
-fn register_tier3_diag(env: &tier3::env_check::EnvReport) {
+fn register_tier3_check(env: &tier3::env_check::EnvReport) {
     let manifest = tier1::format_manifest();
 
     // Tier 2 section: static formats that are always available when tier2
@@ -70,14 +107,14 @@ fn register_tier3_diag(env: &tier3::env_check::EnvReport) {
         let tier2_formats: Vec<_> = manifest.iter()
             .filter(|f| f.tier == 2)
             .collect();
-        let entries: Vec<tier1::diag::DiagEntry> = tier2_formats.iter().map(|f| {
-            tier1::diag::DiagEntry {
+        let entries: Vec<tier1::check::CheckEntry> = tier2_formats.iter().map(|f| {
+            tier1::check::CheckEntry {
                 label: format!("{:<6} {}", f.extension, f.label),
                 status: "builtin".into(),
                 detail: Some(f.renderer.into()),
             }
         }).collect();
-        tier1::diag::register_section(tier1::diag::DiagSection {
+        tier1::check::register_section(tier1::check::CheckSection {
             heading: format!("Tier 2 — Supported Formats ({} formats)", entries.len()),
             entries,
         });
@@ -89,7 +126,7 @@ fn register_tier3_diag(env: &tier3::env_check::EnvReport) {
         let tier3_formats: Vec<_> = manifest.iter()
             .filter(|f| f.tier == 3)
             .collect();
-        let entries: Vec<tier1::diag::DiagEntry> = tier3_formats.iter().map(|f| {
+        let entries: Vec<tier1::check::CheckEntry> = tier3_formats.iter().map(|f| {
             // Find the handler for this format.
             let handler = tier3::env_check::registered_handlers().into_iter()
                 .find(|h| h.extensions.contains(&f.extension));
@@ -131,13 +168,13 @@ fn register_tier3_diag(env: &tier3::env_check::EnvReport) {
                 }
                 None => ("unregistered".into(), String::new()),
             };
-            tier1::diag::DiagEntry {
+            tier1::check::CheckEntry {
                 label: format!("{:<6} {}", f.extension, f.label),
                 status,
                 detail: if detail.is_empty() { None } else { Some(detail) },
             }
         }).collect();
-        tier1::diag::register_section(tier1::diag::DiagSection {
+        tier1::check::register_section(tier1::check::CheckSection {
             heading: format!("Tier 3 — Subprocess Handlers ({} formats)", entries.len()),
             entries,
         });
@@ -149,16 +186,16 @@ fn register_tier3_diag(env: &tier3::env_check::EnvReport) {
             "f3d", "python3", "ffmpeg_cli", "magick", "oiiotool", "bwrap",
             "display_server",
         ];
-        let entries: Vec<tier1::diag::DiagEntry> = general.iter().filter_map(|name| {
+        let entries: Vec<tier1::check::CheckEntry> = general.iter().filter_map(|name| {
             let info = env.backends.get(*name)?;
             let status = if info.available { "available" } else { "missing" };
-            Some(tier1::diag::DiagEntry {
+            Some(tier1::check::CheckEntry {
                 label: info.name.clone(),
                 status: status.into(),
                 detail: info.details.clone().or_else(|| info.unavailable_reason.clone()),
             })
         }).collect();
-        tier1::diag::register_section(tier1::diag::DiagSection {
+        tier1::check::register_section(tier1::check::CheckSection {
             heading: "Tier 3 — General Tools".into(),
             entries,
         });

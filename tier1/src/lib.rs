@@ -48,7 +48,7 @@ pub mod ux;
 pub mod config;
 
 #[cfg(feature = "native")]
-pub mod diag;
+pub mod check;
 
 #[cfg(feature = "native")]
 pub mod routes;
@@ -68,7 +68,7 @@ pub use cook::{CallerContext, CookStatus, InputSpec, MediaInfo, Runtime, SourceI
 #[cfg(feature = "native")]
 pub use renderer::{InProcessRenderer, RenderCook, RenderOutput, SharedRenderer, apply_render_output, with_renderer};
 pub use spec::ShortcutLimits;
-pub use dispatch::{ThumbRoute, FormatEntry, route, format_manifest};
+pub use dispatch::{ThumbRoute, FormatEntry, route, format_manifest, set_tier3_available_extensions, tier3_can_handle};
 pub use handoff::{HandoffResponse, ThumbHandoff};
 pub use media::FileKind;
 pub use request::{CallRequest, ThumbInput, ThumbObject};
