@@ -375,7 +375,7 @@ impl Ux {
     pub fn print_startup_issue(&self, msg: &str) {
         let line = format!(
             "  {} {}\n",
-            Colour::yellow("warn:"),
+            Colour::red("error:"),
             msg,
         );
         let _ = io::stdout().write_all(line.as_bytes());

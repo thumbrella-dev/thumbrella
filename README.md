@@ -45,15 +45,15 @@ links and suggestions.
 ## Build
 
 To build and run from source a Rust build and C++ environment is needed.
-This will download and build a static ffmpeg with minimal dependencies. The
-server itself is written in Rust.
+The full build must link to ffmpeg 7.1. This can be controlled by setting
+`FFMPEG_LIB_DIR` at build time.
 
 ```bash
 cargo run serve
 ```
 
-Development on the Thumbrella server normally happens inside a 
-dev container. 
+An included script at tier2/build_static_ffmpeg.sh will build a static ffmpeg
+with no external dependencies. 
 
 ## Project Structure
 
@@ -76,7 +76,7 @@ crates with reduced functionality.
   support for all Thumbrella formats, but makes an easy to maintain starting
   point for anyone needing a mostly-featured server.
 
-## Service
+## Cloud
 
 Thumbrella Cloud makes a fully featured Thumbrella server available for
 developers to use for free. Register for a free account at

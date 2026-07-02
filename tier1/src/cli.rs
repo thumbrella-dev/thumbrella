@@ -8,6 +8,7 @@
 //! <binary> thumb <url>...     # thumbnail one or more URLs
 //! <binary> check              # validate runtime config and dependencies
 //! <binary> formats            # list all supported formats by kind
+//! <binary> license            # print third-party license notices
 //! <binary> version            # print build version
 //! ```
 
@@ -90,6 +91,9 @@ enum Command {
 
     /// Print the build version.
     Version,
+
+    /// Print third-party license notices for all embedded dependencies.
+    License,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -160,6 +164,7 @@ where
         Command::Check { json }                          => run_check(json, tier),
         Command::Formats { json }                        => run_formats(json),
         Command::Version                                 => run_version(tier),
+        Command::License                                 => run_license(),
     }
 }
 
@@ -217,13 +222,15 @@ async fn run_server(runtime: Arc<Runtime>) {
     );
 
     // Run a lightweight diagnostic check and print a one-liner for each issue.
+    //
+    // We skip the port_available check here — the TcpListener::bind above
+    // already either succeeded (we got a socket) or called fatal() and exited.
+    // A second bind probe inside collect() would see the port as in-use by
+    // this very server and produce a misleading false positive.
     {
         let report = crate::check::collect(&cfg);
         let mut issues: Vec<String> = Vec::new();
 
-        if !report.port_available {
-            issues.push(format!("port {} is already in use", cfg.port));
-        }
         if matches!(report.tier2, crate::check::TierStatus::Error) {
             issues.push("tier 2 handoff target is unreachable".into());
         }
@@ -623,6 +630,12 @@ fn run_formats(json: bool) {
 
 fn run_version(tier: u8) {
     println!("thumbrella {}  (tier {tier})", crate::TBR_VERSION);
+}
+
+// ── license ───────────────────────────────────────────────────────────────────
+
+fn run_license() {
+    print!("{}", include_str!("license.txt"));
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
