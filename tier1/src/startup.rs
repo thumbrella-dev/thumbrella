@@ -18,21 +18,29 @@ pub async fn startup(cfg: &AppConfig) -> Arc<Runtime> {
     crate::http_buf::init_http_client();
 
     // ── 2. Cache backend ──────────────────────────────────────────────────────
+    // Sticky-cache TTL (seconds).  Every successful result is held in a
+    // short-term in-memory cache for this duration regardless of upstream
+    // Cache-Control.  Prevents duplicate fetches for near-simultaneous
+    // identical requests and enables request coalescing.
+    const STICKY_TTL_SECS: u64 = 5;
+
     let cache = if let Some(ref dsn) = cfg.cache_url {
-        match cache::open_from_dsn(dsn) {
-            Ok(backends) => {
-                let names: Vec<&str> = backends.iter().map(|b| b.name()).collect();
-                tracing::info!("cache: opened {} ({})", dsn, names.join(", "));
-                CacheStore::new(backends)
-            }
-            Err(e) => {
-                tracing::warn!("cache: could not open {dsn}: {e}");
-                CacheStore::none()
+        if dsn == "none:" || dsn == "none" {
+            CacheStore::none()
+        } else {
+            match cache::open_from_dsn(dsn) {
+                Ok(backend) => {
+                    CacheStore::new(backend, STICKY_TTL_SECS)
+                }
+                Err(e) => {
+                    tracing::error!("cache: could not open {dsn}: {e} — running without cache");
+                    CacheStore::none()
+                }
             }
         }
     } else {
-        tracing::debug!("cache: no TBR_CACHE configured — running without cache");
-        CacheStore::none()
+        let backend = Arc::new(cache::memory::MemoryCacheBackend::default_cache());
+        CacheStore::new(backend, STICKY_TTL_SECS)
     };
 
     // ── 3. Trace backend ──────────────────────────────────────────────────────
@@ -81,5 +89,7 @@ pub async fn startup(cfg: &AppConfig) -> Arc<Runtime> {
         cfg.failure_ttl as u64,
         cfg.backoff_default as u64,
         cfg.backoff_ceiling as u64,
+        cfg.cache_max_ttl_secs,
+        cfg.cache_default_ttl_secs,
     )
 }

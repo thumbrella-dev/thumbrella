@@ -80,4 +80,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"],          opti
 time            = { version = "0.3", features = ["formatting"],              optional = true }
 clap            = { version = "4", features = ["derive"],                    optional = true }
 libc            = { version = "0.2",                                         optional = true }
-moka            = { version = "0.12", features = ["future"],                  optional = true }
+moka            = { version = "0.12", features = ["sync", "future"],          optional = true }

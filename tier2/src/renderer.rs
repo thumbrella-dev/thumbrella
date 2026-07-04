@@ -103,7 +103,6 @@ fn tier2_handles_image(ext: &str) -> bool {
     matches!(ext,
         "jpeg" | "jpg" | "png" | "webp" | "bmp" | "tiff" | "tif"
         | "gif" | "ico" | "psd" | "avif" | "heic" | "heif"
-        | "exr" | "hdr"
         | "dng" | "cr2" | "nef" | "arw" | "orf" | "rw2"
         | "pef" | "srw" | "raf" | "3fr" | "fff" | "iiq" | "raw"
     )
@@ -254,7 +253,7 @@ fn decode_jxl(reader: &mut dyn ReadSeek) -> Option<RenderOutput> {
         renderer:        Some("jxl_oxide".into()),
         codec:           None,
         video_seek_secs: None,
-        properties:      Some(serde_json::json!({ "width_pixels": width, "height_pixels": height, "bits_per_pixel": depth })),
+        properties:      Some(serde_json::json!({ "width": width, "height": height, "bpp": depth })),
     })
 }
 
@@ -296,7 +295,7 @@ fn render_svg(reader: &mut dyn ReadSeek) -> Option<RenderOutput> {
         renderer:        Some("resvg".into()),
         codec:           None,
         video_seek_secs: None,
-        properties:      Some(serde_json::json!({ "width_pixels": src_w, "height_pixels": src_h, "bits_per_pixel": 32 })),
+        properties:      Some(serde_json::json!({ "width": src_w, "height": src_h, "bpp": 32 })),
     })
 }
 
@@ -400,7 +399,7 @@ fn extract_raw_preview(
         renderer:        Some("raw_preview".into()),
         codec:           None,
         video_seek_secs: None,
-        properties: Some(serde_json::json!({ "width_pixels": src_w, "height_pixels": src_h, "bits_per_pixel": depth })),
+        properties: Some(serde_json::json!({ "width": src_w, "height": src_h, "bpp": depth })),
     })
 }
 
@@ -741,7 +740,7 @@ fn collect_and_decode_image_crate(
         renderer:        Some("image_crate".into()),
         codec:           None,
         video_seek_secs: None,
-        properties: Some(serde_json::json!({ "width_pixels": src_w, "height_pixels": src_h, "bits_per_pixel": depth })),
+        properties: Some(serde_json::json!({ "width": src_w, "height": src_h, "bpp": depth })),
     })
 }
 
@@ -843,7 +842,7 @@ fn pre_scale(img: DynamicImage, target_w: u32, target_h: u32) -> DynamicImage {
 }
 
 /// Fallback: fetch `url` — supports both `http(s)://` and `file://`.
-async fn fetch_url(url: &str) -> Option<Vec<u8>> {
+pub async fn fetch_url(url: &str) -> Option<Vec<u8>> {
     if let Some(path) = url.strip_prefix("file://") {
         return tokio::fs::read(path).await.ok();
     }

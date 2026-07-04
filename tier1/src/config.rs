@@ -9,14 +9,12 @@
 //! | Variable                   | Default | Description                                      |
 //! |----------------------------|---------|--------------------------------------------------|
 //! | `TBR_PORT`                 | 3114    | HTTP listener port                               |
-//! | `TBR_SERVER`               | —       | Short server/colo identifier for traces          |
 //! | `TBR_ALLOW_LOCAL`          | false   | Accept `file://` URLs, bare paths, and localhost |
 //! | `TBR_SCRATCH`              | $TMPDIR/thumbrella | Scratch root for tier3 CLI tool staging   |
 //! | `TBR_TIER2`                | —       | Tier-2 connect string (URL + optional headers)   |
 //! | `TBR_TIER3`                | —       | Tier-3 connect string (URL + optional headers)   |
 //! | `TBR_HANDSHAKE`            | —       | Shared secret required on all endpoints          |
 //! | `TBR_CACHE`                | —       | Cache backend DSN — `sqlite:<path>`, …           |
-//! | `TBR_CACHE_MAX_ITEMS`      | —       | Max cache entries (backend-specific meaning)     |
 //! | `TBR_TRACE`                | —       | Trace sink DSN — `ndjson:<path>`, …              |
 //! | `TBR_LOG`                  | standard| Output level: `standard`, `minimal`, `full`      |
 //!
@@ -77,10 +75,14 @@ pub struct AppConfig {
 
     // ── Cache ────────────────────────────────────────────────────────────────
     /// Cache backend DSN (`TBR_CACHE`).  Scheme determines backend type:
-    /// `sqlite:`, etc.
+    /// `mem:`, `sqlite:`, `none:`.
     pub cache_url: Option<String>,
-    /// Maximum number of cache entries (`TBR_CACHE_MAX_ITEMS`).
-    pub cache_max_items: Option<u32>,
+    /// Maximum server-side cache TTL in seconds.  Upstream `max-age` values
+    /// are capped at this duration.  Default: 7 days (604800).
+    pub cache_max_ttl_secs: u64,
+    /// Default cache TTL when upstream provides no freshness hints.
+    /// Default: 1 hour (3600).
+    pub cache_default_ttl_secs: u64,
 
     // ── Trace sink ────────────────────────────────────────────────────────────
     /// Trace sink DSN (`TBR_TRACE`).  Scheme determines backend type:
@@ -108,7 +110,8 @@ impl Default for AppConfig {
             tier3: ConnectTarget::default(),
             handshake: None,
             cache_url: None,
-            cache_max_items: None,
+            cache_max_ttl_secs: 604_800,   // 7 days
+            cache_default_ttl_secs: 3_600, // 1 hour
             trace_url: None,
             failure_ttl: 5,
             backoff_default: 60,
@@ -124,14 +127,15 @@ impl AppConfig {
         let tier3 = parse_connect_target(env_opt_string("TBR_TIER3"));
         Self {
             port:                 env_u16("TBR_PORT", 3114),
-            server:               std::env::var("TBR_SERVER").ok(),
             allow_local:          env_bool("TBR_ALLOW_LOCAL", false),
             scratch_dir:          env_scratch("TBR_SCRATCH"),
             tier2,
             tier3,
             handshake:            env_opt_string("TBR_HANDSHAKE"),
+            server:               env_opt_string("TBR_SERVER"),
             cache_url:            std::env::var("TBR_CACHE").ok(),
-            cache_max_items:      env_opt_u32("TBR_CACHE_MAX_ITEMS"),
+            cache_max_ttl_secs:   env_opt_u32("TBR_CACHE_MAX_TTL").unwrap_or(604_800) as u64,
+            cache_default_ttl_secs: env_opt_u32("TBR_CACHE_DEFAULT_TTL").unwrap_or(3_600) as u64,
             trace_url:            std::env::var("TBR_TRACE").ok(),
             // Hardcoded — not exposed as env vars.
             failure_ttl:          5,

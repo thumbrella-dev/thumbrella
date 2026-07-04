@@ -85,29 +85,33 @@ pub struct CallRecord {
 
 // ── ThumbMedia ────────────────────────────────────────────────────────────────
 
-/// Stable media identity — the reusable, cacheable payload.
+/// The stable, cacheable unit of a thumbnail response.
 ///
-/// Two results for the same file have the same `ThumbMedia`.  Clients can
-/// compare `media` values to deduplicate across requests; the server uses
-/// `media` as the unit of cache storage.
+/// Two results for the same source file share identical `ThumbMedia`.
+/// Clients can compare fields to deduplicate across requests; the server
+/// serialises this struct verbatim into its cache backends.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThumbMedia {
+    /// `Content-Length` from the upstream server, or 0.
     pub file_size: u64,
+    /// Detected media category.
     pub kind: FileKind,
+    /// Canonical file extension, no dot (e.g. `"jpeg"`, `"png"`).
     pub extension: String,
+    /// Sniffed MIME type (e.g. `"image/jpeg"`).
     pub mime: String,
-    /// Opaque cache token for round-tripping on subsequent requests.
-    ///
-    /// Format: `hex_epoch:base64_blob`.  Clients can check freshness by
-    /// comparing the hex prefix (Unix seconds) against the current time.
-    /// The blob is private server state — do not parse it.
-    #[serde(default)]
-    pub cache: Option<String>,
-    /// Format-specific properties (dimensions, color depth, …).
-    #[serde(default)]
+    /// Cache token for round-tripping.  Format: `<hex_epoch>:<base64_blob>`.
+    /// Clients check freshness against the epoch. Empty = do not cache.
+    pub cache: String,
+    /// Fallback icon token.  Non-empty when this is a placeholder result.
+    /// Clients can compare this to deduplicate placeholder images.
+    pub placeholder: String,
+    /// Format-specific metadata (dimensions, colour depth, …).
     pub properties: Value,
+    /// Encoded JPEG thumbnail bytes, base64 in JSON.
     #[serde(with = "base64_bytes")]
     pub thumbnail: Vec<u8>,
+    /// Source URL that produced this thumbnail.
     pub url: String,
 }
 
@@ -117,43 +121,42 @@ impl Default for ThumbMedia {
             url:        String::new(),
             thumbnail:  Vec::new(),
             mime:       String::new(),
+            cache:      String::new(),
+            placeholder: String::new(),
             file_size:  0,
             kind:       FileKind::Unknown,
             extension:  String::new(),
             properties: Value::Object(Default::default()),
-            cache:      None,
         }
     }
 }
 
 // ── ThumbResult ───────────────────────────────────────────────────────────────
 
-/// Per-item result — the public API output, cache object, and client response.
+/// Per-request result: the public API response for one URL.
 ///
-/// Materialised from [`ThumbCook`] by [`ThumbCook::to_result`] at the end of
-/// processing.  Stored in cache on `success` and returned verbatim on a cache
-/// hit (with `status` overridden to `success`).
-///
-/// The top-level fields describe *this invocation* (status, timing, source).
-/// The [`media`](ThumbMedia) sub-struct is the stable, reusable payload — two
-/// results for the same file share the same media identity.
+/// Top-level fields describe this invocation (status, timing, source).
+/// [`media`](ThumbMedia) is the stable, cacheable payload — two results
+/// for the same file share the same `media`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThumbResult {
+    /// The source URL that was requested.
     pub url: String,
+    /// High-level outcome.
     pub status: ResultStatus,
-    /// Human-readable error/status detail; `None` on clean success.
+    /// Error or status detail; `None` on clean success.
     pub message: Option<String>,
-    /// How the thumbnail was produced.
+    /// How the thumbnail was produced (render, shortcut, cache, …).
     #[serde(default)]
     pub source: Option<ResultSource>,
+    /// Wall-clock seconds to produce this result.
     pub duration: f64,
+    /// Bytes fetched from the upstream source.
     pub download_size: u64,
-    /// Placeholder token; `Some` when a fallback icon is used.
-    pub placeholder: Option<String>,
-    /// HTTP status code returned by the remote source, if fetched.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// HTTP status returned by the upstream source, if fetched.
+    #[serde(default)]
     pub http_status: Option<u16>,
-    /// Stable media payload; `None` on total failure.
+    /// The thumbnail and its metadata.  `None` on total failure.
     #[serde(default)]
     pub media: Option<ThumbMedia>,
 }
@@ -167,7 +170,6 @@ impl Default for ThumbResult {
             source:        None,
             duration:      0.0,
             download_size: 0,
-            placeholder:   None,
             http_status:   None,
             media:         None,
         }

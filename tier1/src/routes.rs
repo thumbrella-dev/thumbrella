@@ -547,7 +547,7 @@ pub async fn handoff(
     );
 
     // Save bandwidth on tier-to-tier responses: send placeholder token only.
-    if result.placeholder.is_some() {
+    if result.media.as_ref().map_or(false, |m| !m.placeholder.is_empty()) {
         if let Some(ref mut media) = result.media {
             media.thumbnail.clear();
         }

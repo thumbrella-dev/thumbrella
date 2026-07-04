@@ -91,6 +91,10 @@ pub trait RenderCook: Send {
     /// Store the decoded pixel buffer.  Tier 1's `deliver` step will
     /// resize and JPEG-encode this image after `render` returns.
     fn set_render_image(&mut self, img: DynamicImage);
+    /// Whether a render image was stored (i.e. the format was decoded
+    /// successfully).  Higher tiers use this to decide whether to try
+    /// a fallback renderer after a lower tier claims the format.
+    fn has_render_image(&self) -> bool { false }
     /// Low-level renderer label for the trace (e.g. `"ffmpeg"`, `"image_crate"`).
     fn set_render_renderer(&mut self, label: String);
     /// Codec or container detail for the trace (e.g. `"hevc"`, `"av1"`).

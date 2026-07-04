@@ -218,13 +218,24 @@ pub struct CacheHints {
     /// Used to construct `If-Modified-Since` when no ETag is available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_modified: Option<String>,
+
+    /// True when `Cache-Control: no-store` was present.
+    /// The server should NOT store this response in any cache.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_store: bool,
+
+    /// True when `Cache-Control: private` was present.
+    /// The response is specific to one user and should not be shared.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub private: bool,
 }
 
 impl CacheHints {
     /// Parse freshness hints from HTTP response headers.
     ///
-    /// Returns `None` when none of the recognised headers are present or
-    /// contain useful information (e.g. `Cache-Control: no-store` only).
+    /// Returns `None` when none of the recognised headers are present.
+    /// Note: returns `Some` even when `no-store` is set — callers should check
+    /// [`disallow_caching()`](Self::disallow_caching) before storing.
     pub fn from_response_headers(headers: &std::collections::HashMap<String, String>) -> Option<Self> {
         let mut hints = Self::default();
         let mut any = false;
@@ -258,6 +269,14 @@ impl CacheHints {
                             hints.stale_while_revalidate = Some(v);
                             any = true;
                         }
+                    }
+                    "no-store" => {
+                        hints.no_store = true;
+                        any = true;
+                    }
+                    "private" => {
+                        hints.private = true;
+                        any = true;
                     }
                     _ => {}
                 }
@@ -318,6 +337,16 @@ impl CacheHints {
         self.expires_at.map_or(false, |exp| unix_now_secs() < exp)
     }
 
+    /// Returns `true` if this resource must NOT be stored in any cache.
+    ///
+    /// True when the upstream returned `Cache-Control: no-store` or
+    /// `Cache-Control: private`.  These directives mean the response is
+    /// either forbidden from storage (`no-store`) or specific to one user
+    /// and should not be shared (`private`).
+    pub fn disallow_caching(&self) -> bool {
+        self.no_store || self.private
+    }
+
     /// Create hints that expire in `secs` seconds from now, with no other data.
     pub fn expiring_in(secs: u64) -> Self {
         Self {
@@ -349,21 +378,30 @@ fn unix_now_secs() -> u64 {
 impl CacheHints {
     /// Encode to the opaque wire string for `ThumbResult.cache`.
     ///
-    /// Format: `hex_expires_at:base64(binary_blob)`
+    /// Format: `hex_epoch:base64(binary_blob)`.  Returns `""` (empty) when
+    /// the response is uncacheable (`no-store` or `private`).
     ///
-    /// Returns `None` when there are no hints worth encoding (no etag,
-    /// no last_modified, no expiry, no swr, no immutable flag).
-    pub fn encode(&self) -> Option<String> {
-        let has_meaningful = self.etag.is_some()
-            || self.last_modified.is_some()
-            || self.expires_at.is_some()
-            || self.stale_while_revalidate.is_some()
-            || self.immutable;
-        if !has_meaningful {
-            return None;
+    /// Trailing zero bytes in the blob are trimmed to keep the string compact.
+    ///
+    /// When validators (etag/last-modified) are present but no freshness
+    /// window exists, epoch is set to `1` (already expired).  Clients MUST
+    /// re-validate but SHOULD store the data for conditional requests.
+    ///
+    /// `default_ttl_secs` is used when no `expires_at` and no validators
+    /// are present — the result gets a short freshness window.
+    pub fn encode(&self, default_ttl_secs: u64) -> String {
+        if self.no_store || self.private {
+            return String::new();
         }
 
-        let epoch = self.expires_at.unwrap_or(0);
+        let has_validator = self.etag.is_some() || self.last_modified.is_some();
+        let epoch = if let Some(e) = self.expires_at {
+            e
+        } else if has_validator {
+            1  // stale immediately, but client should store for conditional revalidation
+        } else {
+            unix_now_secs() + default_ttl_secs
+        };
 
         let mut buf = Vec::with_capacity(32);
 
@@ -375,7 +413,7 @@ impl CacheHints {
             buf.push(0);
         }
 
-        // Field 1: immutable (bool, presence-only)
+        // Field 1: immutable (bool)
         buf.push(if self.immutable { 1 } else { 0 });
 
         // Field 2: etag
@@ -384,16 +422,30 @@ impl CacheHints {
         // Field 3: last_modified
         Self::push_str_field(&mut buf, self.last_modified.as_deref());
 
+        // Field 4: no_store (bool)
+        buf.push(if self.no_store { 1 } else { 0 });
+
+        // Field 5: private (bool)
+        buf.push(if self.private { 1 } else { 0 });
+
+        // Trim trailing zero bytes (missing positional fields default to zero),
+        // but keep at least one byte so the base64 portion is never empty.
+        while buf.len() > 1 && buf.last() == Some(&0) {
+            buf.pop();
+        }
+
         let b64 = base64::Engine::encode(
             &base64::engine::general_purpose::URL_SAFE_NO_PAD,
             &buf,
         );
-        Some(format!("{epoch:x}:{b64}"))
+        format!("{epoch:x}:{b64}")
     }
 
     /// Decode the opaque wire string produced by [`encode`](Self::encode).
     ///
     /// Returns `None` when the string is empty or the separator is missing.
+    /// An epoch of `0` decodes to `no_store = true` (backward compat with
+    /// older cache strings that used `0:` as uncacheable marker).
     pub fn decode(wire: &str) -> Option<Self> {
         let (epoch_hex, blob) = wire.split_once(':')?;
         if blob.is_empty() {
@@ -410,6 +462,7 @@ impl CacheHints {
         let mut hints = Self { expires_at: Some(epoch), ..Default::default() };
         if epoch == 0 {
             hints.expires_at = None;
+            hints.no_store = true;
         }
 
         // Field 0: stale_while_revalidate
@@ -433,6 +486,17 @@ impl CacheHints {
 
         // Field 3: last_modified
         hints.last_modified = Self::take_str_field(&buf, &mut pos);
+
+        // Field 4: no_store
+        if pos < buf.len() {
+            hints.no_store = buf[pos] != 0;
+            pos += 1;
+        }
+
+        // Field 5: private
+        if pos < buf.len() {
+            hints.private = buf[pos] != 0;
+        }
 
         Some(hints)
     }
@@ -478,8 +542,9 @@ mod tests {
             immutable: true,
             etag: Some("\"abc123\"".into()),
             last_modified: Some("Thu, 01 Jan 2026 00:00:00 GMT".into()),
+            ..Default::default()
         };
-        let wire = orig.encode().expect("should encode");
+        let wire = orig.encode(0);
         eprintln!("wire: {wire}");
         let back = CacheHints::decode(&wire).expect("should decode");
         assert_eq!(back.expires_at, orig.expires_at);
@@ -495,16 +560,32 @@ mod tests {
             etag: Some("\"xyz789\"".into()),
             ..Default::default()
         };
-        let wire = orig.encode().expect("should encode");
+        let wire = orig.encode(0);
         let back = CacheHints::decode(&wire).expect("should decode");
         assert_eq!(back.etag, orig.etag);
-        assert_eq!(back.expires_at, None);
+        // Etag with no max-age → epoch 1 (stale, but cacheable for conditionals).
+        assert_eq!(back.expires_at, Some(1));
+        assert!(!back.no_store);
     }
 
     #[test]
-    fn encode_none_when_empty() {
+    fn uncacheable_returns_empty() {
+        let hints = CacheHints { no_store: true, ..Default::default() };
+        assert_eq!(hints.encode(0), "");
+        let hints = CacheHints { private: true, ..Default::default() };
+        assert_eq!(hints.encode(0), "");
+    }
+
+    #[test]
+    fn no_headers_short_ttl() {
         let hints = CacheHints::default();
-        assert!(hints.encode().is_none());
+        let wire = hints.encode(60);
+        // No validators, no max-age → uses default TTL: now+60.
+        assert!(!wire.is_empty(), "default hints with 60s TTL should have a value");
+        assert!(!wire.starts_with("1:"), "default hints should use now+TTL, not stale epoch 1");
+        let back = CacheHints::decode(&wire).expect("should decode");
+        assert!(back.expires_at.is_some());
+        assert!(!back.no_store);
     }
 
     #[test]

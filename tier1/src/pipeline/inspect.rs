@@ -48,6 +48,15 @@ pub async fn inspect<S: HttpStream>(cook: &mut ThumbCook<S>) {
         inspect_image_properties(&prefix, cook.media.properties.as_mut().unwrap());
     }
 
+    // Audio lossless: inferred from extension.
+    if kind == FileKind::Audio {
+        if let Some(props) = cook.media.properties.as_mut() {
+            let obj = props.as_object_mut().expect("properties is always a JSON object");
+            let ext = cook.media.extension.as_deref().unwrap_or("");
+            obj.insert("lossless".into(), (is_lossless_audio_ext(ext) as i32).into());
+        }
+    }
+
     // Route determines which tier should process this — informational only at
     // this point; the cook will escalate if needed during shortcut/render.
     let _route = dispatch::route(kind, cook.media.extension.as_deref());
@@ -146,15 +155,19 @@ pub(super) fn inspect_image_properties(bytes: &[u8], props: &mut serde_json::Val
     if bytes.len() >= 4 && bytes[0] == 0xFF && bytes[1] == 0xD8 {
         if let Some((w, h, bpp)) = jpeg_sof_dimensions(bytes) {
             let obj = props.as_object_mut().expect("properties is always a JSON object");
-            obj.insert("width_pixels".into(),  w.into());
-            obj.insert("height_pixels".into(), h.into());
-            obj.insert("bits_per_pixel".into(), bpp.into());
+            obj.insert("width".into(),  w.into());
+            obj.insert("height".into(), h.into());
+            obj.insert("bpp".into(), bpp.into());
+            obj.insert("alpha".into(), (0_i32).into());
+            obj.insert("lossless".into(), (0_i32).into());
+            return;
         }
-        return;
+        // SOF unreachable — fall through to image crate as a fallback.
     }
 
     let cursor = Cursor::new(bytes);
     let Ok(reader) = ImageReader::new(cursor).with_guessed_format() else { return };
+    let format = reader.format();
     let Ok(decoder) = reader.into_decoder() else { return };
     let (w, h) = decoder.dimensions();
     let ct = decoder.color_type();
@@ -168,9 +181,32 @@ pub(super) fn inspect_image_properties(bytes: &[u8], props: &mut serde_json::Val
     };
     let bits_per_pixel = per_channel * color_channels;
     let obj = props.as_object_mut().expect("properties is always a JSON object");
-    obj.insert("width_pixels".into(),  w.into());
-    obj.insert("height_pixels".into(), h.into());
-    obj.insert("bits_per_pixel".into(), bits_per_pixel.into());
+    obj.insert("width".into(),  w.into());
+    obj.insert("height".into(), h.into());
+    obj.insert("bpp".into(), bits_per_pixel.into());
+    obj.insert("alpha".into(), (ct.has_alpha() as i32).into());
+    if let Some(fmt) = format {
+        obj.insert("lossless".into(), (is_lossless(fmt) as i32).into());
+    }
+}
+
+/// Whether the given image format uses lossless compression.
+fn is_lossless(format: image::ImageFormat) -> bool {
+    use image::ImageFormat;
+    matches!(format,
+        ImageFormat::Png
+        | ImageFormat::Bmp
+        | ImageFormat::Tiff
+        | ImageFormat::Gif
+        | ImageFormat::Ico
+        | ImageFormat::Tga
+        | ImageFormat::OpenExr
+    )
+}
+
+/// Whether the given audio extension implies lossless encoding.
+fn is_lossless_audio_ext(ext: &str) -> bool {
+    matches!(ext, "flac" | "wav" | "aiff" | "aif" | "alac" | "ape" | "wv")
 }
 
 /// Walk JPEG markers starting after SOI (offset 2), skipping APP segments

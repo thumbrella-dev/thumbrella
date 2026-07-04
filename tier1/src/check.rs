@@ -187,8 +187,6 @@ pub struct CheckReport {
     /// HTTP port the server binds on.
     pub server_port: u16,    /// Whether the configured port is available and bindable by this process.
     pub port_available: bool,    /// Server identifier (colo code or operator label).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub server_id: Option<String>,
     /// Developer / debug mode enabled.
     /// Whether local-URL access is enabled (`TBR_ALLOW_LOCAL`).
     pub allow_local: bool,
@@ -285,6 +283,37 @@ pub fn has_builtin_renderer() -> bool {
         || TIER3_BUILTIN.load(std::sync::atomic::Ordering::Acquire)
 }
 
+/// Build a one-line human-readable cache-config summary for `tier1 check`.
+#[cfg(feature = "native")]
+fn build_cache_summary(dsn: &str, _cfg: &crate::config::AppConfig) -> String {
+    let scheme = dsn.split(':').next().unwrap_or(dsn);
+    let rest = dsn.split_once(':').map(|(_, r)| r).unwrap_or("");
+
+    match scheme {
+        "mem" => {
+            if rest.is_empty() {
+                "mem: (default 100 MB)".to_string()
+            } else {
+                format!("mem:{rest}")
+            }
+        }
+        "sqlite" => {
+            let path = rest.split('#').next().unwrap_or(rest);
+            if let Some(size) = rest.split('#').nth(1) {
+                format!("sqlite:{path} (max {size})")
+            } else {
+                format!("sqlite:{path}")
+            }
+        }
+        "cloud" => {
+            let masked = crate::ux::Ux::mask_handshake(rest);
+            format!("cloud:{masked}")
+        }
+        "none" => "none: (cache disabled)".to_string(),
+        _ => dsn.to_string(),
+    }
+}
+
 /// Collect a diagnostic report for the current process environment.
 ///
 /// All configuration is read from `AppConfig` — which itself was populated
@@ -314,17 +343,20 @@ pub fn collect(cfg: &crate::config::AppConfig) -> CheckReport {
         }
     };
 
-    // Cache
+    // Cache — build a descriptive summary line.
     let (cache_config, cache_validation, cache_file_check) = match cfg.cache_url.as_ref() {
         Some(dsn) => {
-            let mut desc = dsn.clone();
-            if let Some(max) = cfg.cache_max_items {
-                desc = format!("{desc}  (max_items={max})");
-            }
             let (validation, file_check) = crate::cache::validate_dsn(dsn);
-            (Some(desc), validation, file_check)
+            let summary = build_cache_summary(dsn, &cfg);
+            (Some(summary), validation, file_check)
         }
-        None => (None, Validation::not_configured(), None),
+        None => {
+            let default_line = format!(
+                "mem: (default, {} MB, max TTL {}s, default TTL {}s)",
+                100, cfg.cache_max_ttl_secs, cfg.cache_default_ttl_secs,
+            );
+            (Some(default_line), Validation::ok(), None)
+        }
     };
 
     let build_timestamp = option_env!("TBR_BUILD_TIMESTAMP").map(str::to_owned);
@@ -376,7 +408,6 @@ pub fn collect(cfg: &crate::config::AppConfig) -> CheckReport {
         build_timestamp,
         server_port: cfg.port,
         port_available,
-        server_id: cfg.server.clone(),
         allow_local: cfg.allow_local,
         trace_url,
         trace_validation,
@@ -643,9 +674,6 @@ fn print_env_default(name: &str, value: &str) {
 }
 
 /// Print a DSN-backed env var (TBR_TRACE, TBR_CACHE).
-///
-/// When the value contains commas, each segment is printed on its own line
-/// with an index suffix (e.g. `TBR_CACHE[1]`, `TBR_CACHE[2]`).
 fn print_dsn_var(
     name: &str,
     dsn: &Option<String>,
@@ -660,23 +688,13 @@ fn print_dsn_var(
     };
 
     let bold_name = if env_is_set(name) { ux.bold(name) } else { name.to_string() };
+    let ok = !matches!(validation.status, ValidationStatus::Error | ValidationStatus::Warn);
+    let label = if ok { ux.green("ok") } else { ux.red("failed") };
+    println!("{bold_name}: {raw} ({label})");
 
-    // Split on commas for multi-value support.
-    let segments: Vec<&str> = raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
-
-    if segments.len() <= 1 {
-        let ok = !matches!(validation.status, ValidationStatus::Error | ValidationStatus::Warn);
-        let label = if ok { ux.green("ok") } else { ux.red("failed") };
-        println!("{bold_name}: {raw} ({label})");
-        if !ok {
-            let msg = validation.message.as_deref().unwrap_or("validation failed");
-            println!("  {}: {msg}", ux.red("error"));
-        }
-    } else {
-        for (i, seg) in segments.iter().enumerate() {
-            let idx = i + 1;
-            println!("{bold_name}[{idx}]: {seg}");
-        }
+    if !ok {
+        let msg = validation.message.as_deref().unwrap_or("validation failed");
+        println!("  {}: {msg}", ux.red("error"));
     }
 
     // File-backed backend details.

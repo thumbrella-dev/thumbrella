@@ -125,8 +125,13 @@ impl InProcessRenderer for Tier3Renderer {
                 }
                 Some(FileKind::Image) => {
                     // Try tier2 first (libav is faster for common formats).
-                    // Fall back to ffmpeg CLI for formats libav can't handle.
-                    if !is_handoff && self.tier2.render(cook).await {
+                    // If tier2 claims the format but fails to decode
+                    // (has_render_image is false), fall back to the
+                    // ffmpeg/oiio CLI path below.
+                    let tier2_ok = !is_handoff
+                        && self.tier2.render(cook).await
+                        && cook.has_render_image();
+                    if tier2_ok {
                         true
                     } else {
                         render_image_ffmpeg_fallback(cook, &ext).await
@@ -312,8 +317,8 @@ fn run_magick_image_decode(
         codec: None,
         video_seek_secs: None,
         properties: Some(serde_json::json!({
-            "width_pixels": src_w,
-            "height_pixels": src_h,
+            "width": src_w,
+            "height": src_h,
         })),
     })
 }
@@ -470,11 +475,11 @@ fn build_video_properties(
     channel_count: u32,
 ) -> serde_json::Value {
     let mut props = serde_json::json!({
-        "width_pixels": w,
-        "height_pixels": h,
+        "width": w,
+        "height": h,
     });
     if bits_per_pixel > 0 {
-        props["bits_per_pixel"] = serde_json::json!(bits_per_pixel);
+        props["bpp"] = serde_json::json!(bits_per_pixel);
     }
     if let Some(d) = duration_secs {
         props["duration_seconds"] = serde_json::json!(d);
@@ -538,24 +543,51 @@ async fn render_image_ffmpeg_fallback(
 
     if !tool_available { return false; }
 
-    let Some(mut reader) = cook.take_reader() else { return false; };
     let ext_owned = ext.to_string();
-    let result = tokio::task::spawn_blocking(move || {
-        let mut buf = Vec::new();
-        use std::io::Read;
-        reader.read_to_end(&mut buf).map_err(|e| format!("read: {e}"))?;
 
-        if use_oiiotool {
-            run_oiiotool_decode(&buf, &ext_owned)
-        } else {
-            run_ffmpeg_decode(&buf, &ext_owned, false)
+    // Two paths:
+    // 1. Reader still available (tier2 didn't touch it) → read inside
+    //    spawn_blocking because SyncHttpReader uses block_on.
+    // 2. Reader consumed by tier2 → re-fetch bytes async, then spawn_blocking.
+    if let Some(mut reader) = cook.take_reader() {
+        let result = tokio::task::spawn_blocking(move || {
+            let mut buf = Vec::new();
+            use std::io::Read;
+            reader.read_to_end(&mut buf).map_err(|e| format!("read: {e}"))?;
+            if use_oiiotool {
+                run_oiiotool_decode(&buf, &ext_owned)
+            } else {
+                run_ffmpeg_decode(&buf, &ext_owned, false)
+            }
+        }).await;
+
+        match result {
+            Ok(Ok(out)) => { apply_render_output(cook, out); true }
+            Ok(Err(msg)) => { cook.fail_cook(&format!("{tool_name}: {msg}")); true }
+            Err(_) => { cook.fail_cook(&format!("{tool_name} panicked")); true }
         }
-    }).await;
+    } else {
+        // Reader was consumed by a prior tier — re-fetch.
+        let bytes = match tier2::renderer::fetch_url(cook.input_url()).await {
+            Some(b) => b,
+            None => {
+                cook.fail_cook(&format!("{tool_name}: failed to re-fetch (reader consumed by prior tier)"));
+                return true;
+            }
+        };
+        let result = tokio::task::spawn_blocking(move || {
+            if use_oiiotool {
+                run_oiiotool_decode(&bytes, &ext_owned)
+            } else {
+                run_ffmpeg_decode(&bytes, &ext_owned, false)
+            }
+        }).await;
 
-    match result {
-        Ok(Ok(out)) => { apply_render_output(cook, out); true }
-        Ok(Err(msg)) => { cook.fail_cook(&format!("{tool_name}: {msg}")); true }
-        Err(_) => { cook.fail_cook(&format!("{tool_name} panicked")); true }
+        match result {
+            Ok(Ok(out)) => { apply_render_output(cook, out); true }
+            Ok(Err(msg)) => { cook.fail_cook(&format!("{tool_name}: {msg}")); true }
+            Err(_) => { cook.fail_cook(&format!("{tool_name} panicked")); true }
+        }
     }
 }
 
@@ -683,8 +715,8 @@ fn run_oiiotool_decode(
         codec: None,
         video_seek_secs: None,
         properties: Some(serde_json::json!({
-            "width_pixels": src_w,
-            "height_pixels": src_h,
+            "width": src_w,
+            "height": src_h,
         })),
     })
 }
@@ -1095,8 +1127,8 @@ fn run_f3d_geometry_handler(
     let img = autocrop_transparent(img);
 
     let props = serde_json::json!({
-        "width_pixels": img.width(),
-        "height_pixels": img.height(),
+        "width": img.width(),
+        "height": img.height(),
         "up_axis": up_axis,
         "camera_azimuth_deg": -30,
         "camera_elevation_deg": 20,

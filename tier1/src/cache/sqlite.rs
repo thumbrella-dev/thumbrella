@@ -52,16 +52,26 @@ use crate::cache::CacheBackend;
 /// SQLite-backed cache.  Thread-safe via an internal `Mutex<Connection>`.
 pub struct SqliteCacheBackend {
     conn: Arc<Mutex<Connection>>,
+    /// Maximum total size in bytes before eviction kicks in.
+    /// `None` means unbounded (manual maintenance only).
+    max_bytes: Option<u64>,
 }
 
 impl SqliteCacheBackend {
     /// Open (or create) a SQLite database at `path`, run migrations, and
-    /// populate the maintenance table.
+    /// populate the maintenance table.  No size limit; cache grows unbounded.
     pub fn open(path: &str) -> rusqlite::Result<Self> {
+        Self::open_with_limit(path, None)
+    }
+
+    /// Open with an optional byte-size limit.  After each `put()` the backend
+    /// checks total stored bytes; if over `max_bytes`, the oldest entries
+    /// (by `last_accessed_at`) are deleted until the total fits.
+    pub fn open_with_limit(path: &str, max_bytes: Option<u64>) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
         apply_pragmas(&conn)?;
         migrate(&conn)?;
-        Ok(Self { conn: Arc::new(Mutex::new(conn)) })
+        Ok(Self { conn: Arc::new(Mutex::new(conn)), max_bytes })
     }
 
     /// Diagnostic check for a configured SQLite cache path.
@@ -102,29 +112,78 @@ impl CacheBackend for SqliteCacheBackend {
         })
     }
 
-    fn put(&self, key: String, value: String, cost: u8) -> DeferredFuture {
+    fn put(&self, key: String, value: String, cost: u8, expires_at: u64) -> DeferredFuture {
         let conn = Arc::clone(&self.conn);
+        let max_bytes = self.max_bytes;
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
                 let size = value.len() as i64;
+                let expires = expires_at as i64;
                 let conn = conn.lock().unwrap();
                 conn.execute(
-                    "INSERT INTO thumbrella(cache_key, value, size_bytes, last_accessed_at, render_cost)
-                          VALUES (?1, ?2, ?3, unixepoch(), ?4)
+                    "INSERT INTO thumbrella(cache_key, value, size_bytes, last_accessed_at, render_cost, expires_at)
+                          VALUES (?1, ?2, ?3, unixepoch(), ?4, ?5)
                      ON CONFLICT(cache_key) DO UPDATE
                         SET value            = excluded.value,
                             size_bytes       = excluded.size_bytes,
                             last_accessed_at = unixepoch(),
                             render_cost      = excluded.render_cost,
+                            expires_at       = excluded.expires_at,
                             access_count     = access_count + 1",
-                    params![key, value, size, cost as i64],
+                    params![key, value, size, cost as i64, expires],
                 )
                 .ok();
+
+                // Purge expired entries.
+                conn.execute(
+                    "DELETE FROM thumbrella WHERE expires_at <= unixepoch()",
+                    [],
+                ).ok();
+
+                // Evict oldest entries if over the byte limit.
+                if let Some(limit) = max_bytes {
+                    evict_oldest(&conn, limit);
+                }
             })
             .await
             .ok();
         })
     }
+}
+
+// ── Eviction ──────────────────────────────────────────────────────────────────
+
+/// Delete oldest entries until total stored bytes fits within `max_bytes`.
+///
+/// Eviction order: oldest `last_accessed_at` first, then cheapest
+/// `render_cost`.  This preserves recently-used, expensive-to-render entries.
+///
+/// Called from [`SqliteCacheBackend::put`] while the connection lock is held.
+fn evict_oldest(conn: &Connection, max_bytes: u64) {
+    // Check current total.  If under limit, nothing to do.
+    let total: i64 = conn
+        .query_row("SELECT COALESCE(SUM(size_bytes), 0) FROM thumbrella", [], |r| r.get(0))
+        .unwrap_or(0);
+    if (total as u64) <= max_bytes {
+        return;
+    }
+
+    // Delete oldest entries until the total fits.  Use a running sum to
+    // delete just enough entries — delete oldest first, cheaper first.
+    conn.execute_batch(&format!(
+        "DELETE FROM thumbrella WHERE cache_key IN (
+            SELECT cache_key FROM (
+                SELECT cache_key,
+                       SUM(size_bytes) OVER (
+                           ORDER BY last_accessed_at ASC, render_cost ASC
+                       ) AS running_total
+                  FROM thumbrella
+            )
+             WHERE running_total <= {excess}
+        )",
+        excess = (total as i64).saturating_sub(max_bytes as i64),
+    ))
+    .ok();
 }
 
 // ── Schema migrations ─────────────────────────────────────────────────────────
@@ -174,7 +233,7 @@ fn check_schema(path: &str) -> crate::check::Validation {
         );
     }
 
-    let required = ["cache_key", "value", "size_bytes", "last_accessed_at", "access_count", "render_cost"];
+    let required = ["cache_key", "value", "size_bytes", "last_accessed_at", "access_count", "render_cost", "expires_at"];
     let missing: Vec<&str> = required.iter()
         .copied()
         .filter(|c| !cols.iter().any(|col| col == c))
@@ -204,11 +263,15 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             size_bytes       INTEGER NOT NULL DEFAULT 0,
             last_accessed_at INTEGER NOT NULL DEFAULT (unixepoch()),
             access_count     INTEGER NOT NULL DEFAULT 1,
-            render_cost      INTEGER NOT NULL DEFAULT 0
+            render_cost      INTEGER NOT NULL DEFAULT 0,
+            expires_at       INTEGER NOT NULL DEFAULT (unixepoch() + 86400 * 365)
         );
 
         CREATE INDEX IF NOT EXISTS idx_thumbrella_lru
             ON thumbrella(last_accessed_at, render_cost);
+
+        CREATE INDEX IF NOT EXISTS idx_thumbrella_expiry
+            ON thumbrella(expires_at);
 
         -- Human-readable stats view.
         CREATE VIEW IF NOT EXISTS cache_stats AS

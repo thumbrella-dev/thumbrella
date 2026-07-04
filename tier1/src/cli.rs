@@ -161,7 +161,7 @@ where
     match cli.command {
         Command::Serve                                   => run_server(runtime.unwrap()).await,
         Command::Thumb { urls, cache, json, raw } => run_thumb(urls, cache, json, raw, runtime.unwrap()).await,
-        Command::Check { json }                          => run_check(json, tier),
+        Command::Check { json }                          => run_check(json, tier).await,
         Command::Formats { json }                        => run_formats(json),
         Command::Version                                 => run_version(tier),
         Command::License                                 => run_license(),
@@ -216,7 +216,6 @@ async fn run_server(runtime: Arc<Runtime>) {
         actual_port,
         crate::TBR_VERSION,
         cfg.handshake.as_deref(),
-        cfg.cache_url.is_some(),
         cfg.tier2.url.is_some(),
         cfg.tier3.url.is_some(),
     );
@@ -360,30 +359,31 @@ async fn run_thumb(urls: Vec<String>, cache_str: Option<String>, json: bool, raw
         results.push(result);
     }
 
-    if raw {
-        // Emit raw result JSON — unwrapped, with base64 thumbnail intact.
-        // Matches the shape the Python post-processing in generate-thumbnails.sh
-        // reconstructs: {"result": {…}}.
+    if raw || json {
+        // --raw: compact JSON with full base64 thumbnail (machine-readable).
+        // --json: pretty-printed, colourised, thumbnail replaced with placeholder.
         for result in &results {
-            let out = serde_json::json!({ "result": result });
-            println!("{}", serde_json::to_string_pretty(&out).unwrap());
-        }
-    } else if json {
-        let json_items: Vec<serde_json::Value> = results.iter().map(|result| {
-            let mut val = serde_json::to_value(result).unwrap();
-            if let Some(obj) = val.as_object_mut() {
-                if let Some(media) = obj.get_mut("media").and_then(|m| m.as_object_mut()) {
-                    if let Some(thumb) = media.get("thumbnail") {
-                        if thumb.as_str().is_some_and(|s| !s.is_empty()) {
-                            media.insert("thumbnail".into(), serde_json::Value::String("<binary image data>".into()));
+            if json {
+                // Serialise to Value so we can swap the base64 thumbnail
+                // for a short placeholder string.  (Replacing the Vec<u8>
+                // would get re-encoded as base64, so we do it post-serialise.)
+                let mut value = serde_json::to_value(&result).unwrap();
+                if let Some(media) = value.get_mut("media") {
+                    if let Some(thumb) = media.get("thumbnail").and_then(|v| v.as_str()) {
+                        if thumb.len() > 200 {
+                            media["thumbnail"] = serde_json::Value::String(
+                                format!("<base64 jpeg data: {} bytes>", thumb.len())
+                            );
                         }
                     }
                 }
+                let pretty = serde_json::to_string_pretty(&value).unwrap();
+                let ux = crate::ux::get();
+                println!("{}", ux.colorize_json(&pretty));
+            } else {
+                println!("{}", serde_json::to_string(&result).unwrap());
             }
-            val
-        }).collect();
-        let out = serde_json::json!({ "items": json_items });
-        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        }
     } else {
         print_thumb_items(&results);
     }
@@ -425,10 +425,14 @@ pub fn print_thumb_items(results: &[crate::ThumbResult]) {
             format!("{kind} {ext}")
         };
 
-        let info_col = if let Some(ref placeholder) = result.placeholder {
-            format!("{file_size}  ->  {placeholder} placeholder")
-        } else if let Some(ref thumb) = thumb_size {
-            format!("{file_size}  ->  {thumb}")
+        let info_col = if let Some(ref media) = result.media {
+            if !media.placeholder.is_empty() {
+                format!("{file_size}  ->  {} placeholder", media.placeholder)
+            } else if let Some(ref thumb) = thumb_size {
+                format!("{file_size}  ->  {thumb}")
+            } else {
+                file_size
+            }
         } else {
             file_size
         };
@@ -447,7 +451,7 @@ pub fn print_thumb_items(results: &[crate::ThumbResult]) {
             msg = msg,
         );
 
-        if let Some(cache) = result.media.as_ref().and_then(|m| m.cache.as_deref()) {
+        if let Some(cache) = result.media.as_ref().map(|m| &*m.cache).filter(|c| !c.is_empty()) {
             println!("cache {cache}");
         }
     }
@@ -455,12 +459,30 @@ pub fn print_thumb_items(results: &[crate::ThumbResult]) {
 
 // ── check ─────────────────────────────────────────────────────────────────────
 
-fn run_check(json: bool, tier: u8) {
+async fn run_check(json: bool, tier: u8) {
     use crate::{config::AppConfig, check};
 
     let cfg = AppConfig::from_env();
     let mut report = check::collect(&cfg);
     report.build_tier = Some(tier);
+
+    // For cloud: cache backends, perform the async health check that
+    // validate_dsn skipped.  This sends a dummy /cache/lookup to verify
+    // the auth token and cloud endpoint.
+    if let Some(ref dsn) = cfg.cache_url {
+        if dsn.starts_with("cloud:") {
+            let token = dsn.strip_prefix("cloud:").unwrap_or("");
+            match crate::cache::cloud::ping_cloud_token(token).await {
+                Ok(()) => {
+                    report.cache_validation = check::Validation::ok();
+                }
+                Err(e) => {
+                    report.cache_validation = check::Validation::error(e);
+                    report.healthy = false;
+                }
+            }
+        }
+    }
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report).unwrap());

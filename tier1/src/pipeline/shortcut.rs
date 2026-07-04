@@ -97,8 +97,8 @@ fn jpeg_source_dimensions(data: &[u8]) -> (Option<u32>, Option<u32>) {
     let mut props = serde_json::json!({});
     super::inspect::inspect_image_properties(data, &mut props);
     let obj = props.as_object().unwrap();
-    let w = obj.get("width_pixels").and_then(|v| v.as_u64()).map(|n| n as u32);
-    let h = obj.get("height_pixels").and_then(|v| v.as_u64()).map(|n| n as u32);
+    let w = obj.get("width").and_then(|v| v.as_u64()).map(|n| n as u32);
+    let h = obj.get("height").and_then(|v| v.as_u64()).map(|n| n as u32);
     (w, h)
 }
 
@@ -374,7 +374,16 @@ async fn try_raw_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     cook.render_renderer    = Some("shortcut/tiff".into());
     cook.render_handler     = RenderHandler::Builtin;
     cook.out_download_bytes = dl_bytes;
-    if thumb_w > 0 && thumb_h > 0 {
+    // Prefer IFD0 sensor resolution over the embedded preview dimensions.
+    if let Some((sw, sh)) = tiff_ifd0_dimensions(&header, little) {
+        // Raw sensor bpp — TIFF IFD0 BitsPerSample tag (0x0102) is per-component,
+        // typically 12 or 14 for raw files.  We don't parse it here yet, so omit bpp.
+        cook.media.properties = Some(serde_json::json!({
+            "width": sw,
+            "height": sh,
+            "lossless": 1,
+        }));
+    } else if thumb_w > 0 && thumb_h > 0 {
         cook.media.properties = Some(image_properties(thumb_w, thumb_h, color_type));
     }
     cook.render_image = Some(img);
@@ -924,6 +933,31 @@ fn tiff_ifd0_orientation(bytes: &[u8], little: bool) -> u16 {
     1
 }
 
+/// Read IFD0 `ImageWidth` (0x0100) and `ImageLength` (0x0101) from a TIFF
+/// header.  Returns `None` when the header is too short or the tags are
+/// absent — raw files should fall back to embedded-preview dimensions.
+fn tiff_ifd0_dimensions(bytes: &[u8], little: bool) -> Option<(u32, u32)> {
+    let ifd0_off = read_u32(bytes, 4, little)? as usize;
+    let count     = read_u16(bytes, ifd0_off, little)? as usize;
+    let mut width:  Option<u32> = None;
+    let mut height: Option<u32> = None;
+    for i in 0..count {
+        let entry = ifd0_off + 2 + i * 12;
+        if entry + 12 > bytes.len() { break; }
+        let Some(tag) = read_u16(bytes, entry, little) else { break };
+        let val = read_u32(bytes, entry + 8, little);
+        match tag {
+            0x0100 => width  = val,
+            0x0101 => height = val,
+            _ => {}
+        }
+    }
+    match (width, height) {
+        (Some(w), Some(h)) if w > 0 && h > 0 => Some((w, h)),
+        _ => None,
+    }
+}
+
 /// Return `(little_endian, ifd1_file_offset)` by reading IFD0's next-IFD
 /// pointer from the TIFF header.
 ///
@@ -1187,9 +1221,11 @@ fn image_properties(src_w: u32, src_h: u32, color_type: image::ColorType) -> ser
     };
     let bits_per_pixel = per_channel * color_channels;
     serde_json::json!({
-        "width_pixels":  src_w,
-        "height_pixels": src_h,
-        "bits_per_pixel": bits_per_pixel,
+        "width":  src_w,
+        "height": src_h,
+        "bpp": bits_per_pixel,
+        "alpha": color_type.has_alpha() as i32,
+        "lossless": 0,
     })
 }
 

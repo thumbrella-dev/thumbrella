@@ -83,15 +83,22 @@ fn use_colour() -> bool {
     )
 }
 
+/// Public helper so other modules can check colour state without
+/// reaching into the `Ux` singleton.
+pub fn colour_enabled() -> bool {
+    use_colour()
+}
+
 struct Colour;
 
 impl Colour {
-    fn green(s: &str)  -> String { if use_colour() { format!("\x1b[32m{s}\x1b[0m") } else { s.to_string() } }
-    fn red(s: &str)    -> String { if use_colour() { format!("\x1b[31m{s}\x1b[0m") } else { s.to_string() } }
-    fn yellow(s: &str) -> String { if use_colour() { format!("\x1b[33m{s}\x1b[0m") } else { s.to_string() } }
-    fn cyan(s: &str)   -> String { if use_colour() { format!("\x1b[36m{s}\x1b[0m") } else { s.to_string() } }
-    fn dim(s: &str)    -> String { if use_colour() { format!("\x1b[2m{s}\x1b[0m") } else { s.to_string() } }
-    fn bold(s: &str)   -> String { if use_colour() { format!("\x1b[1m{s}\x1b[0m") } else { s.to_string() } }
+    fn green(s: &str)   -> String { if use_colour() { format!("\x1b[32m{s}\x1b[0m") } else { s.to_string() } }
+    fn red(s: &str)     -> String { if use_colour() { format!("\x1b[31m{s}\x1b[0m") } else { s.to_string() } }
+    fn yellow(s: &str)  -> String { if use_colour() { format!("\x1b[33m{s}\x1b[0m") } else { s.to_string() } }
+    fn cyan(s: &str)    -> String { if use_colour() { format!("\x1b[36m{s}\x1b[0m") } else { s.to_string() } }
+    fn magenta(s: &str) -> String { if use_colour() { format!("\x1b[35m{s}\x1b[0m") } else { s.to_string() } }
+    fn dim(s: &str)     -> String { if use_colour() { format!("\x1b[2m{s}\x1b[0m") } else { s.to_string() } }
+    fn bold(s: &str)    -> String { if use_colour() { format!("\x1b[1m{s}\x1b[0m") } else { s.to_string() } }
 }
 
 // ── Global UX instance ────────────────────────────────────────────────────────
@@ -129,12 +136,33 @@ pub struct Ux {
 impl Ux {
     // ── Public colour helpers (for CLI output) ────────────────────────────────
 
-    pub fn green(&self, s: &str) -> String  { Colour::green(s) }
-    pub fn red(&self, s: &str) -> String    { Colour::red(s) }
-    pub fn yellow(&self, s: &str) -> String { Colour::yellow(s) }
-    pub fn cyan(&self, s: &str) -> String   { Colour::cyan(s) }
-    pub fn dim(&self, s: &str) -> String    { Colour::dim(s) }
-    pub fn bold(&self, s: &str) -> String   { Colour::bold(s) }
+    pub fn green(&self, s: &str) -> String   { Colour::green(s) }
+    pub fn red(&self, s: &str) -> String     { Colour::red(s) }
+    pub fn yellow(&self, s: &str) -> String  { Colour::yellow(s) }
+    pub fn cyan(&self, s: &str) -> String    { Colour::cyan(s) }
+    pub fn magenta(&self, s: &str) -> String { Colour::magenta(s) }
+    pub fn dim(&self, s: &str) -> String     { Colour::dim(s) }
+    pub fn bold(&self, s: &str) -> String    { Colour::bold(s) }
+
+    /// Pretty-print and colour a JSON string for terminal display.
+    ///
+    /// When `NO_COLOR` is set, returns the input unchanged (no ANSI
+    /// escapes).  Otherwise applies:
+    ///
+    /// | token          | colour   |
+    /// |----------------|----------|
+    /// | keys           | cyan     |
+    /// | string values  | green    |
+    /// | numbers        | yellow   |
+    /// | `true`/`false` | magenta  |
+    /// | `null`         | dim red  |
+    /// | punctuation    | default  |
+    pub fn colorize_json(&self, json: &str) -> String {
+        if !use_colour() {
+            return json.to_string();
+        }
+        colorize_json_str(json)
+    }
 
     // ── Startup banner ────────────────────────────────────────────────────────
 
@@ -145,7 +173,6 @@ impl Ux {
         port: u16,
         version: &str,
         handshake: Option<&str>,
-        cache_configured: bool,
         tier2_configured: bool,
         tier3_configured: bool,
     ) {
@@ -175,14 +202,6 @@ impl Ux {
 
         // ── Hints ─────────────────────────────────────────────────────────
         if self.style.show_hints() {
-            if !cache_configured {
-                lines.push(format!(
-                    "  # hint: {} {} {}",
-                    "No cache configured.",
-                    Colour::dim("Set"),
-                    Colour::bold("TBR_CACHE=sqlite:/var/lib/thumbrella/cache.db"),
-                ));
-            }
             if !tier2_configured && !tier3_configured && !crate::check::has_builtin_renderer() {
                 lines.push(format!(
                     "  # hint: {} {} {}",
@@ -380,4 +399,81 @@ impl Ux {
         );
         let _ = io::stdout().write_all(line.as_bytes());
     }
+}
+
+// ── JSON colouriser ───────────────────────────────────────────────────────────
+
+/// Colour a pretty-printed JSON string for terminal display.
+///
+/// Simple character-level state machine that tracks whether the cursor
+/// is inside a string (and whether it's a key or value), a number, or
+/// a bareword (`true`/`false`/`null`).
+fn colorize_json_str(json: &str) -> String {
+    let mut out = String::with_capacity(json.len() + 1024);
+    let chars: Vec<char> = json.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        let ch = chars[i];
+
+        match ch {
+            '"' => {
+                // Determine whether this string is a key or a value.
+                // A key is a string followed (after optional whitespace) by ':'.
+                let start = i;
+                i += 1; // skip opening quote
+                while i < len && chars[i] != '"' {
+                    if chars[i] == '\\' { i += 1; } // skip escaped char
+                    i += 1;
+                }
+                i += 1; // skip closing quote
+
+                let token: String = chars[start..i].iter().collect();
+
+                // Peek ahead for ':' (key) vs ',' or '}' or end (value).
+                let mut j = i;
+                while j < len && (chars[j] == ' ' || chars[j] == '\n' || chars[j] == '\r' || chars[j] == '\t') {
+                    j += 1;
+                }
+                if j < len && chars[j] == ':' {
+                    out.push_str(&Colour::cyan(&token));
+                } else {
+                    out.push_str(&Colour::green(&token));
+                }
+            }
+
+            '-' | '0'..='9' => {
+                // Number — read until non-number char.
+                let start = i;
+                while i < len && matches!(chars[i], '-' | '+' | '0'..='9' | '.' | 'e' | 'E') {
+                    i += 1;
+                }
+                let token: String = chars[start..i].iter().collect();
+                out.push_str(&Colour::yellow(&token));
+            }
+
+            't' if json[i..].starts_with("true") => {
+                out.push_str(&Colour::magenta("true"));
+                i += 4;
+            }
+
+            'f' if json[i..].starts_with("false") => {
+                out.push_str(&Colour::magenta("false"));
+                i += 5;
+            }
+
+            'n' if json[i..].starts_with("null") => {
+                out.push_str(&Colour::dim("null"));
+                i += 4;
+            }
+
+            _ => {
+                out.push(ch);
+                i += 1;
+            }
+        }
+    }
+
+    out
 }
