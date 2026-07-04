@@ -308,11 +308,11 @@ pub fn decode_with_libav(
     // libav prints warnings and info messages directly to stderr through
     // its internal logging — not through our eprintln! calls.
     let ff_log_level = if matches!(std::env::var("TBR_LOG").as_deref(), Ok("full")) {
-        ffmpeg_sys_next::AV_LOG_INFO
+        AV_LOG_INFO
     } else {
-        ffmpeg_sys_next::AV_LOG_QUIET
+        AV_LOG_QUIET
     };
-    unsafe { ffmpeg_sys_next::av_log_set_level(ff_log_level); }
+    unsafe { av_log_set_level(ff_log_level); }
 
     // Box the reader state so it has a stable address.  All libav callbacks
     // hold a raw pointer into this box; the box must outlive every libav
@@ -717,7 +717,7 @@ unsafe fn decode_inner(
     *sws_ctx = sws_getContext(
         frame_w, frame_h, frame_fmt,
         out_w,   out_h,   dst_fmt,
-        SWS_BILINEAR as c_int,
+        SwsFlags::SWS_FAST_BILINEAR as c_int,
         ptr::null_mut(),
         ptr::null_mut(),
         ptr::null(),

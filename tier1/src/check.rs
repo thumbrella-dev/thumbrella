@@ -439,7 +439,7 @@ pub fn collect(cfg: &crate::config::AppConfig) -> CheckReport {
 ///
 /// Called by backend `check()` implementations in [`crate::cache`] and
 /// [`crate::tracelog`].
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", unix))]
 pub(crate) fn check_file_path(path: &str) -> FileCheck {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -469,11 +469,34 @@ pub(crate) fn check_file_path(path: &str) -> FileCheck {
     FileCheck { path: path.to_string(), writable, note, free_bytes, sqlite_validation: None }
 }
 
+/// On Windows, the file-backed path check is simplified — no `access(2)`
+/// or `statvfs(2)` available.  We just verify the parent directory exists.
+#[cfg(all(feature = "native", not(unix)))]
+pub(crate) fn check_file_path(path: &str) -> FileCheck {
+    use std::path::Path;
+
+    let target = Path::new(path);
+
+    let (writable, note) = if target.exists() {
+        (target.metadata().map(|m| !m.permissions().readonly()).unwrap_or(false), None)
+    } else {
+        let parent = target.parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        (
+            parent.exists(),
+            Some("file does not exist; parent directory checked".to_string()),
+        )
+    };
+
+    FileCheck { path: path.to_string(), writable, note, free_bytes: None, sqlite_validation: None }
+}
+
 /// Query free bytes on the filesystem hosting `path` via `statvfs(2)`.
 ///
 /// Walks up to the nearest existing ancestor when the path itself does not
 /// exist yet, so a configured-but-not-yet-created file path still works.
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", unix))]
 pub(crate) fn free_bytes_at(path: &std::path::Path) -> Option<u64> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;

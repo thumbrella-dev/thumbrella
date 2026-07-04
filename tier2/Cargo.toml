@@ -10,7 +10,14 @@ path = "src/bin/tier2.rs"
 required-features = ["native"]
 
 [features]
-default = ["native"]
+default = ["native", "ffmpeg-from-source"]
+# ffmpeg-from-source: builds FFmpeg 8.1 from source (git clone, ./configure, make).
+# First build is ~10-15 min; cached after.  Requires gcc + make (standard on
+# Linux/macOS; on Windows install Git for Windows or see error message).
+#
+# To use your own FFmpeg instead, set FFMPEG_DIR and disable this feature:
+#   FFMPEG_DIR=/path/to/ffmpeg cargo build -p tier2 --no-default-features -F native
+ffmpeg-from-source = ["ffmpeg-sys-next/build", "thumbrella-build-check/ffmpeg-from-source"]
 
 native = [
     "dep:tokio",
@@ -21,20 +28,22 @@ native = [
 
 [dependencies]
 tier1 = { path = "../tier1" }
+thumbrella-build-check = { path = "../crates/build-check" }
 
 # ── FFmpeg bindings ────────────────────────────────────────────────────────────
-# `static` links against the .a files in $FFMPEG_DIR (set in .cargo/config.toml).
-# We disable default features (avdevice, avfilter, postproc) because our custom
-# static FFmpeg build only includes avcodec, avformat, avutil, swscale, swresample.
-# ffmpeg-next is the safe high-level wrapper; ffmpeg-sys-next is the raw FFI layer.
-ffmpeg-sys-next = { version = "7.1.3", default-features = false, features = [
+# Default: `ffmpeg-from-source` feature builds FFmpeg from source (git clone +
+# ./configure + make) into OUT_DIR.  First build is ~10-15 min; cached after.
+#
+# To use external FFmpeg, set FFMPEG_DIR and disable defaults:
+#   FFMPEG_DIR=/path/to/ffmpeg cargo build -p tier2 --no-default-features -F native
+ffmpeg-sys-next = { version = "8.1", default-features = false, features = [
     "static",
     "avcodec",
     "avformat",
     "swscale",
     "swresample",
 ] }
-ffmpeg-next = { version = "7.1.0", default-features = false, features = [
+ffmpeg-next = { version = "8.1", default-features = false, features = [
     "codec",
     "format",
     "software-resampling",

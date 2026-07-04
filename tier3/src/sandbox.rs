@@ -164,6 +164,9 @@ pub fn sandboxed_command(
 
 /// Apply sandbox restrictions via `pre_exec` (rlimits, capabilities).
 /// Used as fallback when bubblewrap is not available.
+///
+/// Only meaningful on Unix; no-op on Windows.
+#[cfg(unix)]
 pub fn apply(cmd: &mut Command, config: &SandboxConfig) {
     let config = config.clone();
     #[cfg(target_os = "linux")]
@@ -174,10 +177,11 @@ pub fn apply(cmd: &mut Command, config: &SandboxConfig) {
     unsafe {
         cmd.pre_exec(move || sandbox_macos(&config));
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        let _ = config;
-    }
+}
+
+#[cfg(not(unix))]
+pub fn apply(_cmd: &mut Command, _config: &SandboxConfig) {
+    // Windows: pre_exec and rlimits are not available.  No-op.
 }
 
 // ── Linux implementation ──────────────────────────────────────────────────────
@@ -259,6 +263,7 @@ fn sandbox_macos(config: &SandboxConfig) -> std::io::Result<()> {
 
 // ── rlimit helper ─────────────────────────────────────────────────────────────
 
+#[cfg(unix)]
 fn set_rlimit(resource: u32, soft: u64, hard: u64) -> std::io::Result<()> {
     let rlim = libc::rlimit {
         rlim_cur: soft,

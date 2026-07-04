@@ -505,16 +505,26 @@ fn try_executable_at(path: &str, _desc: &str) -> (bool, Option<String>, Option<S
 
     match std::fs::metadata(&resolved) {
         Ok(meta) if meta.is_file() => {
-            // Check if any execute bit is set (owner, group, or other).
-            use std::os::unix::fs::PermissionsExt;
-            let mode = meta.permissions().mode();
-            if mode & 0o111 != 0 {
-                (true, Some(format!("executable at {}", resolved.display())), None)
-            } else {
-                (false, None, Some(format!("{}: not executable (mode {mode:o})", resolved.display())))
-            }
+            check_file_executable(meta, &resolved)
         }
         Ok(_) => (false, None, Some(format!("{}: not a regular file", resolved.display()))),
         Err(e) => (false, None, Some(format!("{}: {e}", resolved.display()))),
     }
+}
+
+#[cfg(unix)]
+fn check_file_executable(meta: std::fs::Metadata, resolved: &std::path::Path) -> (bool, Option<String>, Option<String>) {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = meta.permissions().mode();
+    if mode & 0o111 != 0 {
+        (true, Some(format!("executable at {}", resolved.display())), None)
+    } else {
+        (false, None, Some(format!("{}: not executable (mode {mode:o})", resolved.display())))
+    }
+}
+
+#[cfg(not(unix))]
+fn check_file_executable(_meta: std::fs::Metadata, resolved: &std::path::Path) -> (bool, Option<String>, Option<String>) {
+    // Windows: just check file exists — execute bits don't apply.
+    (true, Some(format!("found at {}", resolved.display())), None)
 }

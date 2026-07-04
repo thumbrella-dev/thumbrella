@@ -1,0 +1,9 @@
+[package]
+name = "thumbrella-build-check"
+version.workspace = true
+edition.workspace = true
+description = "Pre-flight build checks for Thumbrella"
+publish = false
+
+[features]
+ffmpeg-from-source = []

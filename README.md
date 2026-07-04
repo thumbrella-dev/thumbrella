@@ -44,6 +44,22 @@ links and suggestions.
 
 ## Build
 
+To build windows
+
+```
+git clone --depth 1 https://github.com/microsoft/vcpkg.git target/vcpkg
+.\target\vcpkg\bootstrap-vcpkg.bat
+.\target\vcpkg\vcpkg.exe install ffmpeg[core,avcodec,avformat,swscale,swresample]:x64-windows-static
+```
+
+Or set FFMPEG_DIR
+
+on linux
+
+```
+cargo build -p tier2 --features ffmpeg-build
+```
+
 To build and run from source a Rust build and C++ environment is needed.
 The full build must link to ffmpeg 7.1. This can be controlled by setting
 `FFMPEG_LIB_DIR` at build time.
