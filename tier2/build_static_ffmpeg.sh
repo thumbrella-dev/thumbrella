@@ -3,50 +3,27 @@
 #
 # Goals
 #  - Software decoders and demuxers (no hardware acceleration)
-#  - Static archives (.a) installed to /opt/ffmpeg-static
+#  - Static archives (.a) installed to target/ffmpeg-static (or --prefix DIR)
 #  - No network protocols (we handle HTTP via reqwest)
 #  - No encoders, muxers, filters, or device APIs
+#  - No external library dependencies (LGPL clean, no dav1d)
 #
-# External libraries (also built statically):
-#  - dav1d  — fast AV1 decoder (used for AVIF still images)
+# Usage:
+#   ./build_static_ffmpeg.sh                 # → target/ffmpeg-static
+#   ./build_static_ffmpeg.sh --prefix ~/ffmpeg  # custom dir
 #
-# After this script runs, set FFMPEG_DIR=/opt/ffmpeg-static and build tier2
-# with the `static` Cargo feature on ffmpeg-sys-next.
+# After this script runs:
+#   export FFMPEG_DIR=target/ffmpeg-static   # (or your --prefix)
+#   cargo build -r -p tier3
 
 set -euo pipefail
 
-PREFIX=/opt/ffmpeg-static
-BUILD_DEPS_DIR=/tmp/thumbrella-deps
-
-# ── dav1d (AV1 decoder) ─────────────────────────────────────────────────────
-DAV1D_VERSION=1.5.1
-
-echo "[ffmpeg-static] Building dav1d ${DAV1D_VERSION}..."
-mkdir -p "${BUILD_DEPS_DIR}"
-
-if [[ ! -f "${BUILD_DEPS_DIR}/dav1d-${DAV1D_VERSION}/build/src/libdav1d.a" ]]; then
-    rm -rf "${BUILD_DEPS_DIR}/dav1d-${DAV1D_VERSION}"
-    curl -L --retry 3 -o "${BUILD_DEPS_DIR}/dav1d.tar.gz" \
-        "https://code.videolan.org/videolan/dav1d/-/archive/${DAV1D_VERSION}/dav1d-${DAV1D_VERSION}.tar.gz"
-    tar -xzf "${BUILD_DEPS_DIR}/dav1d.tar.gz" -C "${BUILD_DEPS_DIR}"
-    cd "${BUILD_DEPS_DIR}/dav1d-${DAV1D_VERSION}"
-    meson setup build \
-        --prefix="${PREFIX}" \
-        --libdir=lib \
-        --default-library=static \
-        -Denable_tools=false \
-        -Denable_tests=false \
-        -Denable_examples=false \
-        --buildtype=release
-    ninja -C build
-    ninja -C build install
-    echo "[ffmpeg-static] dav1d installed."
-else
-    echo "[ffmpeg-static] dav1d already built — skipping."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PREFIX="${PROJECT_ROOT}/target/ffmpeg-static"
+if [[ "${1:-}" == "--prefix" ]]; then
+    PREFIX="${2:?missing --prefix argument}"
 fi
-
-# Ensure FFmpeg's configure can find dav1d via pkg-config.
-export PKG_CONFIG_PATH="${PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 
 # ── FFmpeg ──────────────────────────────────────────────────────────────────
 FFMPEG_VERSION=7.1
@@ -88,11 +65,10 @@ echo "[ffmpeg-static] Configuring..."
     --enable-zlib \
     --enable-bzlib \
     --enable-lzma \
-    --enable-libdav1d \
     \
     --disable-autodetect \
     \
-    --enable-decoder=h264,hevc,vp8,vp9,libdav1d,mpeg1video,mpeg2video,mpeg4,\
+    --enable-decoder=h264,hevc,vp8,vp9,av1,mpeg1video,mpeg2video,mpeg4,\
 msmpeg4v1,msmpeg4v2,msmpeg4v3,h263,h263p,flv1,wmv1,wmv2,wmv3,vc1,\
 mjpeg,jpeg2000,png,gif,bmp,tiff,webp,theora,dirac,dnxhd,dnxhr,prores,\
 hap,svq1,svq3,rv10,rv20,rv30,rv40,indeo2,indeo3,indeo4,indeo5,\
@@ -101,8 +77,6 @@ dds,psd,\
 rawvideo,pam,pbm,pgm,pgmyuv,ppm,sunrast,targa,xbm,\
 aac,ac3,eac3,mp2,mp3,opus,vorbis,flac,pcm_s16le,pcm_s16be,pcm_s24le,\
 pcm_s32le,pcm_u8,pcm_alaw,pcm_mulaw,pcm_f32le \
-    \
-    --disable-decoder=av1 \
     \
     --enable-demuxer=mov,mp4,m4v,matroska,webm,avi,mpegts,mpegps,mpegvideo,\
 flv,asf,rm,rmvb,ogg,mxf,gxf,lxf,yuv4mpegpipe,rawvideo,\

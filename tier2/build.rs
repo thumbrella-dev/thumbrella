@@ -1,53 +1,99 @@
 // build.rs for tier2
 //
-// FFmpeg's static .a files have unresolved references to a small set of
-// system libraries.  Our custom build (tier2/build_static_ffmpeg.sh)
-// was configured with --enable-zlib --enable-bzlib --enable-lzma, so
-// we need to supply those archives.
+// Platform-conditional FFmpeg linking.
 //
-// Static: z (zlib), bz2, lzma — all have .a files on the build host.
-// Dynamic (glibc, accepted): m, atomic — thin stubs, not worth a fat .a.
+// If FFMPEG_DIR is set (env var or .cargo/config.toml), we link against that
+// directory — static or shared, as long as it's the right version.
 //
-// The libstdc++ dependency does NOT appear in our minimal FFmpeg build
-// because we disabled everything that pulls in C++ code.
+// If FFMPEG_DIR is not set, we default to target/ffmpeg-static under the
+// workspace root and print clear instructions when the directory is missing.
 //
-// Note: ffmpeg-sys-next's own build.rs already emits:
-//   cargo:rustc-link-lib=static=avcodec
-//   cargo:rustc-link-lib=static=avformat
-//   cargo:rustc-link-lib=static=avutil
-//   cargo:rustc-link-lib=static=swscale
-//   cargo:rustc-link-lib=static=swresample
-// So we only need to add the transitive deps here.
+// ── Getting FFmpeg ──────────────────────────────────────────────────────
+// Linux:   ./tier2/build_static_ffmpeg.sh           (source build → static .a)
+// Windows: powershell -File tier2/download_ffmpeg_windows.ps1   (BtbN prebuilt)
+// macOS:   Set FFMPEG_DIR to a static FFmpeg install (no auto-build yet)
 
 fn main() {
-    // Only re-run this script if build.rs itself changes.  Without this,
-    // Cargo re-runs on every file-system event — a problem on Windows-hosted
-    // bind mounts where NTFS timestamps fire spuriously and trigger relinks.
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=FFMPEG_DIR");
 
-    // Tell the linker where to find the system static archives.
-    // On Debian/Ubuntu amd64 these land in /usr/lib/x86_64-linux-gnu.
-    println!("cargo:rustc-link-search=native=/usr/lib/x86_64-linux-gnu");
+    let ffmpeg_dir = std::env::var("FFMPEG_DIR")
+        .unwrap_or_else(|_| default_ffmpeg_dir());
+    let lib_dir = format!("{ffmpeg_dir}/lib");
 
-    // Also search /opt/ffmpeg-static/lib for external static libs (dav1d, etc.).
-    println!("cargo:rustc-link-search=native=/opt/ffmpeg-static/lib");
-
-    // dav1d (AV1/AVIF decoder) — optional.  Only linked when the static
-    // archive exists (built by tier2/build_static_ffmpeg.sh alongside FFmpeg).
-    let has_dav1d = std::path::Path::new("/opt/ffmpeg-static/lib/libdav1d.a").exists();
-    if has_dav1d {
-        println!("cargo:rustc-link-lib=static=dav1d");
+    // Verify the directory exists.  Don't auto-build — that's fragile inside
+    // build.rs.  Instead, print clear instructions.
+    if !std::path::Path::new(&lib_dir).exists() {
+        eprintln!();
+        eprintln!("  FFmpeg not found.");
+        eprintln!("  Looking for: {lib_dir}");
+        eprintln!();
+        eprintln!("  ── Linux ──");
+        eprintln!("  Build a minimal static FFmpeg:");
+        eprintln!("    ./tier2/build_static_ffmpeg.sh");
+        eprintln!();
+        eprintln!("  ── Windows ──");
+        eprintln!("  Download prebuilt MSVC FFmpeg:");
+        eprintln!("    powershell -File tier2/download_ffmpeg_windows.ps1");
+        eprintln!();
+        eprintln!("  ── macOS ──");
+        eprintln!("  Install via Homebrew, then set FFMPEG_DIR:");
+        eprintln!("    brew install ffmpeg");
+        eprintln!("    export FFMPEG_DIR=/opt/homebrew/opt/ffmpeg");
+        eprintln!();
+        eprintln!("  Or set FFMPEG_DIR to your own installation.");
+        eprintln!();
+        std::process::exit(1);
     }
-    println!("cargo:rustc-link-lib=static=z");
-    println!("cargo:rustc-link-lib=static=bz2");
-    println!("cargo:rustc-link-lib=static=lzma");
 
-    // These must appear *after* the FFmpeg archives on the linker command
-    // line so GNU ld can resolve the forward references from libavcodec etc.
-    // into these compression libraries.
+    // ffmpeg-sys-next links avcodec/avformat/avutil/swscale/swresample.
+    // We add the transitive system deps per platform.
 
-    // These are glibc-provided; keep dynamic (statically linking glibc is
-    // fragile and ties the binary to the build host's glibc version).
-    println!("cargo:rustc-link-lib=dylib=m");
-    println!("cargo:rustc-link-lib=dylib=atomic");
+    #[cfg(target_os = "linux")]
+    {
+        println!("cargo:rustc-link-search=native=/usr/lib/x86_64-linux-gnu");
+        println!("cargo:rustc-link-search=native={lib_dir}");
+        println!("cargo:rustc-link-lib=static=z");
+        println!("cargo:rustc-link-lib=static=bz2");
+        println!("cargo:rustc-link-lib=static=lzma");
+        println!("cargo:rustc-link-lib=dylib=m");
+        println!("cargo:rustc-link-lib=dylib=atomic");
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        println!("cargo:rustc-link-search=native={lib_dir}");
+        // MSVC system libs commonly referenced by FFmpeg static builds.
+        println!("cargo:rustc-link-lib=bcrypt");
+        println!("cargo:rustc-link-lib=secur32");
+        println!("cargo:rustc-link-lib=ws2_32");
+        println!("cargo:rustc-link-lib=user32");
+        println!("cargo:rustc-link-lib=ole32");
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        println!("cargo:rustc-link-search=native={lib_dir}");
+        println!("cargo:rustc-link-lib=static=bz2");
+        println!("cargo:rustc-link-lib=static=lzma");
+        println!("cargo:rustc-link-lib=static=z");
+        println!("cargo:rustc-link-lib=static=iconv");
+        println!("cargo:rustc-link-lib=framework=AudioToolbox");
+        println!("cargo:rustc-link-lib=framework=CoreFoundation");
+        println!("cargo:rustc-link-lib=framework=VideoToolbox");
+        println!("cargo:rustc-link-lib=framework=CoreMedia");
+        println!("cargo:rustc-link-lib=framework=CoreVideo");
+    }
+}
+
+fn default_ffmpeg_dir() -> String {
+    let manifest = std::env::var("CARGO_MANIFEST_DIR")
+        .unwrap_or_else(|_| ".".to_string());
+    // tier2/ → go up one level for workspace root → target/ffmpeg-static
+    let root = std::path::Path::new(&manifest)
+        .parent()
+        .unwrap_or(std::path::Path::new("."));
+    root.join("target").join("ffmpeg-static")
+        .to_string_lossy()
+        .to_string()
 }

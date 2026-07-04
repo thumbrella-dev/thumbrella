@@ -12,12 +12,3 @@ rustflags = [
     "-C", "link-arg=-fuse-ld=lld",
     "-C", "link-arg=-Wl,-u,ff_image_psd_pipe_demuxer",
 ]
-
-# ── FFmpeg static build ────────────────────────────────────────────────────────
-# Points ffmpeg-sys-next at our custom minimal static FFmpeg installed by
-# scripts/build-ffmpeg-static.sh.  The `static` feature on ffmpeg-sys-next
-# causes it to emit -lstatic=avcodec etc.  The tier2 build.rs adds the
-# transitive deps (z, bz2, lzma) that our slim FFmpeg build requires.
-[env]
-FFMPEG_DIR = "/opt/ffmpeg-static"
-
