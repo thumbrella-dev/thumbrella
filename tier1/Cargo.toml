@@ -2,7 +2,7 @@
 name = "tier1"
 version.workspace = true
 edition.workspace = true
-description = "Thumbrella Tier 1 — lightweight thumbnail and file-inspection service"
+description = "Minimal tier 1 Thumbrella server"
 
 [lib]
 name = "tier1"

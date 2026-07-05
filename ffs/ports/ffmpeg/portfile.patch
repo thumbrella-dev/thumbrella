@@ -1,0 +1,49 @@
+--- a/ports/ffmpeg/portfile.cmake
++++ b/ports/ffmpeg/portfile.cmake
+@@ -46,7 +46,7 @@ elseif(VCPKG_TARGET_IS_LINUX)
+ elseif(VCPKG_TARGET_IS_UWP)
+     string(APPEND OPTIONS " --target-os=win32 --enable-w32threads --enable-d3d11va --enable-d3d12va --enable-mediafoundation")
+ elseif(VCPKG_TARGET_IS_WINDOWS)
+-    string(APPEND OPTIONS " --target-os=win32 --enable-w32threads --enable-d3d11va --enable-d3d12va --enable-dxva2 --enable-mediafoundation")
++    string(APPEND OPTIONS " --target-os=win32 --enable-w32threads")
+ elseif(VCPKG_TARGET_IS_OSX)
+     string(APPEND OPTIONS " --target-os=darwin --enable-appkit --enable-avfoundation --enable-coreimage --enable-audiotoolbox --enable-videotoolbox")
+ elseif(VCPKG_TARGET_IS_IOS)
+@@ -609,6 +609,37 @@ else()
+     set(WITH_RUBBERBAND OFF)
+ endif()
+ 
++# ---- Selective build: disable everything, then enable only what thumbrella needs ----
++string(APPEND OPTIONS " --disable-everything --disable-network")
++
++# Decoders
++string(APPEND OPTIONS " --enable-decoder=h264,hevc,vp8,vp9,av1,mpeg1video,mpeg2video,mpeg4")
++string(APPEND OPTIONS " --enable-decoder=msmpeg4v1,msmpeg4v2,msmpeg4v3,h263,h263p,flv1,wmv1,wmv2,wmv3,vc1")
++string(APPEND OPTIONS " --enable-decoder=mjpeg,jpeg2000,png,gif,bmp,tiff,webp,theora,dirac,dnxhd,dnxhr,prores")
++string(APPEND OPTIONS " --enable-decoder=hap,svq1,svq3,rv10,rv20,rv30,rv40,indeo2,indeo3,indeo4,indeo5")
++string(APPEND OPTIONS " --enable-decoder=huffyuv,ffv1,utvideo,zlib,qtrle,rpza,smc,8bps,aura,aura2")
++string(APPEND OPTIONS " --enable-decoder=dds,psd")
++string(APPEND OPTIONS " --enable-decoder=rawvideo,pam,pbm,pgm,pgmyuv,ppm,sunrast,targa,xbm")
++string(APPEND OPTIONS " --enable-decoder=aac,ac3,eac3,mp2,mp3,opus,vorbis,flac")
++string(APPEND OPTIONS " --enable-decoder=pcm_s16le,pcm_s16be,pcm_s24le,pcm_s32le,pcm_u8,pcm_alaw,pcm_mulaw,pcm_f32le")
++
++# Demuxers
++string(APPEND OPTIONS " --enable-demuxer=mov,mp4,m4v,matroska,webm,avi,mpegts,mpegps,mpegvideo")
++string(APPEND OPTIONS " --enable-demuxer=flv,asf,rm,rmvb,ogg,mxf,gxf,lxf,yuv4mpegpipe,rawvideo")
++string(APPEND OPTIONS " --enable-demuxer=image2,gif,image_jpeg_pipe,image_png_pipe,image_bmp_pipe,image_tiff_pipe,ico")
++string(APPEND OPTIONS " --enable-demuxer=image_webp_pipe,image_psd_pipe,dds,image_j2k_pipe")
++string(APPEND OPTIONS " --enable-demuxer=ape,aiff,au,wav,mp3,aac,flac,ogg")
++
++# Parsers
++string(APPEND OPTIONS " --enable-parser=h264,hevc,vp8,vp9,av1,mpeg4video,mpeg4,mpegaudio")
++string(APPEND OPTIONS " --enable-parser=aac,flac,opus,vorbis,png,gif")
++
++# Bitstream filters
++string(APPEND OPTIONS " --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,mpeg4_unpack_bframes")
++
++# Protocols
++string(APPEND OPTIONS " --enable-protocol=file,pipe,data")
++
+ set(OPTIONS_CROSS "--enable-cross-compile")
+ 
+ # ffmpeg needs --cross-prefix option to use appropriate tools for cross-compiling.

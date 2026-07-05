@@ -44,32 +44,40 @@ links and suggestions.
 
 ## Build
 
-To build windows
+## Build
 
+### Windows
+
+A bundled static FFmpeg is built automatically.  The only prerequisites are
+Git, Rust, and MSVC Build Tools (all installable via `winget`).
+
+```powershell
+# 1. Install prerequisites (one-time)
+winget install Git.Git Rustlang.Rustup Microsoft.VisualStudio.2022.BuildTools `
+    --override "--wait --add Microsoft.VisualStudio.Workload.VCTools"
+rustup default stable
+
+# 2. Build FFmpeg and the server
+git clone https://github.com/thumbrella-dev/thumbrella
+cd thumbrella
+powershell -File ffs/build-windows.ps1    # ~10 min, one-time
+cargo build --release
 ```
-git clone --depth 1 https://github.com/microsoft/vcpkg.git target/vcpkg
-.\target\vcpkg\bootstrap-vcpkg.bat
-.\target\vcpkg\vcpkg.exe install ffmpeg[core,avcodec,avformat,swscale,swresample]:x64-windows-static
-```
 
-Or set FFMPEG_DIR
+### Linux / macOS
 
-on linux
-
-```
-cargo build -p tier2 --features ffmpeg-build
-```
-
-To build and run from source a Rust build and C++ environment is needed.
-The full build must link to ffmpeg 7.1. This can be controlled by setting
-`FFMPEG_LIB_DIR` at build time.
+Set `FFMPEG_DIR` to a pre-built FFmpeg tree, or use the bundled script:
 
 ```bash
-cargo run serve
+./ffs/build-linux.sh                     # builds a static FFmpeg
+export FFMPEG_DIR=target/ffmpeg-static
+cargo build --release
 ```
 
-An included script at tier2/build_static_ffmpeg.sh will build a static ffmpeg
-with no external dependencies. 
+### Custom FFmpeg
+
+Set `FFMPEG_DIR` to the root of any FFmpeg build tree.  The build will
+auto-detect it and skip the bundled build.  Works on all platforms.
 
 ## Project Structure
 

@@ -11,7 +11,7 @@ edition = "2024"
 [workspace]
 resolver = "2"
 default-members = ["tier3"]
-members = ["crates/build-check", "tier1", "tier2", "tier3"]
+members = ["ffs/ffs-check", "ffs/ffs-build", "tier1", "tier2", "tier3"]
 
 
 [profile.dev]

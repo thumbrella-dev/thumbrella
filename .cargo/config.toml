@@ -1,10 +1,8 @@
 # Cargo configuration for thumbrella project
-#
-# FFmpeg is built from source by default (ffmpeg-from-source feature in tier2).
-# First build clones FFmpeg 8.1 and compiles it (~10-15 min, cached after).
-#
-# To use your own FFmpeg instead:
-#   FFMPEG_DIR=/path/to/ffmpeg cargo build -p tier2 --no-default-features -F native
+
+[target.x86_64-pc-windows-msvc]
+# Match Rust CRT with vcpkg's x64-windows-static (/MT).
+rustflags = ["-C", "target-feature=+crt-static"]
 
 [target.x86_64-unknown-linux-gnu]
 linker = "gcc"
@@ -12,9 +10,16 @@ linker = "gcc"
 # GNU ld's single-pass archive scanning fails to pull in img2dec.o from
 # libavformat.a (which registers the webp_pipe demuxer) because allformats.o
 # is included first and then references ff_image_webp_pipe_demuxer — GNU ld
-# won't re-scan the same archive.  LLD handles circular archive deps correctly.
+# won't re-scan the same archive. LLD handles circular archive deps correctly.
 rustflags = [
     "-C", "link-arg=-B/usr/local/rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/bin/gcc-ld",
     "-C", "link-arg=-fuse-ld=lld",
     "-C", "link-arg=-Wl,-u,ff_image_psd_pipe_demuxer",
 ]
+
+
+# To allow Windows to work with the internal buildable ffmpeg,
+# this environment variable must be set to the build path. This
+# gets enabled by the `ffs/build-windows.ps1` when needed.
+[env]
+# VCPKG_ROOT = "workspace/thumbrella/ffs/vcpkg"

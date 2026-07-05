@@ -2,65 +2,21 @@
 name = "tier2"
 version.workspace = true
 edition.workspace = true
-description = "Thumbrella Tier 2 — extended thumbnail service"
-
-[[bin]]
-name = "tier2"
-path = "src/bin/tier2.rs"
-required-features = ["native"]
-
-[features]
-default = ["native", "ffmpeg-from-source"]
-# ffmpeg-from-source: builds FFmpeg 8.1 from source (git clone, ./configure, make).
-# First build is ~10-15 min; cached after.  Requires gcc + make (standard on
-# Linux/macOS; on Windows install Git for Windows or see error message).
-#
-# To use your own FFmpeg instead, set FFMPEG_DIR and disable this feature:
-#   FFMPEG_DIR=/path/to/ffmpeg cargo build -p tier2 --no-default-features -F native
-ffmpeg-from-source = ["ffmpeg-sys-next/build", "thumbrella-build-check/ffmpeg-from-source"]
-
-native = [
-    "dep:tokio",
-    "dep:tracing-subscriber",
-    "dep:clap",
-    "dep:reqwest",
-]
+description = "Static tier 2 Thumbrella server"
 
 [dependencies]
 tier1 = { path = "../tier1" }
-thumbrella-build-check = { path = "../crates/build-check" }
+ffs-build = { path = "../ffs/ffs-build" }
 
-# ── FFmpeg bindings ────────────────────────────────────────────────────────────
-# Default: `ffmpeg-from-source` feature builds FFmpeg from source (git clone +
-# ./configure + make) into OUT_DIR.  First build is ~10-15 min; cached after.
-#
-# To use external FFmpeg, set FFMPEG_DIR and disable defaults:
-#   FFMPEG_DIR=/path/to/ffmpeg cargo build -p tier2 --no-default-features -F native
-ffmpeg-sys-next = { version = "8.1", default-features = false, features = [
-    "static",
-    "avcodec",
-    "avformat",
-    "swscale",
-    "swresample",
-] }
-ffmpeg-next = { version = "8.1", default-features = false, features = [
-    "codec",
-    "format",
-    "software-resampling",
-    "software-scaling",
-] }
+# FFmpeg — tier2 codes against these directly; ffs-build handles linking
+ffmpeg-next = "8"
+ffmpeg-sys-next = "8"
 
-# ── Decode / metadata ───────────────────────────────────────────────────────────
 serde_json   = "1"
 image        = { version = "0.25", default-features = false, features = ["webp"] }
 jxl-oxide    = "0.12"
 resvg        = "0.47"
-# jpeg-decoder: listed directly to access scale() for DCT-level power-of-two
-# downscaling — avoids decoding the full-resolution JPEG pixel buffer when
-# only a small thumbnail is needed.
+# jpeg-decoder: has specialized dct power-of-2 scaler
 jpeg-decoder = { version = "0.3", default-features = false }
-# ── Native-only ────────────────────────────────────────────────────────────────
-tokio              = { version = "1", features = ["full"],           optional = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter"],  optional = true }
-clap               = { version = "4",  features = ["derive"],        optional = true }
-reqwest            = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"], optional = true }
+tokio   = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
