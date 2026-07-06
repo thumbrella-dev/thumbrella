@@ -44,12 +44,30 @@ links and suggestions.
 
 ## Build
 
-## Build
+Thumbrella provides tools to build a bundled static FFmpeg, or use an external
+build.  The build scripts write `.cargo/ffs.toml` (gitignored) with the
+install paths; `cargo build` picks them up automatically — no environment
+variables needed.
+
+### Linux / macOS
+
+```bash
+# 1. Install prerequisites (one-time)
+#    - Rust: https://rustup.rs
+#    - Build tools: gcc, make, curl, pkg-config
+#      (Ubuntu/Debian: apt install build-essential curl pkg-config)
+
+# 2. Build FFmpeg and the server
+git clone https://github.com/thumbrella-dev/thumbrella
+cd thumbrella
+bash ffs/build-linux.sh                   # ~10 min, one-time
+cargo build --release -p tier3
+```
 
 ### Windows
 
-A bundled static FFmpeg is built automatically.  The only prerequisites are
-Git, Rust, and MSVC Build Tools (all installable via `winget`).
+A bundled static FFmpeg is built automatically via vcpkg.  The only
+prerequisites are Git, Rust, and MSVC Build Tools.
 
 ```powershell
 # 1. Install prerequisites (one-time)
@@ -60,24 +78,9 @@ rustup default stable
 # 2. Build FFmpeg and the server
 git clone https://github.com/thumbrella-dev/thumbrella
 cd thumbrella
-powershell -File ffs/build-windows.ps1    # ~10 min, one-time
-cargo build --release
+powershell -File ffs/build-windows.ps1    # ~15 min, one-time
+cargo build --release -p tier3
 ```
-
-### Linux / macOS
-
-Set `FFMPEG_DIR` to a pre-built FFmpeg tree, or use the bundled script:
-
-```bash
-./ffs/build-linux.sh                     # builds a static FFmpeg
-export FFMPEG_DIR=target/ffmpeg-static
-cargo build --release
-```
-
-### Custom FFmpeg
-
-Set `FFMPEG_DIR` to the root of any FFmpeg build tree.  The build will
-auto-detect it and skip the bundled build.  Works on all platforms.
 
 ## Project Structure
 

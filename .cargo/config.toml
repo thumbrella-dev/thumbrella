@@ -1,4 +1,7 @@
-# Cargo configuration for thumbrella project
+include = [
+    # Generated if user runs any of the static ffmpeg build scripts
+    { path = "ffs.toml", optional = true },
+]
 
 [target.x86_64-pc-windows-msvc]
 # Match Rust CRT with vcpkg's x64-windows-static (/MT).
@@ -17,9 +20,3 @@ rustflags = [
     "-C", "link-arg=-Wl,-u,ff_image_psd_pipe_demuxer",
 ]
 
-
-# To allow Windows to work with the internal buildable ffmpeg,
-# this environment variable must be set to the build path. This
-# gets enabled by the `ffs/build-windows.ps1` when needed.
-[env]
-# VCPKG_ROOT = "workspace/thumbrella/ffs/vcpkg"
