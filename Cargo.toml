@@ -5,7 +5,7 @@ description = "Fast thumbnail server for online media"
 keywords = ["thumbnail", "media"]
 categories = ["web-programming::http-server", "multimedia", "graphics", "rendering"]
 license = "Apache-2.0"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 
 [workspace]
