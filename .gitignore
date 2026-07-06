@@ -1,3 +1,5 @@
 target/
 docker/thumbrella
 ffs/vcpkg/
+ffs/build/
+.cargo/ffs.toml
