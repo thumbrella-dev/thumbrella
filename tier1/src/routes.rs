@@ -142,6 +142,42 @@ pub async fn health(
     Json(json!({ "status": "ok", "thumbrella": major }))
 }
 
+// ── Landing page ─────────────────────────────────────────────────────────────
+
+/// Returns a landing page at `/` with embedded logo and favicon.
+///
+/// When `TBR_HANDSHAKE` is set the thumbnail demo links are hidden (they
+/// would fail without the handshake header) and the connect string includes
+/// a placeholder for the secret.
+pub async fn landing(State(runtime): State<Arc<Runtime>>) -> Response {
+    let template = include_str!("landing.html");
+
+    let has_handshake = runtime.handshake.is_some();
+
+    let body_class = if has_handshake { "has-handshake" } else { "" };
+    let connect = if has_handshake {
+        "TBR_CONNECT=http://localhost:3114,**handshake*****"
+    } else {
+        "TBR_CONNECT=http://localhost:3114"
+    };
+    let cli_prefix = if has_handshake {
+        "TBR_CONNECT=http://localhost:3114,**handshake***** "
+    } else {
+        "TBR_CONNECT=http://localhost:3114 "
+    };
+
+    let body = template
+        .replace("{{BODY_CLASS}}", body_class)
+        .replace("{{CONNECT}}", connect)
+        .replace("{{CLI_PREFIX}}", cli_prefix);
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .body(Body::from(body))
+        .unwrap()
+}
+
 // ── Fallback — 404 for unknown routes ─────────────────────────────────────────
 
 /// Catch-all for unmatched routes.  Logs the request and returns 404.

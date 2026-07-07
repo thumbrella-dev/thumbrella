@@ -3,6 +3,11 @@ name = "tier3"
 version.workspace = true
 edition.workspace = true
 description = "Featured tier 3 Thumbrella server"
+autobins = false
+
+[[bin]]
+name = "thumbrella"
+path = "src/bin/tier3.rs"
 
 [dependencies]
 tier1 = { path = "../tier1" }

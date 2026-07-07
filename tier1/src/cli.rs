@@ -179,18 +179,22 @@ async fn run_server(runtime: Arc<Runtime>) {
     let ux = crate::ux::get();
 
     let app = Router::new()
-        .route("/health", get(routes::health))
-        .route("/placeholder/{kind}", get(routes::placeholder))
-        .route("/thumb.jpeg", get(routes::thumb))
-        .route("/thumb", get(routes::thumb))
-        .route("/handoff", post(routes::handoff))
-        .route("/batch", post(routes::batch))
-        .fallback(routes::not_found)
+        .route("/", get(routes::landing))
+        .merge(
+            Router::new()
+                .route("/health", get(routes::health))
+                .route("/placeholder/{kind}", get(routes::placeholder))
+                .route("/thumb.jpeg", get(routes::thumb))
+                .route("/thumb", get(routes::thumb))
+                .route("/handoff", post(routes::handoff))
+                .route("/batch", post(routes::batch))
+                .fallback(routes::not_found)
+                .layer(axum::middleware::from_fn_with_state(
+                    runtime.clone(),
+                    routes::require_handshake,
+                ))
+        )
         .layer(tower_http::cors::CorsLayer::permissive())
-        .layer(axum::middleware::from_fn_with_state(
-            runtime.clone(),
-            routes::require_handshake,
-        ))
         .with_state(runtime);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
