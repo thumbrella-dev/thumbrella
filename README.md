@@ -64,6 +64,28 @@ bash ffs/build-linux.sh                   # ~10 min, one-time
 cargo build --release -p tier3
 ```
 
+### Release packaging
+
+When you are ready to assemble a GitHub draft release from already-built
+Linux and Windows binaries, use:
+
+```bash
+scripts/release.sh --tag v0.5.1 --open
+```
+
+The script expects both git trees to be clean, exactly on the release tag,
+and to already contain `target/release/thumbrella` plus
+`target/release/thumbrella.exe`. It packages:
+
+It uses `release/README.release.md` for the archive README when that file is
+present, and falls back to the project `README.md` otherwise. If a working tree
+is slightly dirty during prerelease work, the script will warn and continue.
+
+- `thumbrella-v0.5.1-linux-x86_64.tar.gz`
+- `thumbrella-v0.5.1-windows-x86_64.zip`
+
+Each archive includes the binary, `README.md`, and `LICENSE`.
+
 ### Windows
 
 A bundled static FFmpeg is built automatically via vcpkg.  The only
