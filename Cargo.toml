@@ -8,6 +8,21 @@ license = "Apache-2.0"
 version = "0.5.1"
 edition = "2024"
 
+[package]
+name = "thumbrella"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+# Distinct lib name avoids a doc-output collision with tier3's `thumbrella` bin.
+[lib]
+name = "thumbrella_doc"
+
 [workspace]
 resolver = "2"
 default-members = ["tier3"]

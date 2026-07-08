@@ -3,6 +3,7 @@ name = "tier1"
 version.workspace = true
 edition.workspace = true
 description = "Minimal tier 1 Thumbrella server"
+publish = false
 
 [lib]
 name = "tier1"

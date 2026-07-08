@@ -3,15 +3,18 @@
 //! # Key types
 //!
 //! - [`ResultStatus`] — high-level per-item outcome returned to the client.
-//! - [`ThumbResult`] — the per-item result materialised from [`ThumbCook`] at
-//!   the end of processing.  This is what gets serialised to the client, stored
-//!   in cache, and returned verbatim on a cache hit.
-//! - [`ThumbTrace`] — internal per-item telemetry materialised from [`ThumbCook`]
-//!   and emitted to the configured log sink.  Never sent to clients.
+//! - [`ThumbResult`] — the per-item result materialised from
+//!   [`crate::cook::ThumbCook`] at the end of processing.  This is what gets
+//!   serialised to the client, stored in cache, and returned verbatim on a
+//!   cache hit.
+//! - [`ThumbTrace`] — internal per-item telemetry materialised from
+//!   [`crate::cook::ThumbCook`] and emitted to the configured log sink.  Never
+//!   sent to clients.
 //! - [`CallRecord`] / [`CallResponse`] — per-HTTP-request envelope types.
 //!
 //! Neither `ThumbResult` nor `ThumbTrace` exist during thumbnail processing —
-//! they are output views constructed once at the end of [`ThumbCook::run`].
+//! they are output views constructed once at the end of
+//! [`crate::cook::ThumbCook::run`].
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -180,8 +183,9 @@ impl Default for ThumbResult {
 
 /// Internal per-item telemetry — the server's private record of work done.
 ///
-/// Materialised from [`ThumbCook`] by [`ThumbCook::to_trace`] at the end of
-/// processing.  Never sent to clients.  Written to the configured log sink.
+/// Materialised from [`crate::cook::ThumbCook`] by
+/// [`crate::cook::ThumbCook::to_trace`] at the end of processing.  Never sent
+/// to clients.  Written to the configured log sink.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ThumbTrace {
     // ── Request identity ──────────────────────────────────────────────────────
@@ -189,9 +193,9 @@ pub struct ThumbTrace {
     pub timestamp:    String,
     /// Outcome of the job, mirroring [`ThumbResult::status`].
     pub status:       ResultStatus,
-    /// Media kind detected (mirrors [`ThumbResult::kind`]).
+    /// Media kind detected (mirrors [`ThumbMedia::kind`]).
     pub kind:         Option<FileKind>,
-    /// File extension detected (mirrors [`ThumbResult::extension`]).
+    /// File extension detected (mirrors [`ThumbMedia::extension`]).
     pub extension:    Option<String>,
 
     // ── Source identity ───────────────────────────────────────────────────────

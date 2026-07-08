@@ -103,7 +103,7 @@ impl Validation {
 
 /// Write-access and disk-space snapshot for a file-backed backend path.
 ///
-/// Produced by [`check_file_path`] during [`collect`].  Never sent to clients.
+/// Produced by `check_file_path` during [`collect`].  Never sent to clients.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileCheck {
     /// The path as written in the DSN (may be relative).

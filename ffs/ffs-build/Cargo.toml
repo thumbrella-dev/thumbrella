@@ -4,6 +4,7 @@ description = "Bundled static FFmpeg — version info and build metadata"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # ffs-check validates the build environment before ffmpeg-sys-next runs.
 # It's a build-dependency so its build.rs fires first.

@@ -28,7 +28,7 @@
 //! # Subprocess rendering
 //!
 //! When a subprocess backend is used, the source media is staged to a
-//! [`ScratchArena`](crate::scratch::ScratchArena) as a temp file, the
+//! [`ScratchArena`] as a temp file, the
 //! CLI tool is invoked with that path, and the output image is read back
 //! from the arena.  All temp files are cleaned up when the arena is dropped.
 

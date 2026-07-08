@@ -3,6 +3,7 @@ name = "tier3"
 version.workspace = true
 edition.workspace = true
 description = "Featured tier 3 Thumbrella server"
+publish = false
 autobins = false
 
 [[bin]]

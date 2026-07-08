@@ -7,9 +7,10 @@
 //!
 //! # One cook, all the way through
 //!
-//! There is exactly one [`ThumbCook`] per request.  The renderer receives it
-//! as `&mut dyn RenderCook` — a thin trait-object view that erases the `S`
-//! (HttpStream) type parameter and exposes only what the renderer needs:
+//! There is exactly one [`crate::cook::ThumbCook`] per request.  The renderer
+//! receives it as `&mut dyn RenderCook` — a thin trait-object view that erases
+//! the `S` (HttpStream) type parameter and exposes only what the renderer
+//! needs:
 //! - **Read** — `take_reader()` moves the buffer out as a
 //!   `Box<dyn ReadSeek + Send>` while preserving random-access page-cache
 //!   semantics.  libav's `AVIOContext` callbacks call into this synchronously,

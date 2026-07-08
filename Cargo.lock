@@ -2595,6 +2595,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "thumbrella"
+version = "0.5.1"
+
+[[package]]
 name = "tier1"
 version = "0.5.1"
 dependencies = [

@@ -3,6 +3,7 @@ name = "tier2"
 version.workspace = true
 edition.workspace = true
 description = "Static tier 2 Thumbrella server"
+publish = false
 
 [dependencies]
 tier1 = { path = "../tier1" }

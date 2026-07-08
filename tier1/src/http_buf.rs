@@ -131,7 +131,7 @@ pub trait HttpStream: Sized {
 
 // ── StreamBound — platform-sensitive trait bound ──────────────────────────────
 
-/// Sealed bound used by [`ThumbCookGeneric::run`].
+/// Sealed bound used by [`crate::ThumbCookGeneric::run`].
 ///
 /// On native the in-process renderer requires `Send + 'static` so it can
 /// coerce `&mut ThumbCook<S>` to `&mut dyn RenderCook`.  On wasm32 /

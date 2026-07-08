@@ -17,15 +17,15 @@ back, every time.
 
 ## Quickstart
 
-Start a container with docker and an exposed port. The default output is designed to be a
-helpful starting point for operating a Thumbnail server.
+Start a container with Docker and an exposed port. The default output is designed to be a
+helpful starting point for operating a thumbnail server.
 
 
 ```bash
 docker run --rm -it -p 3114:3114 thumbrella/server
 ```
 
-See the [Server Documentation](https://thumbrella.dev/docs/server/) 
+See the [Server Documentation](https://thumbrella.dev/docs/server/)
 for more commands and configurations.
 
 ## Formats
@@ -43,13 +43,13 @@ thumbnail.
 
 ## Alternates
 
-The Thumbrella server also is available from several sources. Use the most
+The Thumbrella server is also available from several sources. Use the most
 convenient starting point for your environment and tools. The server
 executable is available on Windows and Linux. 
-(MacOS still in development)
+(macOS still in development)
 
-- Npx `npx thumbrella/server serve`
-- Uvs `uvx thumbrella-server serve`
+- npx `npx thumbrella/server serve`
+- uvx `uvx thumbrella-server serve`
 
 Or fetch the Rust source and build your own server.
 - `git clone https://github.com/thumbrella-dev/thumbrella && cd thumbrella`
@@ -67,7 +67,8 @@ payment info required.
 The server can easily be used with direct http calls.
 
 ```bash
-curl http://localhost:3114/thumb.jpeg?url=https://demo.thumbrella.dev/media/math-guide.odt --output thumb.jpeg
+curl --output thumb.jpeg \
+http://localhost:3114/thumb.jpeg?url=https://demo.thumbrella.dev/media/math-guide.odt
 ```
 
 The best and easiest functionality comes from using one of the 
