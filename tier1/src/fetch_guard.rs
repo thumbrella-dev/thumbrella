@@ -41,10 +41,7 @@ impl UrlFailureCache {
         );
 
         #[cfg(not(feature = "native"))]
-        return Self(
-            Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
-            ttl_secs,
-        );
+        return Self(Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())), ttl_secs);
     }
 
     /// Returns `(status, message)` if this URL is within the failure window.
@@ -55,9 +52,11 @@ impl UrlFailureCache {
         #[cfg(not(feature = "native"))]
         {
             let now = Instant::now();
-            self.0.read().get(url).and_then(|((s, m), exp)| {
-                if now < *exp { Some((*s, m.clone())) } else { None }
-            })
+            self.0.read().get(url).and_then(
+                |((s, m), exp)| {
+                    if now < *exp { Some((*s, m.clone())) } else { None }
+                },
+            )
         }
     }
 
@@ -90,9 +89,7 @@ pub struct OriginBackoffCache(moka::future::Cache<String, (u16, Instant)>);
 
 #[cfg(not(feature = "native"))]
 #[derive(Clone)]
-pub struct OriginBackoffCache(
-    Arc<parking_lot::RwLock<std::collections::HashMap<String, (u16, Instant)>>>,
-);
+pub struct OriginBackoffCache(Arc<parking_lot::RwLock<std::collections::HashMap<String, (u16, Instant)>>>);
 
 impl OriginBackoffCache {
     #[cfg_attr(not(feature = "native"), allow(unused_variables))]
@@ -106,9 +103,7 @@ impl OriginBackoffCache {
         );
 
         #[cfg(not(feature = "native"))]
-        return Self(Arc::new(parking_lot::RwLock::new(
-            std::collections::HashMap::new(),
-        )));
+        return Self(Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())));
     }
 
     /// Returns the HTTP status code that triggered the back-off, if still active.
@@ -122,9 +117,10 @@ impl OriginBackoffCache {
         #[cfg(not(feature = "native"))]
         {
             let now = Instant::now();
-            self.0.read().get(origin).and_then(|(s, exp)| {
-                if now < *exp { Some(*s) } else { None }
-            })
+            self.0
+                .read()
+                .get(origin)
+                .and_then(|(s, exp)| if now < *exp { Some(*s) } else { None })
         }
     }
 
@@ -145,5 +141,3 @@ impl OriginBackoffCache {
         }
     }
 }
-
-

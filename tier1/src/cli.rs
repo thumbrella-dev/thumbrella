@@ -159,21 +159,26 @@ where
     };
 
     match cli.command {
-        Command::Serve                                   => run_server(runtime.unwrap()).await,
-        Command::Thumb { urls, cache, json, raw } => run_thumb(urls, cache, json, raw, runtime.unwrap()).await,
-        Command::Check { json }                          => run_check(json, tier).await,
-        Command::Formats { json }                        => run_formats(json),
-        Command::Version                                 => run_version(tier),
-        Command::License                                 => run_license(),
+        Command::Serve => run_server(runtime.unwrap()).await,
+        Command::Thumb { urls, cache, json, raw } => {
+            run_thumb(urls, cache, json, raw, runtime.unwrap()).await
+        }
+        Command::Check { json } => run_check(json, tier).await,
+        Command::Formats { json } => run_formats(json),
+        Command::Version => run_version(tier),
+        Command::License => run_license(),
     }
 }
 
 // ── serve ─────────────────────────────────────────────────────────────────────
 
 async fn run_server(runtime: Arc<Runtime>) {
-    use axum::{Router, routing::{get, post}};
-    use std::net::SocketAddr;
     use crate::{config::AppConfig, routes};
+    use axum::{
+        Router,
+        routing::{get, post},
+    };
+    use std::net::SocketAddr;
 
     let cfg = AppConfig::from_env();
     let ux = crate::ux::get();
@@ -189,10 +194,7 @@ async fn run_server(runtime: Arc<Runtime>) {
                 .route("/handoff", post(routes::handoff))
                 .route("/batch", post(routes::batch))
                 .fallback(routes::not_found)
-                .layer(axum::middleware::from_fn_with_state(
-                    runtime.clone(),
-                    routes::require_handshake,
-                ))
+                .layer(axum::middleware::from_fn_with_state(runtime.clone(), routes::require_handshake)),
         )
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(runtime);
@@ -291,10 +293,10 @@ async fn shutdown_signal() {
     let show = ux.style.show_raw_logs();
 
     let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
-        if show { tracing::info!("received SIGINT, shutting down"); }
+        tokio::signal::ctrl_c().await.expect("failed to install Ctrl+C handler");
+        if show {
+            tracing::info!("received SIGINT, shutting down");
+        }
     };
 
     #[cfg(unix)]
@@ -303,7 +305,9 @@ async fn shutdown_signal() {
             .expect("failed to install SIGTERM handler")
             .recv()
             .await;
-        if show { tracing::info!("received SIGTERM, shutting down"); }
+        if show {
+            tracing::info!("received SIGTERM, shutting down");
+        }
     };
 
     #[cfg(not(unix))]
@@ -314,7 +318,9 @@ async fn shutdown_signal() {
         _ = terminate => {},
     }
 
-    if show { tracing::info!("shutdown signal received, draining connections"); }
+    if show {
+        tracing::info!("shutdown signal received, draining connections");
+    }
 }
 
 // ── thumb (CLI) ───────────────────────────────────────────────────────────────
@@ -325,10 +331,7 @@ async fn shutdown_signal() {
 /// returned unchanged.  Relative paths are resolved against the current
 /// working directory.
 pub fn promote_url(raw: &str) -> String {
-    if raw.starts_with("http://")
-        || raw.starts_with("https://")
-        || raw.starts_with("file://")
-    {
+    if raw.starts_with("http://") || raw.starts_with("https://") || raw.starts_with("file://") {
         return raw.to_string();
     }
     let path = std::path::Path::new(raw);
@@ -342,10 +345,16 @@ pub fn promote_url(raw: &str) -> String {
     format!("file://{}", abs.display())
 }
 
-async fn run_thumb(urls: Vec<String>, cache_str: Option<String>, json: bool, raw: bool, runtime: Arc<Runtime>) {
-    use futures::stream::{FuturesUnordered, StreamExt};
-    use crate::{ThumbCook, cook::InputSpec};
+async fn run_thumb(
+    urls: Vec<String>,
+    cache_str: Option<String>,
+    json: bool,
+    raw: bool,
+    runtime: Arc<Runtime>,
+) {
     use crate::source::CacheHints;
+    use crate::{ThumbCook, cook::InputSpec};
+    use futures::stream::{FuturesUnordered, StreamExt};
 
     let cache = cache_str.as_deref().and_then(CacheHints::decode);
 
@@ -353,7 +362,11 @@ async fn run_thumb(urls: Vec<String>, cache_str: Option<String>, json: bool, raw
     for raw in urls {
         let is_local = !raw.contains("://") || raw.starts_with("file://");
         let url = promote_url(&raw);
-        let input = InputSpec { url, cache: cache.clone(), allow_local: is_local };
+        let input = InputSpec {
+            url,
+            cache: cache.clone(),
+            allow_local: is_local,
+        };
         pool.push(ThumbCook::from_input(input, Arc::clone(&runtime)).run());
     }
 
@@ -375,9 +388,10 @@ async fn run_thumb(urls: Vec<String>, cache_str: Option<String>, json: bool, raw
                 if let Some(media) = value.get_mut("media") {
                     if let Some(thumb) = media.get("thumbnail").and_then(|v| v.as_str()) {
                         if thumb.len() > 200 {
-                            media["thumbnail"] = serde_json::Value::String(
-                                format!("<base64 jpeg data: {} bytes>", thumb.len())
-                            );
+                            media["thumbnail"] = serde_json::Value::String(format!(
+                                "<base64 jpeg data: {} bytes>",
+                                thumb.len()
+                            ));
                         }
                     }
                 }
@@ -403,23 +417,27 @@ pub fn print_thumb_items(results: &[crate::ThumbResult]) {
             continue;
         }
 
-        let http = result.http_status
-            .map(|s| format!("{s}"))
-            .unwrap_or_else(|| "---".into());
+        let http = result.http_status.map(|s| format!("{s}")).unwrap_or_else(|| "---".into());
 
-        let kind = result.media.as_ref()
-            .map(|m| serde_json::to_value(m.kind).ok()
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                .unwrap_or_default())
+        let kind = result
+            .media
+            .as_ref()
+            .map(|m| {
+                serde_json::to_value(m.kind)
+                    .ok()
+                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+                    .unwrap_or_default()
+            })
             .unwrap_or_default();
-        let ext = result.media.as_ref()
-            .map(|m| m.extension.as_str())
-            .unwrap_or("");
-        let file_size = result.media.as_ref()
-            .map(|m| fmt_bytes(m.file_size))
-            .unwrap_or_default();
-        let thumb_size = result.media.as_ref()
-            .and_then(|m| if m.thumbnail.is_empty() { None } else { Some(fmt_bytes(m.thumbnail.len() as u64)) });
+        let ext = result.media.as_ref().map(|m| m.extension.as_str()).unwrap_or("");
+        let file_size = result.media.as_ref().map(|m| fmt_bytes(m.file_size)).unwrap_or_default();
+        let thumb_size = result.media.as_ref().and_then(|m| {
+            if m.thumbnail.is_empty() {
+                None
+            } else {
+                Some(fmt_bytes(m.thumbnail.len() as u64))
+            }
+        });
 
         let type_col = if kind.is_empty() && ext.is_empty() {
             "unknown".to_string()
@@ -441,7 +459,9 @@ pub fn print_thumb_items(results: &[crate::ThumbResult]) {
             file_size
         };
 
-        let msg = result.message.as_deref()
+        let msg = result
+            .message
+            .as_deref()
             .filter(|m| !m.is_empty())
             .map(|m| format!("  -  {m}"))
             .unwrap_or_default();
@@ -464,7 +484,7 @@ pub fn print_thumb_items(results: &[crate::ThumbResult]) {
 // ── check ─────────────────────────────────────────────────────────────────────
 
 async fn run_check(json: bool, tier: u8) {
-    use crate::{config::AppConfig, check};
+    use crate::{check, config::AppConfig};
 
     let cfg = AppConfig::from_env();
     let mut report = check::collect(&cfg);
@@ -513,10 +533,10 @@ fn run_formats(json: bool) {
     let ux = crate::ux::get();
 
     // Determine tier availability for the availability column.
-    let tier2_available = cfg.tier2.url.is_some()
-        || crate::check::TIER2_BUILTIN.load(std::sync::atomic::Ordering::Acquire);
-    let tier3_available = cfg.tier3.url.is_some()
-        || crate::check::TIER3_BUILTIN.load(std::sync::atomic::Ordering::Acquire);
+    let tier2_available =
+        cfg.tier2.url.is_some() || crate::check::TIER2_BUILTIN.load(std::sync::atomic::Ordering::Acquire);
+    let tier3_available =
+        cfg.tier3.url.is_some() || crate::check::TIER3_BUILTIN.load(std::sync::atomic::Ordering::Acquire);
 
     // Group entries by FileKind, picking the lowest tier for each extension
     // (some extensions appear under multiple tiers).
@@ -555,32 +575,45 @@ fn run_formats(json: bool) {
             available: bool,
         }
 
-        let groups: Vec<KindGroup> = by_kind.iter().map(|(kind, exts)| {
-            let mut entries: Vec<ExtEntry> = exts.values().map(|e| {
-                let available = match e.tier {
-                    1 => true,
-                    2 => tier2_available,
-                    3 => tier3_available,
-                    _ => false,
-                };
-                ExtEntry {
-                    extension: e.extension.to_string(),
-                    label: e.label.to_string(),
-                    tier: e.tier,
-                    renderer: e.renderer.to_string(),
-                    shortcut: e.shortcut,
-                    available,
+        let groups: Vec<KindGroup> = by_kind
+            .iter()
+            .map(|(kind, exts)| {
+                let mut entries: Vec<ExtEntry> = exts
+                    .values()
+                    .map(|e| {
+                        let available = match e.tier {
+                            1 => true,
+                            2 => tier2_available,
+                            3 => tier3_available,
+                            _ => false,
+                        };
+                        ExtEntry {
+                            extension: e.extension.to_string(),
+                            label: e.label.to_string(),
+                            tier: e.tier,
+                            renderer: e.renderer.to_string(),
+                            shortcut: e.shortcut,
+                            available,
+                        }
+                    })
+                    .collect();
+                entries.sort_by(|a, b| a.extension.cmp(&b.extension));
+                KindGroup {
+                    kind: format!("{:?}", kind).to_lowercase(),
+                    extensions: entries,
                 }
-            }).collect();
-            entries.sort_by(|a, b| a.extension.cmp(&b.extension));
-            KindGroup { kind: format!("{:?}", kind).to_lowercase(), extensions: entries }
-        }).collect();
+            })
+            .collect();
 
-        println!("{}", serde_json::to_string_pretty(&FormatsOutput {
-            tier2_available,
-            tier3_available,
-            groups,
-        }).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&FormatsOutput {
+                tier2_available,
+                tier3_available,
+                groups,
+            })
+            .unwrap()
+        );
         return;
     }
 
@@ -588,9 +621,16 @@ fn run_formats(json: bool) {
     // Kind ordering: Image, Video, Audio, Vector, Document, Geometry,
     //                Archive, Text, Binary, Unknown
     let kind_order: &[FileKind] = &[
-        FileKind::Image, FileKind::Video, FileKind::Audio,
-        FileKind::Vector, FileKind::Document, FileKind::Geometry,
-        FileKind::Archive, FileKind::Text, FileKind::Binary, FileKind::Unknown,
+        FileKind::Image,
+        FileKind::Video,
+        FileKind::Audio,
+        FileKind::Vector,
+        FileKind::Document,
+        FileKind::Geometry,
+        FileKind::Archive,
+        FileKind::Text,
+        FileKind::Binary,
+        FileKind::Unknown,
     ];
 
     println!("Thumbrella — Supported Formats\n");
@@ -599,10 +639,13 @@ fn run_formats(json: bool) {
     let mut total_enabled: usize = 0;
 
     for &kind in kind_order {
-        let Some(exts) = by_kind.get(&kind) else { continue };
+        let Some(exts) = by_kind.get(&kind) else {
+            continue;
+        };
         let kind_name = format!("{:?}", kind);
         let count = exts.len();
-        println!("  {} {}",
+        println!(
+            "  {} {}",
             ux.bold(&kind_name),
             ux.dim(&format!("({count} {})", if count == 1 { "format" } else { "formats" })),
         );
@@ -616,25 +659,25 @@ fn run_formats(json: bool) {
                 1 => (ux.green(&tier_str), true),
                 2 if tier2_available => (ux.green(&tier_str), true),
                 2 => (ux.yellow(&format!("{tier_str} (unavailable)")), false),
-                3 if tier3_available && crate::dispatch::tier3_can_handle(e.extension) => (ux.green(&tier_str), true),
+                3 if tier3_available && crate::dispatch::tier3_can_handle(e.extension) => {
+                    (ux.green(&tier_str), true)
+                }
                 3 => (ux.yellow(&format!("{tier_str} (unavailable)")), false),
                 _ => (tier_str.to_string(), false),
             };
-            if enabled { total_enabled += 1; }
+            if enabled {
+                total_enabled += 1;
+            }
             total_defined += 1;
             let shortcut_mark = if e.shortcut { ux.dim(" [shortcut]") } else { String::new() };
-            println!("    {:<8}  {:<24}  {}{}",
-                e.extension,
-                e.label,
-                tier_col,
-                shortcut_mark,
-            );
+            println!("    {:<8}  {:<24}  {}{}", e.extension, e.label, tier_col, shortcut_mark,);
         }
         println!();
     }
 
     // Summary
-    println!("  {}  {} defined, {} enabled",
+    println!(
+        "  {}  {} defined, {} enabled",
         ux.bold("Summary:"),
         total_defined,
         ux.green(&total_enabled.to_string()),
@@ -644,12 +687,22 @@ fn run_formats(json: bool) {
     // Legend
     println!("  Legend:");
     println!("    {}  tier available and configured", ux.green("tier N"));
-    println!("    {}  tier not configured (format will use placeholder)", ux.yellow("tier N (unavailable)"));
-    println!("    {}  shortcut: tier 1 can extract embedded thumbnail without full decode", ux.dim("[shortcut]"));
+    println!(
+        "    {}  tier not configured (format will use placeholder)",
+        ux.yellow("tier N (unavailable)")
+    );
+    println!(
+        "    {}  shortcut: tier 1 can extract embedded thumbnail without full decode",
+        ux.dim("[shortcut]")
+    );
     println!();
     println!("  Tier 1 formats are always available.");
-    if !tier2_available { println!("  Tier 2 is NOT configured — set TBR_TIER2 to enable."); }
-    if !tier3_available { println!("  Tier 3 is NOT configured — set TBR_TIER3 to enable."); }
+    if !tier2_available {
+        println!("  Tier 2 is NOT configured — set TBR_TIER2 to enable.");
+    }
+    if !tier3_available {
+        println!("  Tier 3 is NOT configured — set TBR_TIER3 to enable.");
+    }
 }
 
 // ── version ───────────────────────────────────────────────────────────────────
@@ -667,15 +720,26 @@ fn run_license() {
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 pub fn fmt_bytes(n: u64) -> String {
-    if n >= 1_048_576 { format!("{:.1} MB", n as f64 / 1_048_576.0) }
-    else if n >= 1_024 { format!("{:.1} KB", n as f64 / 1_024.0) }
-    else { format!("{n} B") }
+    if n >= 1_048_576 {
+        format!("{:.1} MB", n as f64 / 1_048_576.0)
+    } else if n >= 1_024 {
+        format!("{:.1} KB", n as f64 / 1_024.0)
+    } else {
+        format!("{n} B")
+    }
 }
 
 pub fn fmt_secs(s: f64) -> String {
-    if s <= 0.0 { return "—".into(); }
-    if s >= 1.0 { format!("{s:.2} s") }
-    else if s >= 0.001 { format!("{:.1} ms", s * 1_000.0) }
-    else if s >= 0.000_001 { format!("{:.0} µs", s * 1_000_000.0) }
-    else { format!("{:.0} ns", s * 1_000_000_000.0) }
+    if s <= 0.0 {
+        return "—".into();
+    }
+    if s >= 1.0 {
+        format!("{s:.2} s")
+    } else if s >= 0.001 {
+        format!("{:.1} ms", s * 1_000.0)
+    } else if s >= 0.000_001 {
+        format!("{:.0} µs", s * 1_000_000.0)
+    } else {
+        format!("{:.0} ns", s * 1_000_000_000.0)
+    }
 }

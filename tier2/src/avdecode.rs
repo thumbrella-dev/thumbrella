@@ -37,14 +37,14 @@ use tier1::ReadSeek;
 // that must be reachable via av_find_input_format() needs an explicit
 // read_volatile reference.  All these symbols live in img2dec.o.
 unsafe extern "C" {
-    static ff_image_webp_pipe_demuxer:  u8;
-    static ff_image_png_pipe_demuxer:   u8;
-    static ff_image_jpeg_pipe_demuxer:  u8;
-    static ff_image_bmp_pipe_demuxer:   u8;
-    static ff_image_tiff_pipe_demuxer:  u8;
-    static ff_image_psd_pipe_demuxer:   u8;
+    static ff_image_webp_pipe_demuxer: u8;
+    static ff_image_png_pipe_demuxer: u8;
+    static ff_image_jpeg_pipe_demuxer: u8;
+    static ff_image_bmp_pipe_demuxer: u8;
+    static ff_image_tiff_pipe_demuxer: u8;
+    static ff_image_psd_pipe_demuxer: u8;
     // ico demuxer lives in icodeac.o
-    static ff_ico_demuxer:              u8;
+    static ff_ico_demuxer: u8;
 }
 
 // ── ReaderState — type-erased I/O state for AVIO callbacks ───────────────────
@@ -92,10 +92,10 @@ macro_rules! tbr_debug {
 /// Angles that are not a multiple of 90 are treated as 0 (no rotation).
 fn apply_rotation(img: DynamicImage, clockwise_degrees: i32) -> DynamicImage {
     match clockwise_degrees.rem_euclid(360) {
-        90  => img.rotate90(),
+        90 => img.rotate90(),
         180 => img.rotate180(),
         270 => img.rotate270(),
-        _   => img,
+        _ => img,
     }
 }
 
@@ -191,14 +191,22 @@ unsafe extern "C" fn avio_seek_cb(opaque: *mut c_void, offset: i64, whence: c_in
     state.last_seek_offset = offset;
     state.last_seek_whence = whence;
     match whence {
-        SEEK_SET => state.reader.seek(SeekFrom::Start(offset as u64)).map(|p| p as i64).unwrap_or_else(|_| {
-            state.seek_errors += 1;
-            -1
-        }),
-        SEEK_CUR => state.reader.seek(SeekFrom::Current(offset)).map(|p| p as i64).unwrap_or_else(|_| {
-            state.seek_errors += 1;
-            -1
-        }),
+        SEEK_SET => state
+            .reader
+            .seek(SeekFrom::Start(offset as u64))
+            .map(|p| p as i64)
+            .unwrap_or_else(|_| {
+                state.seek_errors += 1;
+                -1
+            }),
+        SEEK_CUR => state
+            .reader
+            .seek(SeekFrom::Current(offset))
+            .map(|p| p as i64)
+            .unwrap_or_else(|_| {
+                state.seek_errors += 1;
+                -1
+            }),
         SEEK_END => state.reader.seek(SeekFrom::End(offset)).map(|p| p as i64).unwrap_or_else(|_| {
             state.seek_errors += 1;
             -1
@@ -235,14 +243,14 @@ unsafe fn free_avio_ctx(ctx: &mut *mut AVIOContext) {
 /// without a filename).
 fn ext_to_libav_format(ext: &str) -> Option<&'static str> {
     match ext {
-        "jpeg" | "jpg"          => Some("jpeg_pipe"),
-        "png"                   => Some("png_pipe"),
-        "bmp"                   => Some("bmp_pipe"),
-        "gif"                   => Some("gif"),
-        "tiff" | "tif"          => Some("tiff_pipe"),
-        "ico"                   => Some("ico"),
-        "webp"                  => Some("webp_pipe"),
-        _                       => None,
+        "jpeg" | "jpg" => Some("jpeg_pipe"),
+        "png" => Some("png_pipe"),
+        "bmp" => Some("bmp_pipe"),
+        "gif" => Some("gif"),
+        "tiff" | "tif" => Some("tiff_pipe"),
+        "ico" => Some("ico"),
+        "webp" => Some("webp_pipe"),
+        _ => None,
     }
 }
 
@@ -272,7 +280,9 @@ pub fn decode_with_libav(
     rotation_hint: i32,
     seek_secs: Option<f64>,
 ) -> (Option<RenderOutput>, u64) {
-    tbr_debug!("[avdecode] decode_with_libav: content_length={content_length:?}, ext_hint={ext_hint:?}, rotation_hint={rotation_hint}, seek_secs={seek_secs:?}");
+    tbr_debug!(
+        "[avdecode] decode_with_libav: content_length={content_length:?}, ext_hint={ext_hint:?}, rotation_hint={rotation_hint}, seek_secs={seek_secs:?}"
+    );
 
     // Force-retain all pipe demuxer structs from img2dec.o and icodeac.o.
     // LLD's --gc-sections removes data sections that aren't reachable from a
@@ -291,12 +301,10 @@ pub fn decode_with_libav(
     // av_find_input_format returns NULL when the name is unknown — that's fine,
     // the NULL will be passed to avformat_open_input (no hint = auto-probe).
     let fmt_hint_ptr: *mut AVInputFormat = unsafe {
-        ext_hint.as_deref()
+        ext_hint
+            .as_deref()
             .and_then(ext_to_libav_format)
-            .and_then(|name| {
-                CString::new(name).ok()
-                    .map(|cs| av_find_input_format(cs.as_ptr()) as *mut _)
-            })
+            .and_then(|name| CString::new(name).ok().map(|cs| av_find_input_format(cs.as_ptr()) as *mut _))
             .unwrap_or(ptr::null_mut())
     };
 
@@ -312,7 +320,9 @@ pub fn decode_with_libav(
     } else {
         AV_LOG_QUIET
     };
-    unsafe { av_log_set_level(ff_log_level); }
+    unsafe {
+        av_log_set_level(ff_log_level);
+    }
 
     // Box the reader state so it has a stable address.  All libav callbacks
     // hold a raw pointer into this box; the box must outlive every libav
@@ -334,12 +344,12 @@ pub fn decode_with_libav(
 
     // Null-initialise all resource handles so the cleanup block can safely
     // check and free only the ones that were actually allocated.
-    let mut avio_ctx:  *mut AVIOContext    = ptr::null_mut();
-    let mut fmt_ctx:   *mut AVFormatContext = ptr::null_mut();
-    let mut codec_ctx: *mut AVCodecContext  = ptr::null_mut();
-    let mut packet:    *mut AVPacket        = ptr::null_mut();
-    let mut frame:     *mut AVFrame         = ptr::null_mut();
-    let mut sws_ctx:   *mut SwsContext      = ptr::null_mut();
+    let mut avio_ctx: *mut AVIOContext = ptr::null_mut();
+    let mut fmt_ctx: *mut AVFormatContext = ptr::null_mut();
+    let mut codec_ctx: *mut AVCodecContext = ptr::null_mut();
+    let mut packet: *mut AVPacket = ptr::null_mut();
+    let mut frame: *mut AVFrame = ptr::null_mut();
+    let mut sws_ctx: *mut SwsContext = ptr::null_mut();
 
     // Limit probe reads for container formats.
     // HEIF-family: all codec parameters in the `meta` box at file start.
@@ -389,7 +399,8 @@ pub fn decode_with_libav(
         // set — free it ourselves.
         free_avio_ctx(&mut avio_ctx);
     }
-    tbr_debug!("[avdecode][avio] reads={} bytes={} short_reads={} eof_reads={} read_errors={} seeks={} seek_errors={} last_seek=(off={}, whence={})",
+    tbr_debug!(
+        "[avdecode][avio] reads={} bytes={} short_reads={} eof_reads={} read_errors={} seeks={} seek_errors={} last_seek=(off={}, whence={})",
         state.read_calls,
         state.read_bytes,
         state.read_short,
@@ -412,20 +423,20 @@ pub fn decode_with_libav(
 
 #[allow(clippy::too_many_arguments)]
 unsafe fn decode_inner(
-    opaque:        *mut c_void,
-    fmt_hint:      *mut AVInputFormat,
+    opaque: *mut c_void,
+    fmt_hint: *mut AVInputFormat,
     rotation_hint: i32,
-    seek_secs:     Option<f64>,
+    seek_secs: Option<f64>,
     // When Some(n): cap avformat_find_stream_info to n bytes.  HEIF/HEIC/AVIF
     // store all codec parameters in the meta box at the file start (<5 KB),
     // so a 128 KB ceiling avoids streaming the full multi-MB mdat block.
-    probe_limit:   Option<i64>,
-    avio_ctx:      &mut *mut AVIOContext,
-    fmt_ctx:       &mut *mut AVFormatContext,
-    codec_ctx:     &mut *mut AVCodecContext,
-    packet:        &mut *mut AVPacket,
-    frame:         &mut *mut AVFrame,
-    sws_ctx:       &mut *mut SwsContext,
+    probe_limit: Option<i64>,
+    avio_ctx: &mut *mut AVIOContext,
+    fmt_ctx: &mut *mut AVFormatContext,
+    codec_ctx: &mut *mut AVCodecContext,
+    packet: &mut *mut AVPacket,
+    frame: &mut *mut AVFrame,
+    sws_ctx: &mut *mut SwsContext,
 ) -> Option<RenderOutput> {
     const AVIO_BUF: usize = 65536;
 
@@ -456,7 +467,7 @@ unsafe fn decode_inner(
         tbr_debug!("[avdecode] FAIL: avformat_alloc_context returned null");
         return None;
     }
-    (**fmt_ctx).pb    = *avio_ctx;
+    (**fmt_ctx).pb = *avio_ctx;
     (**fmt_ctx).flags |= AVFMT_FLAG_CUSTOM_IO as i32;
     // Prevent MKV/WebM from reading the end-of-file Cues index.
     // We only need the first keyframe near the seek point.
@@ -504,8 +515,7 @@ unsafe fn decode_inner(
     tbr_debug!("[avdecode] {} stream(s) found", nb);
 
     // Count how many video streams share each (w, h).
-    let mut dim_freq: std::collections::HashMap<(i32, i32), usize> =
-        std::collections::HashMap::new();
+    let mut dim_freq: std::collections::HashMap<(i32, i32), usize> = std::collections::HashMap::new();
     for i in 0..nb {
         let st = *(**fmt_ctx).streams.add(i);
         if (*(*st).codecpar).codec_type == AVMediaType::AVMEDIA_TYPE_VIDEO {
@@ -525,8 +535,8 @@ unsafe fn decode_inner(
         if (*(*st).codecpar).codec_type == AVMediaType::AVMEDIA_TYPE_VIDEO {
             let w = (*(*st).codecpar).width;
             let h = (*(*st).codecpar).height;
-            let freq  = *dim_freq.get(&(w, h)).unwrap_or(&1);
-            let area  = w as i64 * h as i64;
+            let freq = *dim_freq.get(&(w, h)).unwrap_or(&1);
+            let area = w as i64 * h as i64;
             // Only promote as "standalone" when there is a clear dominant
             // repeated-size group (grid tiles); otherwise all streams compete
             // on area alone.
@@ -545,13 +555,12 @@ unsafe fn decode_inner(
     let (standalone_flag, best_area) = best_score;
     tbr_debug!("[avdecode] using stream {stream_idx} (area={best_area} standalone={standalone_flag})");
 
-
-    let stream    = *(**fmt_ctx).streams.add(stream_idx as usize);
-    let codecpar  = (*stream).codecpar;
-    let src_w     = (*codecpar).width;
-    let src_h     = (*codecpar).height;
+    let stream = *(**fmt_ctx).streams.add(stream_idx as usize);
+    let codecpar = (*stream).codecpar;
+    let src_w = (*codecpar).width;
+    let src_h = (*codecpar).height;
     let pix_fmt: AVPixelFormat = std::mem::transmute((*codecpar).format);
-    let codec_id  = (*codecpar).codec_id;
+    let codec_id = (*codecpar).codec_id;
     let (reported_w, reported_h) = tile_grid_dimensions(*fmt_ctx).unwrap_or((src_w, src_h));
 
     // Codec name for the trace record.
@@ -588,7 +597,9 @@ unsafe fn decode_inner(
     }
     // Auto-detect thread count (libdav1d etc. respect this).
     // 0 = auto; decoder chooses based on available cores.
-    unsafe { (*(*codec_ctx)).thread_count = 0; }
+    unsafe {
+        (*(*codec_ctx)).thread_count = 0;
+    }
     let open2_ret = avcodec_open2(*codec_ctx, dec, ptr::null_mut());
     if open2_ret < 0 {
         tbr_debug!("[avdecode] FAIL: avcodec_open2 returned {open2_ret}");
@@ -616,7 +627,7 @@ unsafe fn decode_inner(
 
     // ── Decode first frame ────────────────────────────────────────────────────
     *packet = av_packet_alloc();
-    *frame  = av_frame_alloc();
+    *frame = av_frame_alloc();
     if (*packet).is_null() || (*frame).is_null() {
         tbr_debug!("[avdecode] FAIL: av_packet_alloc or av_frame_alloc returned null");
         return None;
@@ -664,8 +675,8 @@ unsafe fn decode_inner(
         return None;
     }
 
-    let frame_w  = (**frame).width;
-    let frame_h  = (**frame).height;
+    let frame_w = (**frame).width;
+    let frame_h = (**frame).height;
     let frame_fmt: AVPixelFormat = std::mem::transmute((**frame).format);
 
     // Read the display-matrix side data to detect rotation (common in HEIC/MOV).
@@ -686,8 +697,11 @@ unsafe fn decode_inner(
                 0
             }
         };
-        if display_matrix_degrees != 0 { display_matrix_degrees }
-        else { rotation_hint.rem_euclid(360) }
+        if display_matrix_degrees != 0 {
+            display_matrix_degrees
+        } else {
+            rotation_hint.rem_euclid(360)
+        }
     };
     tbr_debug!("[avdecode] decoded frame {frame_w}x{frame_h}  rotation={rotation_degrees}°");
 
@@ -695,11 +709,10 @@ unsafe fn decode_inner(
     // Scale so that both dimensions are ≥ the canonical target while
     // preserving aspect ratio.  deliver's fill_crop() handles the final
     // center-crop; scaling to exactly 250×200 here would squish the image.
-    let target_w = ThumbnailConfig::CANONICAL.exact_width  as c_int;
+    let target_w = ThumbnailConfig::CANONICAL.exact_width as c_int;
     let target_h = ThumbnailConfig::CANONICAL.exact_height as c_int;
     let (out_w, out_h) = {
-        let scale = (target_w as f64 / frame_w as f64)
-            .max(target_h as f64 / frame_h as f64);
+        let scale = (target_w as f64 / frame_w as f64).max(target_h as f64 / frame_h as f64);
         let sw = ((frame_w as f64 * scale).round() as c_int).max(1);
         let sh = ((frame_h as f64 * scale).round() as c_int).max(1);
         (sw, sh)
@@ -711,12 +724,20 @@ unsafe fn decode_inner(
         let desc = av_pix_fmt_desc_get(frame_fmt);
         !desc.is_null() && ((*desc).flags & AV_PIX_FMT_FLAG_ALPHA as u64) != 0
     };
-    let dst_fmt  = if has_alpha { AVPixelFormat::AV_PIX_FMT_RGBA } else { AVPixelFormat::AV_PIX_FMT_RGB24 };
+    let dst_fmt = if has_alpha {
+        AVPixelFormat::AV_PIX_FMT_RGBA
+    } else {
+        AVPixelFormat::AV_PIX_FMT_RGB24
+    };
     let channels = if has_alpha { 4usize } else { 3usize };
 
     *sws_ctx = sws_getContext(
-        frame_w, frame_h, frame_fmt,
-        out_w,   out_h,   dst_fmt,
+        frame_w,
+        frame_h,
+        frame_fmt,
+        out_w,
+        out_h,
+        dst_fmt,
         SwsFlags::SWS_FAST_BILINEAR as c_int,
         ptr::null_mut(),
         ptr::null_mut(),
@@ -729,8 +750,8 @@ unsafe fn decode_inner(
 
     let stride = (out_w as usize) * channels;
     let mut buf = vec![0u8; stride * out_h as usize];
-    let dst_data:     [*mut u8; 4] = [buf.as_mut_ptr(), ptr::null_mut(), ptr::null_mut(), ptr::null_mut()];
-    let dst_linesize: [c_int;   4] = [stride as c_int, 0, 0, 0];
+    let dst_data: [*mut u8; 4] = [buf.as_mut_ptr(), ptr::null_mut(), ptr::null_mut(), ptr::null_mut()];
+    let dst_linesize: [c_int; 4] = [stride as c_int, 0, 0, 0];
 
     sws_scale(
         *sws_ctx,
@@ -738,7 +759,7 @@ unsafe fn decode_inner(
         (**frame).linesize.as_ptr(),
         0,
         frame_h,
-        dst_data.as_ptr()     as *const *mut u8,
+        dst_data.as_ptr() as *const *mut u8,
         dst_linesize.as_ptr() as *const c_int,
     );
 
@@ -761,13 +782,15 @@ unsafe fn decode_inner(
         }
     };
     let img = apply_rotation(img, rotation_degrees);
-    tbr_debug!("[avdecode] success: {src_w}x{src_h} codec={codec_name:?} depth={depth} rotation={rotation_degrees}°");
+    tbr_debug!(
+        "[avdecode] success: {src_w}x{src_h} codec={codec_name:?} depth={depth} rotation={rotation_degrees}°"
+    );
     Some(RenderOutput {
-        image:           img,
-        renderer:        Some("ffmpeg".to_string()),
-        codec:           codec_name,
+        image: img,
+        renderer: Some("ffmpeg".to_string()),
+        codec: codec_name,
         video_seek_secs: applied_seek_secs,
-        properties:      Some(json!({
+        properties: Some(json!({
             "width":  reported_w,
             "height": reported_h,
             "bpp":  depth,

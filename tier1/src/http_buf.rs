@@ -113,7 +113,9 @@ pub trait HttpStream: Sized {
     ///
     /// Used for redirect-aware cache identity. Backends that cannot provide a
     /// post-redirect URL can return `None`.
-    fn final_url(&self) -> Option<String> { None }
+    fn final_url(&self) -> Option<String> {
+        None
+    }
 
     /// Pull the next chunk of bytes from the response body.
     /// Returns `Ok(None)` when the stream is exhausted.
@@ -208,9 +210,7 @@ impl<S: HttpStream> HttpBuffer<S> {
         let status = stream.status();
         let headers = stream.response_headers();
 
-        let content_length = headers
-            .get("content-length")
-            .and_then(|v| v.parse().ok());
+        let content_length = headers.get("content-length").and_then(|v| v.parse().ok());
         let accepts_ranges = headers
             .get("accept-ranges")
             .map(|v| v.eq_ignore_ascii_case("bytes"))
@@ -397,7 +397,7 @@ impl<S: HttpStream> HttpBuffer<S> {
 
     async fn ensure_page_cached(&mut self, page_index: u64) -> Result<(), HttpError> {
         let page_start = page_index * PAGE_SIZE as u64;
-        let page_end   = page_start + PAGE_SIZE as u64;
+        let page_end = page_start + PAGE_SIZE as u64;
 
         // How many bytes we need for this page to be complete.
         let expected_len = if let Some(cl) = self.content_length {
@@ -519,7 +519,7 @@ impl<S: HttpStream> HttpBuffer<S> {
 
     async fn stream_forward_to_page(&mut self, target_page: u64) -> Result<(), HttpError> {
         let page_start = target_page * PAGE_SIZE as u64;
-        let page_end   = page_start + PAGE_SIZE as u64;
+        let page_end = page_start + PAGE_SIZE as u64;
         // How many bytes belong to this page (less than PAGE_SIZE only for the
         // last page of a file with a known Content-Length).
         let expected_len = if let Some(cl) = self.content_length {
@@ -541,7 +541,9 @@ impl<S: HttpStream> HttpBuffer<S> {
             let t = Instant::now();
             let chunk = self.stream.next_chunk().await?;
             self.io_secs_count += t.elapsed().as_secs_f64();
-            let Some(chunk) = chunk else { break };
+            let Some(chunk) = chunk else {
+                break;
+            };
             let start = self.stream_pos;
             self.store_chunk_at(start, &chunk);
             self.stream_pos += chunk.len() as u64;
@@ -555,10 +557,7 @@ impl<S: HttpStream> HttpBuffer<S> {
         let tail_start = (raw_start / PAGE_SIZE as u64) * PAGE_SIZE as u64;
 
         let opts = ConnectOptions {
-            headers: vec![(
-                "range".into(),
-                format!("bytes={tail_start}-{}", content_length - 1),
-            )],
+            headers: vec![("range".into(), format!("bytes={tail_start}-{}", content_length - 1))],
         };
         let t = Instant::now();
         let mut stream = S::connect(&self.url, &opts).await?;
@@ -711,7 +710,10 @@ impl HttpStream for ReqwestStream {
                 status: if range_start > 0 { 206 } else { 200 },
                 headers,
                 final_url: Some(url.to_string()),
-                inner: ReqwestStreamInner::File { file, remaining: slice_len },
+                inner: ReqwestStreamInner::File {
+                    file,
+                    remaining: slice_len,
+                },
             });
         }
 
@@ -723,29 +725,34 @@ impl HttpStream for ReqwestStream {
             req = req.header(k.as_str(), v.as_str());
         }
 
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| HttpError::Network(e.to_string()))?;
+        let resp = req.send().await.map_err(|e| HttpError::Network(e.to_string()))?;
 
         let final_url = Some(resp.url().to_string());
         let status = resp.status().as_u16();
         let headers = flatten_headers(resp.headers());
 
-        Ok(Self { status, headers, final_url, inner: ReqwestStreamInner::Http(resp) })
+        Ok(Self {
+            status,
+            headers,
+            final_url,
+            inner: ReqwestStreamInner::Http(resp),
+        })
     }
 
-    fn status(&self) -> u16 { self.status }
-    fn response_headers(&self) -> HashMap<String, String> { self.headers.clone() }
-    fn final_url(&self) -> Option<String> { self.final_url.clone() }
+    fn status(&self) -> u16 {
+        self.status
+    }
+    fn response_headers(&self) -> HashMap<String, String> {
+        self.headers.clone()
+    }
+    fn final_url(&self) -> Option<String> {
+        self.final_url.clone()
+    }
 
     async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, HttpError> {
         match &mut self.inner {
             ReqwestStreamInner::Http(resp) => {
-                let chunk = resp
-                    .chunk()
-                    .await
-                    .map_err(|e| HttpError::Network(e.to_string()))?;
+                let chunk = resp.chunk().await.map_err(|e| HttpError::Network(e.to_string()))?;
                 Ok(chunk.map(|b| b.to_vec()))
             }
             ReqwestStreamInner::File { file, remaining } => {
@@ -778,9 +785,11 @@ fn parse_file_range(headers: &[(String, String)], file_len: u64) -> (u64, u64) {
         if let Some(range) = v.strip_prefix("bytes=") {
             let mut parts = range.splitn(2, '-');
             let start = parts.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-            let end   = parts.next().and_then(|s| s.parse::<u64>().ok())
-                             .map(|e| e + 1)   // Range header end is inclusive
-                             .unwrap_or(file_len);
+            let end = parts
+                .next()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|e| e + 1) // Range header end is inclusive
+                .unwrap_or(file_len);
             return (start.min(file_len), end.min(file_len));
         }
     }

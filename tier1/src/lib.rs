@@ -21,21 +21,21 @@
 //! - `Thumb*` — per-item types (`ThumbInput`, `ThumbResult`, `ThumbTrace`, `ThumbCook`, `ThumbHandoff`, …)
 
 // ── Core modules (always compiled) ───────────────────────────────────────────
-pub mod assets;
 pub mod after;
+pub mod assets;
 pub mod cache;
 pub mod connect;
 pub mod cook;
 pub mod dispatch;
+pub mod fetch_guard;
 pub mod handoff;
 pub mod http_buf;
 pub mod media;
 pub mod pipeline;
-pub mod spec;
 pub mod request;
 pub mod result;
-pub mod fetch_guard;
 pub mod source;
+pub mod spec;
 pub mod tracelog;
 pub mod url_safety;
 
@@ -64,16 +64,24 @@ pub mod renderer;
 
 // ── Convenience re-exports ────────────────────────────────────────────────────
 
-pub use cook::{CallerContext, CookStatus, InputSpec, MediaInfo, Runtime, SourceIdentity, ThumbCook as ThumbCookGeneric};
-#[cfg(feature = "native")]
-pub use renderer::{InProcessRenderer, RenderCook, RenderOutput, SharedRenderer, apply_render_output, with_renderer};
-pub use spec::ShortcutLimits;
-pub use dispatch::{ThumbRoute, FormatEntry, route, format_manifest, set_tier3_available_extensions, tier3_can_handle};
+pub use cook::{
+    CallerContext, CookStatus, InputSpec, MediaInfo, Runtime, SourceIdentity, ThumbCook as ThumbCookGeneric,
+};
+pub use dispatch::{
+    FormatEntry, ThumbRoute, format_manifest, route, set_tier3_available_extensions, tier3_can_handle,
+};
 pub use handoff::{HandoffResponse, ThumbHandoff};
 pub use media::FileKind;
+#[cfg(feature = "native")]
+pub use renderer::{
+    InProcessRenderer, RenderCook, RenderOutput, SharedRenderer, apply_render_output, with_renderer,
+};
 pub use request::{CallRequest, ThumbInput, ThumbObject};
-pub use result::{CallRecord, CallResponse, ResultStatus, RenderHandler, ResultSource, ThumbMedia, ThumbResult, ThumbTrace};
+pub use result::{
+    CallRecord, CallResponse, RenderHandler, ResultSource, ResultStatus, ThumbMedia, ThumbResult, ThumbTrace,
+};
 pub use source::{CacheHints, SourceRef, canonical_url};
+pub use spec::ShortcutLimits;
 pub use url_safety::{is_safe_url, url_host_allowed};
 
 /// Concrete `ThumbCook` type for native server builds.
@@ -119,9 +127,11 @@ pub const TBR_CACHE_VERSION: u32 = 4;
 ///     tier1::with_shortcut_limits(rt, tier1::ShortcutLimits::TIER2)
 /// }).await;
 /// ```
-pub fn with_shortcut_limits(runtime: std::sync::Arc<Runtime>, limits: ShortcutLimits) -> std::sync::Arc<Runtime> {
-    let mut r = std::sync::Arc::try_unwrap(runtime)
-        .unwrap_or_else(|arc| (*arc).clone());
+pub fn with_shortcut_limits(
+    runtime: std::sync::Arc<Runtime>,
+    limits: ShortcutLimits,
+) -> std::sync::Arc<Runtime> {
+    let mut r = std::sync::Arc::try_unwrap(runtime).unwrap_or_else(|arc| (*arc).clone());
     r.shortcut_limits = limits;
     std::sync::Arc::new(r)
 }

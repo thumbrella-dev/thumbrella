@@ -24,7 +24,9 @@ const SNIFF_LEN: usize = 4 * 1024;
 /// - `cook.media.extension`    — canonical extension (no dot)
 /// - `cook.media.properties`   — `{width_pixels, height_pixels, bits_per_pixel}` for `Image` kind
 pub async fn inspect<S: HttpStream>(cook: &mut ThumbCook<S>) {
-    if !cook.http_is_open() { return; }
+    if !cook.http_is_open() {
+        return;
+    }
 
     // read_at preserves the cursor — subsequent steps (shortcut, render)
     // continue from byte 0.
@@ -38,9 +40,9 @@ pub async fn inspect<S: HttpStream>(cook: &mut ThumbCook<S>) {
 
     let content_type = cook.http_headers.get("content-type").cloned();
     let (kind, mime, extension) = sniff(&prefix, &cook.input.url, content_type.as_deref());
-    cook.media.mime       = Some(mime);
-    cook.media.kind       = Some(kind);
-    cook.media.extension  = Some(extension);
+    cook.media.mime = Some(mime);
+    cook.media.kind = Some(kind);
+    cook.media.extension = Some(extension);
     cook.media.properties = Some(serde_json::json!({}));
 
     // For image formats, dimension headers are always within the first few KB.
@@ -122,8 +124,7 @@ fn sniff(bytes: &[u8], url: &str, content_type: Option<&str>) -> (FileKind, Stri
     if let Some(ct) = content_type {
         // Strip parameters like "; charset=utf-8".
         let mime = ct.split(';').next().unwrap_or(ct).trim().to_ascii_lowercase();
-        let ct_ext = url_ext.clone()
-            .unwrap_or_else(|| mime_to_extension(&mime).to_string());
+        let ct_ext = url_ext.clone().unwrap_or_else(|| mime_to_extension(&mime).to_string());
         let ct_kind = mime_to_kind(&mime, &ct_ext);
         if !matches!(ct_kind, FileKind::Unknown) {
             return (ct_kind, mime, ct_ext);
@@ -155,7 +156,7 @@ pub(super) fn inspect_image_properties(bytes: &[u8], props: &mut serde_json::Val
     if bytes.len() >= 4 && bytes[0] == 0xFF && bytes[1] == 0xD8 {
         if let Some((w, h, bpp)) = jpeg_sof_dimensions(bytes) {
             let obj = props.as_object_mut().expect("properties is always a JSON object");
-            obj.insert("width".into(),  w.into());
+            obj.insert("width".into(), w.into());
             obj.insert("height".into(), h.into());
             obj.insert("bpp".into(), bpp.into());
             obj.insert("alpha".into(), (0_i32).into());
@@ -166,9 +167,13 @@ pub(super) fn inspect_image_properties(bytes: &[u8], props: &mut serde_json::Val
     }
 
     let cursor = Cursor::new(bytes);
-    let Ok(reader) = ImageReader::new(cursor).with_guessed_format() else { return };
+    let Ok(reader) = ImageReader::new(cursor).with_guessed_format() else {
+        return;
+    };
     let format = reader.format();
-    let Ok(decoder) = reader.into_decoder() else { return };
+    let Ok(decoder) = reader.into_decoder() else {
+        return;
+    };
     let (w, h) = decoder.dimensions();
     let ct = decoder.color_type();
     let per_channel = ct.bits_per_pixel() as u32 / ct.channel_count() as u32;
@@ -181,7 +186,7 @@ pub(super) fn inspect_image_properties(bytes: &[u8], props: &mut serde_json::Val
     };
     let bits_per_pixel = per_channel * color_channels;
     let obj = props.as_object_mut().expect("properties is always a JSON object");
-    obj.insert("width".into(),  w.into());
+    obj.insert("width".into(), w.into());
     obj.insert("height".into(), h.into());
     obj.insert("bpp".into(), bits_per_pixel.into());
     obj.insert("alpha".into(), (ct.has_alpha() as i32).into());
@@ -193,14 +198,15 @@ pub(super) fn inspect_image_properties(bytes: &[u8], props: &mut serde_json::Val
 /// Whether the given image format uses lossless compression.
 fn is_lossless(format: image::ImageFormat) -> bool {
     use image::ImageFormat;
-    matches!(format,
+    matches!(
+        format,
         ImageFormat::Png
-        | ImageFormat::Bmp
-        | ImageFormat::Tiff
-        | ImageFormat::Gif
-        | ImageFormat::Ico
-        | ImageFormat::Tga
-        | ImageFormat::OpenExr
+            | ImageFormat::Bmp
+            | ImageFormat::Tiff
+            | ImageFormat::Gif
+            | ImageFormat::Ico
+            | ImageFormat::Tga
+            | ImageFormat::OpenExr
     )
 }
 
@@ -287,10 +293,10 @@ pub(super) fn jpeg_app_segments_end(bytes: &[u8]) -> Option<u64> {
 /// at SOI — it searches for the first FF C0/C1/C2 marker.
 pub(super) fn find_sof_in_bytes(bytes: &[u8]) -> Option<(u32, u32, u32)> {
     for i in 0..bytes.len().saturating_sub(9) {
-        if bytes[i] == 0xFF && matches!(bytes[i+1], 0xC0..=0xC2) {
-            let h   = u16::from_be_bytes([bytes[i+5], bytes[i+6]]) as u32;
-            let w   = u16::from_be_bytes([bytes[i+7], bytes[i+8]]) as u32;
-            let bpp = (bytes[i+9] as u32) * (bytes[i+4] as u32);
+        if bytes[i] == 0xFF && matches!(bytes[i + 1], 0xC0..=0xC2) {
+            let h = u16::from_be_bytes([bytes[i + 5], bytes[i + 6]]) as u32;
+            let w = u16::from_be_bytes([bytes[i + 7], bytes[i + 8]]) as u32;
+            let bpp = (bytes[i + 9] as u32) * (bytes[i + 4] as u32);
             if w > 0 && h > 0 {
                 return Some((w, h, bpp));
             }
@@ -319,9 +325,24 @@ fn sniff_svg(bytes: &[u8]) -> bool {
 /// Used to prefer URL-derived extensions over the generic `"tiff"` label
 /// that the `infer` crate assigns to all TIFF-magic files.
 fn is_raw_tiff_extension(ext: &str) -> bool {
-    matches!(ext, "dng" | "cr2" | "nef" | "arw" | "orf" | "rw2"
-                | "pef" | "srw" | "raf" | "3fr" | "fff" | "iiq"
-                | "mef" | "rwl" | "raw")
+    matches!(
+        ext,
+        "dng"
+            | "cr2"
+            | "nef"
+            | "arw"
+            | "orf"
+            | "rw2"
+            | "pef"
+            | "srw"
+            | "raf"
+            | "3fr"
+            | "fff"
+            | "iiq"
+            | "mef"
+            | "rwl"
+            | "raw"
+    )
 }
 
 /// Normalise common extension aliases to their canonical form.
@@ -329,39 +350,40 @@ fn is_raw_tiff_extension(ext: &str) -> bool {
 pub fn canonical_extension(raw: &str) -> String {
     match raw {
         // image formats
-        "jpg" | "jpe"   => "jpeg",
-        "tif"           => "tiff",
-        "j2k"           => "jp2",
-        "sxr" | "mxr"   => "exr",
-        "rgbe"          => "hdr",
+        "jpg" | "jpe" => "jpeg",
+        "tif" => "tiff",
+        "j2k" => "jp2",
+        "sxr" | "mxr" => "exr",
+        "rgbe" => "hdr",
         "rgb" | "rgba" | "int" | "inta" => "sgi",
         "pgm" | "ppm" | "pfm" => "pbm",
-        "heics"         => "heic",
-        "heif"          => "heic",
+        "heics" => "heic",
+        "heif" => "heic",
         // video / audio
-        "mpg" | "mpe"   => "mpeg",
-        "m4v"           => "mp4",
-        "mid"           => "midi",
-        "aifc"          => "aiff",
+        "mpg" | "mpe" => "mpeg",
+        "m4v" => "mp4",
+        "mid" => "midi",
+        "aifc" => "aiff",
         // documents
-        "doc"           => "docx",
-        "xls"           => "xlsx",
-        "xlsm"          => "xlsx",
-        "ppt"           => "pptx",
+        "doc" => "docx",
+        "xls" => "xlsx",
+        "xlsm" => "xlsx",
+        "ppt" => "pptx",
         // vector
-        "svg" | "svgz"  => "svg",
+        "svg" | "svgz" => "svg",
         // 3D geometry
-        "wrl"           => "vrml",
+        "wrl" => "vrml",
         "stp" | "stpnc" | "p21" | "210" => "step",
-        "igs"           => "iges",
-        "ex2" | "e"     => "exo",
+        "igs" => "iges",
+        "ex2" | "e" => "exo",
         "usda" | "usdc" => "usd",
         // camera raw — uncommon aliases
-        "crw"           => "cr2",
+        "crw" => "cr2",
         // web
-        "htm"           => "html",
-        other           => other,
-    }.to_string()
+        "htm" => "html",
+        other => other,
+    }
+    .to_string()
 }
 
 /// Extract and normalise the file extension from a URL path.
@@ -370,7 +392,7 @@ fn url_extension(url: &str) -> Option<String> {
     let path = url.split('?').next().unwrap_or(url);
     let path = path.split('#').next().unwrap_or(path);
     let last = path.rsplit('/').next().unwrap_or("");
-    let raw  = last.rsplit('.').next().filter(|e| !e.is_empty() && *e != last)?;
+    let raw = last.rsplit('.').next().filter(|e| !e.is_empty() && *e != last)?;
     Some(canonical_extension(&raw.to_ascii_lowercase()))
 }
 
@@ -390,8 +412,7 @@ fn infer_matcher_to_kind(mt: infer::MatcherType) -> FileKind {
         infer::MatcherType::Doc => FileKind::Document,
         infer::MatcherType::Text => FileKind::Text,
         infer::MatcherType::Book => FileKind::Document,
-        infer::MatcherType::App | infer::MatcherType::Font
-        | infer::MatcherType::Custom => FileKind::Binary,
+        infer::MatcherType::App | infer::MatcherType::Font | infer::MatcherType::Custom => FileKind::Binary,
     }
 }
 
@@ -399,11 +420,19 @@ fn mime_to_kind(mime: &str, ext: &str) -> FileKind {
     if mime.starts_with("image/") {
         return if ext == "svg" { FileKind::Vector } else { FileKind::Image };
     }
-    if mime.starts_with("video/") { return FileKind::Video; }
-    if mime.starts_with("audio/") { return FileKind::Audio; }
+    if mime.starts_with("video/") {
+        return FileKind::Video;
+    }
+    if mime.starts_with("audio/") {
+        return FileKind::Audio;
+    }
     // HTML is a document, not plain text, despite the text/ prefix.
-    if matches!(mime, "text/html" | "application/xhtml+xml") { return FileKind::Document; }
-    if mime.starts_with("text/")  { return FileKind::Text;  }
+    if matches!(mime, "text/html" | "application/xhtml+xml") {
+        return FileKind::Document;
+    }
+    if mime.starts_with("text/") {
+        return FileKind::Text;
+    }
     match mime {
         "application/pdf"
         | "application/msword"
@@ -437,35 +466,28 @@ fn mime_to_kind(mime: &str, ext: &str) -> FileKind {
 
 fn ext_to_kind(ext: &str) -> FileKind {
     match ext {
-        "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff"
-        | "avif" | "heic" | "exr" | "hdr"
-        | "apng" | "ico" | "xcf" | "jxl" | "psd"
-        | "pbm" | "tga"                    => FileKind::Image,
+        "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff" | "avif" | "heic" | "exr" | "hdr" | "apng"
+        | "ico" | "xcf" | "jxl" | "psd" | "pbm" | "tga" => FileKind::Image,
         // JPEG 2000
-        "jp2"                                               => FileKind::Image,
+        "jp2" => FileKind::Image,
         // Studio / VFX image formats (via oiiotool).
-        "sgi" | "dpx" | "cin" | "dds" | "fits"
-        | "iff" | "pic" | "rla" | "zfile"                  => FileKind::Image,
+        "sgi" | "dpx" | "cin" | "dds" | "fits" | "iff" | "pic" | "rla" | "zfile" => FileKind::Image,
         // Camera-raw formats (TIFF-based containers).
-        "dng" | "cr2" | "nef" | "arw" | "orf" | "rw2"
-        | "pef" | "srw" | "3fr" | "mef" | "rwl"
-        | "raf" | "fff" | "iiq" | "raw"                    => FileKind::Image,
-        "svg" | "emf" | "wmf"                              => FileKind::Vector,
-        "mp4" | "mov" | "mkv" | "avi" | "webm" | "mpeg"
-        | "ogv" | "flv" | "ts" | "3gp" | "wmv" | "m2ts" | "mxf" | "av1"    => FileKind::Video,
-        "mp3" | "ogg" | "flac" | "wav" | "m4a"
-        | "aac" | "midi" | "opus" | "oga" | "weba"
-        | "wma" | "aiff"                                    => FileKind::Audio,
-        "pdf" | "docx" | "xlsx" | "pptx" | "odt"
-        | "doc" | "xls" | "ppt" | "odp" | "ods"
-        | "epub" | "rtf" | "html" | "xhtml"                 => FileKind::Document,
-        "usdz" | "usd" | "glb" | "gltf" | "obj" | "stl" | "fbx" | "dae" | "dxf"
-        | "off" | "3ds" | "gml" | "ply" | "pts" | "vrml"
-        | "vtk" | "vtu" | "vtp" | "vti" | "vtr" | "vts" | "vtm"
-        | "step" | "iges" | "brep" | "exo"                 => FileKind::Geometry,
+        "dng" | "cr2" | "nef" | "arw" | "orf" | "rw2" | "pef" | "srw" | "3fr" | "mef" | "rwl" | "raf"
+        | "fff" | "iiq" | "raw" => FileKind::Image,
+        "svg" | "emf" | "wmf" => FileKind::Vector,
+        "mp4" | "mov" | "mkv" | "avi" | "webm" | "mpeg" | "ogv" | "flv" | "ts" | "3gp" | "wmv" | "m2ts"
+        | "mxf" | "av1" => FileKind::Video,
+        "mp3" | "ogg" | "flac" | "wav" | "m4a" | "aac" | "midi" | "opus" | "oga" | "weba" | "wma"
+        | "aiff" => FileKind::Audio,
+        "pdf" | "docx" | "xlsx" | "pptx" | "odt" | "doc" | "xls" | "ppt" | "odp" | "ods" | "epub" | "rtf"
+        | "html" | "xhtml" => FileKind::Document,
+        "usdz" | "usd" | "glb" | "gltf" | "obj" | "stl" | "fbx" | "dae" | "dxf" | "off" | "3ds" | "gml"
+        | "ply" | "pts" | "vrml" | "vtk" | "vtu" | "vtp" | "vti" | "vtr" | "vts" | "vtm" | "step"
+        | "iges" | "brep" | "exo" => FileKind::Geometry,
         "zip" | "tar" | "gz" | "bz2" | "xz" | "rar" | "7z" => FileKind::Archive,
-        "xml" | "json" | "txt" | "csv" | "md"              => FileKind::Text,
-        _                                                    => FileKind::Unknown,
+        "xml" | "json" | "txt" | "csv" | "md" => FileKind::Text,
+        _ => FileKind::Unknown,
     }
 }
 
@@ -473,47 +495,69 @@ fn ext_to_kind(ext: &str) -> FileKind {
 /// signal and we have no URL extension.
 fn mime_to_extension(mime: &str) -> &'static str {
     match mime {
-        "image/jpeg"       => "jpeg", "image/png"        => "png",
-        "image/gif"        => "gif",  "image/webp"       => "webp",
-        "image/bmp"        => "bmp",  "image/tiff"       => "tiff",
-        "image/avif"       => "avif", "image/heic"       => "heic",
-        "image/heif"       => "heic", "image/svg+xml"    => "svg",
-        "image/emf"        => "emf",
-        "image/x-xcf"      => "xcf",
-        "image/apng"       => "apng", "image/vnd.microsoft.icon" => "ico",
-        "image/jxl"        => "jxl",  "image/vnd.adobe.photoshop" => "psd",
-        "image/jp2"        => "jp2",
-        "video/mp4"        => "mp4",  "video/quicktime"  => "mov",
-        "video/webm"       => "webm", "video/mpeg"       => "mpeg",
-        "video/ogg"        => "ogv",  "video/x-flv"      => "flv",
-        "video/mp2t"       => "ts",   "video/3gpp"      => "3gp",
-        "video/x-ms-wmv"   => "wmv",
-        "video/mxf"        => "mxf",  "video/av1"        => "av1",
-        "audio/mpeg"       => "mp3",  "audio/ogg"        => "ogg",
-        "audio/flac"       => "flac", "audio/wav"        => "wav",
-        "audio/mp4"        => "m4a",  "audio/aac"        => "aac",
+        "image/jpeg" => "jpeg",
+        "image/png" => "png",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/bmp" => "bmp",
+        "image/tiff" => "tiff",
+        "image/avif" => "avif",
+        "image/heic" => "heic",
+        "image/heif" => "heic",
+        "image/svg+xml" => "svg",
+        "image/emf" => "emf",
+        "image/x-xcf" => "xcf",
+        "image/apng" => "apng",
+        "image/vnd.microsoft.icon" => "ico",
+        "image/jxl" => "jxl",
+        "image/vnd.adobe.photoshop" => "psd",
+        "image/jp2" => "jp2",
+        "video/mp4" => "mp4",
+        "video/quicktime" => "mov",
+        "video/webm" => "webm",
+        "video/mpeg" => "mpeg",
+        "video/ogg" => "ogv",
+        "video/x-flv" => "flv",
+        "video/mp2t" => "ts",
+        "video/3gpp" => "3gp",
+        "video/x-ms-wmv" => "wmv",
+        "video/mxf" => "mxf",
+        "video/av1" => "av1",
+        "audio/mpeg" => "mp3",
+        "audio/ogg" => "ogg",
+        "audio/flac" => "flac",
+        "audio/wav" => "wav",
+        "audio/mp4" => "m4a",
+        "audio/aac" => "aac",
         "audio/midi" | "audio/x-midi" => "midi",
-        "audio/webm"       => "weba", "audio/x-ms-wma"   => "wma",
-        "audio/aiff"       => "aiff",
-        "application/pdf"  => "pdf",
-        "application/zip"  => "zip",  "application/gzip" => "gz",
+        "audio/webm" => "weba",
+        "audio/x-ms-wma" => "wma",
+        "audio/aiff" => "aiff",
+        "application/pdf" => "pdf",
+        "application/zip" => "zip",
+        "application/gzip" => "gz",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"       => "xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
         "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
-        "application/vnd.oasis.opendocument.text"         => "odt",
+        "application/vnd.oasis.opendocument.text" => "odt",
         "application/vnd.oasis.opendocument.presentation" => "odp",
-        "application/vnd.oasis.opendocument.spreadsheet"  => "ods",
-        "application/msword"            => "doc",
-        "application/vnd.ms-excel"      => "xls",
+        "application/vnd.oasis.opendocument.spreadsheet" => "ods",
+        "application/msword" => "doc",
+        "application/vnd.ms-excel" => "xls",
         "application/vnd.ms-powerpoint" => "ppt",
-        "application/epub+zip"          => "epub",
-        "application/rtf"               => "rtf",
-        "model/vnd.usdz+zip" => "usdz", "model/gltf-binary" => "glb",
-        "model/gltf+json"    => "gltf", "model/obj"         => "obj",
-        "application/vnd.fbx" => "fbx", "model/vnd.collada+xml" => "dae",
-        "model/stl"          => "stl",
-        "text/html"  => "html", "text/xml"      => "xml",
-        "text/plain" => "txt",  "text/csv"      => "csv",
+        "application/epub+zip" => "epub",
+        "application/rtf" => "rtf",
+        "model/vnd.usdz+zip" => "usdz",
+        "model/gltf-binary" => "glb",
+        "model/gltf+json" => "gltf",
+        "model/obj" => "obj",
+        "application/vnd.fbx" => "fbx",
+        "model/vnd.collada+xml" => "dae",
+        "model/stl" => "stl",
+        "text/html" => "html",
+        "text/xml" => "xml",
+        "text/plain" => "txt",
+        "text/csv" => "csv",
         "text/markdown" => "md",
         "application/json" => "json",
         _ => "bin",
@@ -522,69 +566,109 @@ fn mime_to_extension(mime: &str) -> &'static str {
 
 fn ext_to_mime(ext: &str) -> &'static str {
     match ext {
-        "jpeg" => "image/jpeg",   "png"  => "image/png",
-        "gif"  => "image/gif",    "webp" => "image/webp",
-        "bmp"  => "image/bmp",    "tiff" => "image/tiff",
-        "avif" => "image/avif",   "heic" => "image/heic",
-        "exr"  => "image/x-exr",
-        "hdr"  => "image/vnd.radiance",
-        "jxl"  => "image/jxl",    "psd"  => "image/vnd.adobe.photoshop",
-        "jp2"  => "image/jp2",
-        "pbm"  => "image/x-portable-bitmap",
-        "tga"  => "image/x-tga",
-        "xcf"  => "image/x-xcf",
-        "sgi"  => "image/x-sgi",  "dpx"  => "image/x-dpx",
-        "cin"  => "image/x-cineon", "dds" => "image/vnd-ms.dds",
-        "fits" => "image/fits",   "iff"  => "image/x-iff",
-        "dng"  => "image/x-adobe-dng",
-        "cr2"  => "image/x-canon-cr2",   "nef"  => "image/x-nikon-nef",
-        "arw"  => "image/x-sony-arw",    "orf"  => "image/x-olympus-orf",
-        "rw2"  => "image/x-panasonic-rw2", "pef" => "image/x-pentax-pef",
-        "srw"  => "image/x-samsung-srw", "3fr"  => "image/x-hasselblad-3fr",
-        "mef"  => "image/x-mamiya-mef",  "rwl"  => "image/x-leica-rwl",
-        "raf"  => "image/x-fuji-raf",    "fff"  => "image/x-hasselblad-fff",
-        "iiq"  => "image/x-phaseone-iiq", "raw" => "image/x-raw",
-        "svg"  => "image/svg+xml",    "emf"  => "image/emf",
-        "wmf"  => "image/wmf",
-        "apng" => "image/apng",   "ico"  => "image/vnd.microsoft.icon",
-        "mp4"  => "video/mp4",    "mov"  => "video/quicktime",
-        "mkv"  => "video/x-matroska", "avi" => "video/x-msvideo",
-        "webm" => "video/webm",   "mpeg" => "video/mpeg",
-        "ogv"  => "video/ogg",    "flv"  => "video/x-flv",
-        "ts"   => "video/mp2t",   "3gp"  => "video/3gpp",   "wmv"  => "video/x-ms-wmv",
-        "m2ts" => "video/mp2t",  "mxf"  => "video/mxf",      "av1"  => "video/av1",
-        "mp3"  => "audio/mpeg",   "ogg"  => "audio/ogg",
-        "flac" => "audio/flac",   "wav"  => "audio/wav",
-        "m4a"  => "audio/mp4",    "aac"  => "audio/aac",
-        "midi" => "audio/midi",   "opus" => "audio/ogg",
-        "oga"  => "audio/ogg",    "weba" => "audio/webm",
-        "wma"  => "audio/x-ms-wma", "aiff" => "audio/aiff",
-        "pdf"  => "application/pdf",
+        "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "tiff" => "image/tiff",
+        "avif" => "image/avif",
+        "heic" => "image/heic",
+        "exr" => "image/x-exr",
+        "hdr" => "image/vnd.radiance",
+        "jxl" => "image/jxl",
+        "psd" => "image/vnd.adobe.photoshop",
+        "jp2" => "image/jp2",
+        "pbm" => "image/x-portable-bitmap",
+        "tga" => "image/x-tga",
+        "xcf" => "image/x-xcf",
+        "sgi" => "image/x-sgi",
+        "dpx" => "image/x-dpx",
+        "cin" => "image/x-cineon",
+        "dds" => "image/vnd-ms.dds",
+        "fits" => "image/fits",
+        "iff" => "image/x-iff",
+        "dng" => "image/x-adobe-dng",
+        "cr2" => "image/x-canon-cr2",
+        "nef" => "image/x-nikon-nef",
+        "arw" => "image/x-sony-arw",
+        "orf" => "image/x-olympus-orf",
+        "rw2" => "image/x-panasonic-rw2",
+        "pef" => "image/x-pentax-pef",
+        "srw" => "image/x-samsung-srw",
+        "3fr" => "image/x-hasselblad-3fr",
+        "mef" => "image/x-mamiya-mef",
+        "rwl" => "image/x-leica-rwl",
+        "raf" => "image/x-fuji-raf",
+        "fff" => "image/x-hasselblad-fff",
+        "iiq" => "image/x-phaseone-iiq",
+        "raw" => "image/x-raw",
+        "svg" => "image/svg+xml",
+        "emf" => "image/emf",
+        "wmf" => "image/wmf",
+        "apng" => "image/apng",
+        "ico" => "image/vnd.microsoft.icon",
+        "mp4" => "video/mp4",
+        "mov" => "video/quicktime",
+        "mkv" => "video/x-matroska",
+        "avi" => "video/x-msvideo",
+        "webm" => "video/webm",
+        "mpeg" => "video/mpeg",
+        "ogv" => "video/ogg",
+        "flv" => "video/x-flv",
+        "ts" => "video/mp2t",
+        "3gp" => "video/3gpp",
+        "wmv" => "video/x-ms-wmv",
+        "m2ts" => "video/mp2t",
+        "mxf" => "video/mxf",
+        "av1" => "video/av1",
+        "mp3" => "audio/mpeg",
+        "ogg" => "audio/ogg",
+        "flac" => "audio/flac",
+        "wav" => "audio/wav",
+        "m4a" => "audio/mp4",
+        "aac" => "audio/aac",
+        "midi" => "audio/midi",
+        "opus" => "audio/ogg",
+        "oga" => "audio/ogg",
+        "weba" => "audio/webm",
+        "wma" => "audio/x-ms-wma",
+        "aiff" => "audio/aiff",
+        "pdf" => "application/pdf",
         "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        "odt"  => "application/vnd.oasis.opendocument.text",
-        "odp"  => "application/vnd.oasis.opendocument.presentation",
-        "ods"  => "application/vnd.oasis.opendocument.spreadsheet",
-        "doc"  => "application/msword",
-        "xls"  => "application/vnd.ms-excel",
-        "ppt"  => "application/vnd.ms-powerpoint",
+        "odt" => "application/vnd.oasis.opendocument.text",
+        "odp" => "application/vnd.oasis.opendocument.presentation",
+        "ods" => "application/vnd.oasis.opendocument.spreadsheet",
+        "doc" => "application/msword",
+        "xls" => "application/vnd.ms-excel",
+        "ppt" => "application/vnd.ms-powerpoint",
         "epub" => "application/epub+zip",
-        "rtf"  => "application/rtf",
-        "html" => "text/html",    "xhtml" => "application/xhtml+xml",
-        "zip"  => "application/zip",
-        "tar"  => "application/x-tar",
-        "gz"   => "application/gzip",
-        "rar"  => "application/vnd.rar",
-        "7z"   => "application/x-7z-compressed",
-        "xml"  => "text/xml",
-        "json" => "application/json", "txt" => "text/plain",
-        "csv"  => "text/csv",     "md"   => "text/markdown",
-        "usdz" => "model/vnd.usdz+zip", "usd" => "model/vnd.usdz+zip", "glb" => "model/gltf-binary",
-        "gltf" => "model/gltf+json",    "obj" => "model/obj",
-        "fbx"  => "application/vnd.fbx", "dae" => "model/vnd.collada+xml",
-        "stl"  => "model/stl",    "vrml"  => "model/vrml",
-        "step" => "model/step",   "iges"  => "model/iges",
-        _      => "application/octet-stream",
+        "rtf" => "application/rtf",
+        "html" => "text/html",
+        "xhtml" => "application/xhtml+xml",
+        "zip" => "application/zip",
+        "tar" => "application/x-tar",
+        "gz" => "application/gzip",
+        "rar" => "application/vnd.rar",
+        "7z" => "application/x-7z-compressed",
+        "xml" => "text/xml",
+        "json" => "application/json",
+        "txt" => "text/plain",
+        "csv" => "text/csv",
+        "md" => "text/markdown",
+        "usdz" => "model/vnd.usdz+zip",
+        "usd" => "model/vnd.usdz+zip",
+        "glb" => "model/gltf-binary",
+        "gltf" => "model/gltf+json",
+        "obj" => "model/obj",
+        "fbx" => "application/vnd.fbx",
+        "dae" => "model/vnd.collada+xml",
+        "stl" => "model/stl",
+        "vrml" => "model/vrml",
+        "step" => "model/step",
+        "iges" => "model/iges",
+        _ => "application/octet-stream",
     }
 }

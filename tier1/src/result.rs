@@ -16,10 +16,10 @@
 //! they are output views constructed once at the end of
 //! [`crate::cook::ThumbCook::run`].
 
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use crate::cook::CallerContext;
 use crate::media::FileKind;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 // ── Render handler ────────────────────────────────────────────────────────────
 
@@ -121,14 +121,14 @@ pub struct ThumbMedia {
 impl Default for ThumbMedia {
     fn default() -> Self {
         Self {
-            url:        String::new(),
-            thumbnail:  Vec::new(),
-            mime:       String::new(),
-            cache:      String::new(),
+            url: String::new(),
+            thumbnail: Vec::new(),
+            mime: String::new(),
+            cache: String::new(),
             placeholder: String::new(),
-            file_size:  0,
-            kind:       FileKind::Unknown,
-            extension:  String::new(),
+            file_size: 0,
+            kind: FileKind::Unknown,
+            extension: String::new(),
             properties: Value::Object(Default::default()),
         }
     }
@@ -167,14 +167,14 @@ pub struct ThumbResult {
 impl Default for ThumbResult {
     fn default() -> Self {
         Self {
-            url:           String::new(),
-            status:        ResultStatus::Failed,
-            message:       None,
-            source:        None,
-            duration:      0.0,
+            url: String::new(),
+            status: ResultStatus::Failed,
+            message: None,
+            source: None,
+            duration: 0.0,
             download_size: 0,
-            http_status:   None,
-            media:         None,
+            http_status: None,
+            media: None,
         }
     }
 }
@@ -190,37 +190,37 @@ impl Default for ThumbResult {
 pub struct ThumbTrace {
     // ── Request identity ──────────────────────────────────────────────────────
     /// RFC 3339 timestamp of when the trace was materialised.
-    pub timestamp:    String,
+    pub timestamp: String,
     /// Outcome of the job, mirroring [`ThumbResult::status`].
-    pub status:       ResultStatus,
+    pub status: ResultStatus,
     /// Media kind detected (mirrors [`ThumbMedia::kind`]).
-    pub kind:         Option<FileKind>,
+    pub kind: Option<FileKind>,
     /// File extension detected (mirrors [`ThumbMedia::extension`]).
-    pub extension:    Option<String>,
+    pub extension: Option<String>,
 
     // ── Source identity ───────────────────────────────────────────────────────
-    pub canonical_url:    Option<String>,
-    pub cache_key:        Option<String>,
+    pub canonical_url: Option<String>,
+    pub cache_key: Option<String>,
     pub cache_key_source: Option<String>,
-    pub source_etag:      Option<String>,
+    pub source_etag: Option<String>,
     // ── Download metrics ──────────────────────────────────────────────────────
-    pub download_bytes:      u64,
+    pub download_bytes: u64,
     pub download_tail_bytes: u64,
     /// All time awaiting fetch (connect + transfer).
-    pub io_secs:             f64,
+    pub io_secs: f64,
 
     // ── Step timing ───────────────────────────────────────────────────────────
     /// Inspect phase, plus shortcut phase if it failed.
-    pub inspect_secs:   f64,
+    pub inspect_secs: f64,
     /// Decode/render phase, or the shortcut phase when shortcut succeeded.
-    pub render_secs:    f64,
-    pub deliver_secs:   f64,
+    pub render_secs: f64,
+    pub deliver_secs: f64,
 
     // ── Render details ────────────────────────────────────────────────────────
-    pub thumbnail_bytes:   Option<u64>,
+    pub thumbnail_bytes: Option<u64>,
 
     // ── Job provenance ────────────────────────────────────────────────────────
-    pub job_tier:     u8,
+    pub job_tier: u8,
     pub job_renderer: Option<String>,
 
     // ── Failure detail ────────────────────────────────────────────────────────
@@ -229,15 +229,15 @@ pub struct ThumbTrace {
     pub message: Option<String>,
 
     // ── Attribution ───────────────────────────────────────────────────────────
-    pub session_id:  Option<String>,
+    pub session_id: Option<String>,
     pub customer_id: Option<String>,
     /// Name of the cache backend that produced the hit (e.g. `"sqlite"`, `"redis"`); `None` on miss.
-    pub cache_hit:   Option<String>,
+    pub cache_hit: Option<String>,
     pub render_handler: RenderHandler,
-    pub caller:      Option<CallerContext>,
-    pub cancelled:   bool,
-    pub server:      Option<String>,
-    pub version:     String,
+    pub caller: Option<CallerContext>,
+    pub cancelled: bool,
+    pub server: Option<String>,
+    pub version: String,
 }
 
 // ── Call response ─────────────────────────────────────────────────────────────
@@ -256,12 +256,16 @@ mod base64_bytes {
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S>(value: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error>
-    where S: Serializer {
+    where
+        S: Serializer,
+    {
         serializer.serialize_str(&STANDARD.encode(value))
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
-    where D: Deserializer<'de> {
+    where
+        D: Deserializer<'de>,
+    {
         let s = String::deserialize(deserializer)?;
         STANDARD.decode(s).map_err(serde::de::Error::custom)
     }

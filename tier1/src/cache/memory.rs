@@ -38,9 +38,7 @@ impl MemoryCacheBackend {
 
     pub fn with_max_entries(max_entries: u64) -> Self {
         let max_entries = max_entries.max(10);
-        let cache = moka::sync::Cache::builder()
-            .max_capacity(max_entries)
-            .build();
+        let cache = moka::sync::Cache::builder().max_capacity(max_entries).build();
         Self { cache }
     }
 
@@ -57,14 +55,14 @@ fn unix_now_secs() -> u64 {
 }
 
 impl CacheBackend for MemoryCacheBackend {
-    fn name(&self) -> &'static str { "memory" }
+    fn name(&self) -> &'static str {
+        "memory"
+    }
 
     fn get<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = Option<String>> + Send + 'a>> {
         let cache = self.cache.clone();
-        let key   = key.to_string();
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || cache.get(&key)).await.ok().flatten()
-        })
+        let key = key.to_string();
+        Box::pin(async move { tokio::task::spawn_blocking(move || cache.get(&key)).await.ok().flatten() })
     }
 
     fn put(&self, key: String, value: String, _cost: u8, expires_at: u64) -> DeferredFuture {
@@ -86,7 +84,9 @@ impl CacheBackend for MemoryCacheBackend {
             let _ = ttl; // TODO: moka per-entry expiry when available
             tokio::task::spawn_blocking(move || {
                 cache.insert(key, value);
-            }).await.ok();
+            })
+            .await
+            .ok();
         })
     }
 }
@@ -101,7 +101,9 @@ pub fn parse_mem_size(fragment: &str) -> Result<Option<(u64, &str)>, String> {
     let lower = spec.to_ascii_lowercase();
 
     if let Some(num) = lower.strip_suffix("gb") {
-        let gb: f64 = num.trim().parse()
+        let gb: f64 = num
+            .trim()
+            .parse()
             .map_err(|_| format!("invalid size spec: '{spec}' — expected a number before 'gb'"))?;
         if gb <= 0.0 || gb > 1024.0 {
             return Err(format!("GB size must be between 0 and 1024, got {gb}"));
@@ -110,7 +112,9 @@ pub fn parse_mem_size(fragment: &str) -> Result<Option<(u64, &str)>, String> {
     }
 
     if let Some(num) = lower.strip_suffix("mb") {
-        let mb: f64 = num.trim().parse()
+        let mb: f64 = num
+            .trim()
+            .parse()
             .map_err(|_| format!("invalid size spec: '{spec}' — expected a number before 'mb'"))?;
         if mb <= 0.0 || mb > (1024.0 * 1024.0) {
             return Err(format!("MB size must be between 0 and 1,048,576, got {mb}"));
@@ -119,7 +123,9 @@ pub fn parse_mem_size(fragment: &str) -> Result<Option<(u64, &str)>, String> {
     }
 
     if let Some(num) = lower.strip_suffix("kb") {
-        let kb: f64 = num.trim().parse()
+        let kb: f64 = num
+            .trim()
+            .parse()
             .map_err(|_| format!("invalid size spec: '{spec}' — expected a number before 'kb'"))?;
         if kb <= 0.0 {
             return Err(format!("KB size must be positive, got {kb}"));
@@ -127,7 +133,9 @@ pub fn parse_mem_size(fragment: &str) -> Result<Option<(u64, &str)>, String> {
         return Ok(Some(((kb * 1024.0) as u64, "bytes")));
     }
 
-    let count: u64 = spec.trim().parse()
+    let count: u64 = spec
+        .trim()
+        .parse()
         .map_err(|_| format!("invalid size spec: '{spec}' — expected a number, or number+unit (mb/gb/kb)"))?;
     if count < 10 {
         return Err(format!("entry count must be at least 10, got {count}"));

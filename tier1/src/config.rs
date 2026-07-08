@@ -96,7 +96,6 @@ pub struct AppConfig {
     pub backoff_default: u32,
     /// Maximum origin back-off TTL cap in seconds.
     pub backoff_ceiling: u32,
-
 }
 
 impl Default for AppConfig {
@@ -126,21 +125,21 @@ impl AppConfig {
         let tier2 = parse_connect_target(env_opt_string("TBR_TIER2"));
         let tier3 = parse_connect_target(env_opt_string("TBR_TIER3"));
         Self {
-            port:                 env_u16("TBR_PORT", 3114),
-            allow_local:          env_bool("TBR_ALLOW_LOCAL", false),
-            scratch_dir:          env_scratch("TBR_SCRATCH"),
+            port: env_u16("TBR_PORT", 3114),
+            allow_local: env_bool("TBR_ALLOW_LOCAL", false),
+            scratch_dir: env_scratch("TBR_SCRATCH"),
             tier2,
             tier3,
-            handshake:            env_opt_string("TBR_HANDSHAKE"),
-            server:               env_opt_string("TBR_SERVER"),
-            cache_url:            std::env::var("TBR_CACHE").ok(),
-            cache_max_ttl_secs:   env_opt_u32("TBR_CACHE_MAX_TTL").unwrap_or(604_800) as u64,
+            handshake: env_opt_string("TBR_HANDSHAKE"),
+            server: env_opt_string("TBR_SERVER"),
+            cache_url: std::env::var("TBR_CACHE").ok(),
+            cache_max_ttl_secs: env_opt_u32("TBR_CACHE_MAX_TTL").unwrap_or(604_800) as u64,
             cache_default_ttl_secs: env_opt_u32("TBR_CACHE_DEFAULT_TTL").unwrap_or(3_600) as u64,
-            trace_url:            std::env::var("TBR_TRACE").ok(),
+            trace_url: std::env::var("TBR_TRACE").ok(),
             // Hardcoded — not exposed as env vars.
-            failure_ttl:          5,
-            backoff_default:      60,
-            backoff_ceiling:      3_600,
+            failure_ttl: 5,
+            backoff_default: 60,
+            backoff_ceiling: 3_600,
         }
     }
 }
@@ -152,7 +151,9 @@ fn env_u16(name: &str, default: u16) -> u16 {
         Ok(v) => v.trim().parse().unwrap_or_else(|_| {
             crate::ux::get().fatal(
                 &format!("{name} is set to \"{v}\", which is not a valid port number"),
-                &format!("set {name} to a number between 1 and 65535, or unset it to use the default ({default})"),
+                &format!(
+                    "set {name} to a number between 1 and 65535, or unset it to use the default ({default})"
+                ),
             );
         }),
         Err(_) => default,
@@ -166,8 +167,10 @@ fn env_bool(name: &str, default: bool) -> bool {
         Ok(other) => {
             crate::ux::get().fatal(
                 &format!("{name} is set to \"{other}\", which is not a valid boolean"),
-                &format!("set {name} to true/false/1/0/yes/no, or unset it to use the default ({})",
-                    if default { "true" } else { "false" }),
+                &format!(
+                    "set {name} to true/false/1/0/yes/no, or unset it to use the default ({})",
+                    if default { "true" } else { "false" }
+                ),
             );
         }
         Err(_) => default,
@@ -178,7 +181,9 @@ fn env_opt_u32(name: &str) -> Option<u32> {
     match std::env::var(name) {
         Ok(v) => {
             let trimmed = v.trim();
-            if trimmed.is_empty() { return None; }
+            if trimmed.is_empty() {
+                return None;
+            }
             Some(trimmed.parse().unwrap_or_else(|_| {
                 crate::ux::get().fatal(
                     &format!("{name} is set to \"{trimmed}\", which is not a valid number"),

@@ -11,7 +11,7 @@ fn origin_of(url: &str) -> &str {
     let after_scheme = url.find("://").map(|i| i + 3).unwrap_or(0);
     match url[after_scheme..].find('/') {
         Some(i) => &url[..after_scheme + i],
-        None    => url,
+        None => url,
     }
 }
 
@@ -34,7 +34,9 @@ fn origin_of(url: &str) -> &str {
 pub async fn connect<S: HttpStream>(cook: &mut ThumbCook<S>) {
     let mut options = ConnectOptions::default();
 
-    options.headers.push(("User-Agent".to_string(), cook.runtime.user_agent.clone()));
+    options
+        .headers
+        .push(("User-Agent".to_string(), cook.runtime.user_agent.clone()));
 
     // Apply conditional request headers from caller's prior cache hints.
     if let Some(ref hints) = cook.input.cache {
@@ -72,18 +74,21 @@ pub async fn connect<S: HttpStream>(cook: &mut ThumbCook<S>) {
         }
     };
 
-    cook.http_status         = buf.status;
-    cook.http_headers        = buf.headers.clone();
+    cook.http_status = buf.status;
+    cook.http_headers = buf.headers.clone();
     cook.http_accepts_ranges = buf.accepts_ranges;
-    cook.media.file_size     = buf.content_length;
+    cook.media.file_size = buf.content_length;
 
     // 429 / 503 — rate limiting: engage origin back-off, return Unavailable.
     // Parse `Retry-After` (integer seconds only); fall back to default TTL.
     if matches!(buf.status, 429 | 503) {
-        let ttl = buf.headers.get("retry-after")
+        let ttl = buf
+            .headers
+            .get("retry-after")
             .and_then(|v| v.trim().parse::<u64>().ok())
             .unwrap_or(cook.runtime.backoff_default);
-        cook.runtime.origin_backoff
+        cook.runtime
+            .origin_backoff
             .record(origin_of(&cook.input.url).to_string(), buf.status, ttl)
             .await;
         cook.status = CookStatus::Overloaded;
@@ -97,21 +102,24 @@ pub async fn connect<S: HttpStream>(cook: &mut ThumbCook<S>) {
             return;
         }
         401 | 403 => Some(Arc::from("permission denied")),
-        404        => Some(Arc::from("source not found")),
-        410        => Some(Arc::from("source gone")),
-        s if s >= 500               => Some(Arc::from(format!("server error (HTTP {s})").as_str())),
+        404 => Some(Arc::from("source not found")),
+        410 => Some(Arc::from("source gone")),
+        s if s >= 500 => Some(Arc::from(format!("server error (HTTP {s})").as_str())),
         s if !(200..300).contains(&s) => Some(Arc::from(format!("unexpected HTTP status {s}").as_str())),
         _ => None,
     };
 
     if let Some(msg) = fail_msg {
-        cook.runtime.url_failures.record(cook.input.url.clone(), buf.status, msg.clone()).await;
+        cook.runtime
+            .url_failures
+            .record(cook.input.url.clone(), buf.status, msg.clone())
+            .await;
         cook.fail(msg.as_ref());
         return;
     }
 
-    cook.src.cache_hints   = CacheHints::from_response_headers(&buf.headers);
-    cook.src.final_url     = Some(buf.url.clone());
+    cook.src.cache_hints = CacheHints::from_response_headers(&buf.headers);
+    cook.src.final_url = Some(buf.url.clone());
     cook.src.canonical_url = canonical_url(&buf.url);
 
     // If the server returned a 2xx HTML page (common for CDN error pages on

@@ -92,13 +92,17 @@ pub fn content_hash_from_headers(
     // 1. AWS SHA-256 checksum
     if let Some(v) = headers.get("x-amz-checksum-sha256") {
         let v = v.trim();
-        if !v.is_empty() { return Some((v.to_string(), "x-amz-checksum-sha256")); }
+        if !v.is_empty() {
+            return Some((v.to_string(), "x-amz-checksum-sha256"));
+        }
     }
 
     // 2. RFC Content-MD5
     if let Some(v) = headers.get("content-md5") {
         let v = v.trim();
-        if !v.is_empty() { return Some((v.to_string(), "content-md5")); }
+        if !v.is_empty() {
+            return Some((v.to_string(), "content-md5"));
+        }
     }
 
     // 3. Strong ETag (S3, GCS, and most CDNs emit MD5 or SHA-256 here)
@@ -116,7 +120,9 @@ pub fn content_hash_from_headers(
             let part = part.trim();
             if let Some(hash) = part.strip_prefix("md5=") {
                 let hash = hash.trim();
-                if !hash.is_empty() { return Some((hash.to_string(), "x-goog-hash/md5")); }
+                if !hash.is_empty() {
+                    return Some((hash.to_string(), "x-goog-hash/md5"));
+                }
             }
         }
         // Fall through to crc32c only if no md5
@@ -124,7 +130,9 @@ pub fn content_hash_from_headers(
             let part = part.trim();
             if let Some(hash) = part.strip_prefix("crc32c=") {
                 let hash = hash.trim();
-                if !hash.is_empty() { return Some((hash.to_string(), "x-goog-hash/crc32c")); }
+                if !hash.is_empty() {
+                    return Some((hash.to_string(), "x-goog-hash/crc32c"));
+                }
             }
         }
     }
@@ -283,10 +291,7 @@ impl CacheHints {
             }
 
             if let Some(age_secs) = max_age {
-                let age_consumed = headers
-                    .get("age")
-                    .and_then(|v| v.trim().parse::<u64>().ok())
-                    .unwrap_or(0);
+                let age_consumed = headers.get("age").and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0);
                 let remaining = age_secs.saturating_sub(age_consumed);
                 let now = unix_now_secs();
                 hints.expires_at = Some(now + remaining);
@@ -398,7 +403,7 @@ impl CacheHints {
         let epoch = if let Some(e) = self.expires_at {
             e
         } else if has_validator {
-            1  // stale immediately, but client should store for conditional revalidation
+            1 // stale immediately, but client should store for conditional revalidation
         } else {
             unix_now_secs() + default_ttl_secs
         };
@@ -434,10 +439,7 @@ impl CacheHints {
             buf.pop();
         }
 
-        let b64 = base64::Engine::encode(
-            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-            &buf,
-        );
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &buf);
         format!("{epoch:x}:{b64}")
     }
 
@@ -453,13 +455,13 @@ impl CacheHints {
         }
 
         let epoch = u64::from_str_radix(epoch_hex, 16).ok()?;
-        let buf = base64::Engine::decode(
-            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-            blob,
-        ).ok()?;
+        let buf = base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, blob).ok()?;
 
         let mut pos = 0;
-        let mut hints = Self { expires_at: Some(epoch), ..Default::default() };
+        let mut hints = Self {
+            expires_at: Some(epoch),
+            ..Default::default()
+        };
         if epoch == 0 {
             hints.expires_at = None;
             hints.no_store = true;
@@ -467,7 +469,8 @@ impl CacheHints {
 
         // Field 0: stale_while_revalidate
         if pos < buf.len() {
-            let hdr = buf[pos]; pos += 1;
+            let hdr = buf[pos];
+            pos += 1;
             if hdr == 4 && pos + 4 <= buf.len() {
                 let arr: [u8; 4] = buf[pos..pos + 4].try_into().unwrap();
                 hints.stale_while_revalidate = Some(u32::from_be_bytes(arr));
@@ -570,9 +573,15 @@ mod tests {
 
     #[test]
     fn uncacheable_returns_empty() {
-        let hints = CacheHints { no_store: true, ..Default::default() };
+        let hints = CacheHints {
+            no_store: true,
+            ..Default::default()
+        };
         assert_eq!(hints.encode(0), "");
-        let hints = CacheHints { private: true, ..Default::default() };
+        let hints = CacheHints {
+            private: true,
+            ..Default::default()
+        };
         assert_eq!(hints.encode(0), "");
     }
 

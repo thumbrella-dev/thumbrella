@@ -76,8 +76,12 @@ pub fn url_host_allowed(url: &str, allowed: &[String]) -> bool {
     if allowed.is_empty() {
         return true;
     }
-    let Ok(parsed) = url::Url::parse(url) else { return false };
-    let Some(host) = parsed.host_str() else { return false };
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
     let host = host.to_ascii_lowercase();
 
     allowed.iter().any(|pattern| {
@@ -99,16 +103,17 @@ fn is_safe_ipv4(addr: Ipv4Addr) -> bool {
         || addr.is_unspecified()   // 0.0.0.0
         || addr.is_broadcast()     // 255.255.255.255
         || addr.is_multicast()     // 224.0.0.0/4
-        || addr.is_documentation() // 192.0.2/24, 198.51.100/24, 203.0.113/24
+        || addr.is_documentation()
+    // 192.0.2/24, 198.51.100/24, 203.0.113/24
     {
         return false;
     }
     let octets = addr.octets();
     match (octets[0], octets[1]) {
         (100, 64..=127) => return false, // shared address space (RFC 6598)
-        (192, 0)        => return false, // IETF protocol assignments (192.0.0/24)
-        (198, 18..=19)  => return false, // benchmarking (RFC 2544)
-        (240..=255, _)  => return false, // reserved (RFC 1112)
+        (192, 0) => return false,        // IETF protocol assignments (192.0.0/24)
+        (198, 18..=19) => return false,  // benchmarking (RFC 2544)
+        (240..=255, _) => return false,  // reserved (RFC 1112)
         _ => {}
     }
     true
@@ -119,7 +124,8 @@ fn is_safe_ipv4(addr: Ipv4Addr) -> bool {
 fn is_safe_ipv6(addr: Ipv6Addr) -> bool {
     if addr.is_loopback()        // ::1
         || addr.is_unspecified() // ::
-        || addr.is_multicast()   // ff00::/8
+        || addr.is_multicast()
+    // ff00::/8
     {
         return false;
     }

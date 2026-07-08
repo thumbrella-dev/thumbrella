@@ -58,11 +58,11 @@ impl Default for SandboxConfig {
         Self {
             // 0 = no address space limit — needed for Python-based renderers
             // (usd-core) and FFmpeg that load large native libraries.
-            max_memory:         0,
-            max_fds:            64,
-            allow_core_dumps:   false,
-            drop_capabilities:  true,
-            needs_networking:   false,
+            max_memory: 0,
+            max_fds: 64,
+            allow_core_dumps: false,
+            drop_capabilities: true,
+            needs_networking: false,
         }
     }
 }
@@ -80,12 +80,7 @@ pub fn default_strict() -> SandboxConfig {
 ///
 /// Returns a [`Command`] that invokes `bwrap` with the appropriate
 /// isolation flags, then runs `program` with `args`.
-pub fn bwrap_command(
-    scratch_dir: &Path,
-    program: &str,
-    args: &[&str],
-    config: &SandboxConfig,
-) -> Command {
+pub fn bwrap_command(scratch_dir: &Path, program: &str, args: &[&str], config: &SandboxConfig) -> Command {
     let mut cmd = Command::new("bwrap");
 
     // ── Namespace isolation ──────────────────────────────────────────────
@@ -145,16 +140,14 @@ pub fn bwrap_available() -> bool {
 ///
 /// `scratch_dir` is the arena root — the subprocess can only write here
 /// when bwrap is active.
-pub fn sandboxed_command(
-    scratch_dir: &Path,
-    program: &str,
-    args: &[&str],
-) -> Command {
+pub fn sandboxed_command(scratch_dir: &Path, program: &str, args: &[&str]) -> Command {
     if bwrap_available() {
         bwrap_command(scratch_dir, program, args, &SandboxConfig::default())
     } else {
         let mut cmd = Command::new(program);
-        for a in args { cmd.arg(a); }
+        for a in args {
+            cmd.arg(a);
+        }
         apply(&mut cmd, &SandboxConfig::default());
         cmd
     }

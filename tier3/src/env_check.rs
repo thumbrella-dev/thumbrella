@@ -150,11 +150,15 @@ pub fn probe_environment() -> EnvReport {
     probe_runtime_services(&mut report);
 
     // ── Build summary ─────────────────────────────────────────────────────────
-    let available: Vec<&str> = report.backends.values()
+    let available: Vec<&str> = report
+        .backends
+        .values()
         .filter(|b| b.available)
         .map(|b| b.name.as_str())
         .collect();
-    let unavailable: Vec<&str> = report.backends.values()
+    let unavailable: Vec<&str> = report
+        .backends
+        .values()
         .filter(|b| !b.available)
         .map(|b| b.name.as_str())
         .collect();
@@ -191,14 +195,17 @@ fn probe_builtins(report: &mut EnvReport) {
     ];
 
     for (name, category, desc) in builtins {
-        report.backends.insert(name.to_string(), BackendInfo {
-            name: name.to_string(),
-            category: category.to_string(),
-            method: ProbeMethod::Builtin,
-            available: true,
-            details: Some(desc.to_string()),
-            unavailable_reason: None,
-        });
+        report.backends.insert(
+            name.to_string(),
+            BackendInfo {
+                name: name.to_string(),
+                category: category.to_string(),
+                method: ProbeMethod::Builtin,
+                available: true,
+                details: Some(desc.to_string()),
+                unavailable_reason: None,
+            },
+        );
     }
 }
 
@@ -215,14 +222,19 @@ fn probe_shared_libraries(report: &mut EnvReport) {
 
     for (name, category, soname, desc) in candidates {
         let (available, details, reason) = try_dlopen(soname, desc);
-        report.backends.insert(name.to_string(), BackendInfo {
-            name: name.to_string(),
-            category: category.to_string(),
-            method: ProbeMethod::SharedLibrary { soname: soname.to_string() },
-            available,
-            details,
-            unavailable_reason: reason,
-        });
+        report.backends.insert(
+            name.to_string(),
+            BackendInfo {
+                name: name.to_string(),
+                category: category.to_string(),
+                method: ProbeMethod::SharedLibrary {
+                    soname: soname.to_string(),
+                },
+                available,
+                details,
+                unavailable_reason: reason,
+            },
+        );
     }
 }
 
@@ -232,25 +244,46 @@ fn probe_executables(report: &mut EnvReport) {
     // These are external command-line tools invoked as subprocesses.
     // Tier 3 runs them with input on stdin and captures stdout.
     let candidates: &[(&str, &str, &str, &str, &str)] = &[
-        ("ffmpeg_cli", "image", "ffmpeg", "-version", "FFmpeg CLI (JPEG fallback / transcoding)"),
-        ("magick",    "image", "gm", "version", "GraphicsMagick (arithmetic JPEG, resize)"),
-        ("oiiotool",  "image", "oiiotool", "--version", "OpenImageIO (EXR, HDR, DPX, studio formats)"),
-        ("bwrap",     "runtime", "bwrap", "--version", "Bubblewrap sandbox (subprocess isolation)"),
+        (
+            "ffmpeg_cli",
+            "image",
+            "ffmpeg",
+            "-version",
+            "FFmpeg CLI (JPEG fallback / transcoding)",
+        ),
+        ("magick", "image", "gm", "version", "GraphicsMagick (arithmetic JPEG, resize)"),
+        (
+            "oiiotool",
+            "image",
+            "oiiotool",
+            "--version",
+            "OpenImageIO (EXR, HDR, DPX, studio formats)",
+        ),
+        (
+            "bwrap",
+            "runtime",
+            "bwrap",
+            "--version",
+            "Bubblewrap sandbox (subprocess isolation)",
+        ),
     ];
 
     for (name, category, binary, check_arg, desc) in candidates {
         let (available, details, reason) = try_executable(binary, check_arg, desc);
-        report.backends.insert(name.to_string(), BackendInfo {
-            name: name.to_string(),
-            category: category.to_string(),
-            method: ProbeMethod::Executable {
-                binary: binary.to_string(),
-                check_arg: check_arg.to_string(),
+        report.backends.insert(
+            name.to_string(),
+            BackendInfo {
+                name: name.to_string(),
+                category: category.to_string(),
+                method: ProbeMethod::Executable {
+                    binary: binary.to_string(),
+                    check_arg: check_arg.to_string(),
+                },
+                available,
+                details,
+                unavailable_reason: reason,
             },
-            available,
-            details,
-            unavailable_reason: reason,
-        });
+        );
     }
 
     // Registered handlers — probed by file existence + execute bit.
@@ -267,35 +300,40 @@ fn probe_executables(report: &mut EnvReport) {
             };
             (a, d, r, m)
         };
-        report.backends.insert(h.name.to_string(), BackendInfo {
-            name: h.name.to_string(),
-            category: h.category.to_string(),
-            method,
-            available,
-            details,
-            unavailable_reason: reason,
-        });
+        report.backends.insert(
+            h.name.to_string(),
+            BackendInfo {
+                name: h.name.to_string(),
+                category: h.category.to_string(),
+                method,
+                available,
+                details,
+                unavailable_reason: reason,
+            },
+        );
     }
 }
 
 fn probe_runtime_services(report: &mut EnvReport) {
     // Check for a display server (xvfb / X11 / Wayland).
-    let has_display = std::env::var("DISPLAY").ok()
-        .or_else(|| std::env::var("WAYLAND_DISPLAY").ok());
+    let has_display = std::env::var("DISPLAY").ok().or_else(|| std::env::var("WAYLAND_DISPLAY").ok());
     let (available, details, reason) = match has_display {
         Some(d) => (true, Some(format!("display server: {d}")), None),
         None => (false, None, Some("no DISPLAY or WAYLAND_DISPLAY set".to_string())),
     };
-    report.backends.insert("display_server".to_string(), BackendInfo {
-        name: "display_server".to_string(),
-        category: "runtime".to_string(),
-        method: ProbeMethod::RuntimeService {
-            description: "X11/Wayland display server for headful renderers".to_string(),
+    report.backends.insert(
+        "display_server".to_string(),
+        BackendInfo {
+            name: "display_server".to_string(),
+            category: "runtime".to_string(),
+            method: ProbeMethod::RuntimeService {
+                description: "X11/Wayland display server for headful renderers".to_string(),
+            },
+            available,
+            details,
+            unavailable_reason: reason,
         },
-        available,
-        details,
-        unavailable_reason: reason,
-    });
+    );
 }
 
 // ── F3D probe ─────────────────────────────────────────────────────────────────
@@ -310,22 +348,26 @@ fn probe_f3d(report: &mut EnvReport) {
     let path = match which::which("f3d") {
         Ok(p) => p,
         Err(_) => {
-            report.backends.insert("f3d".into(), BackendInfo {
-                name: "f3d".into(),
-                category: "geometry".into(),
-                method: ProbeMethod::Executable {
-                    binary: "f3d".into(),
-                    check_arg: "--version".into(),
+            report.backends.insert(
+                "f3d".into(),
+                BackendInfo {
+                    name: "f3d".into(),
+                    category: "geometry".into(),
+                    method: ProbeMethod::Executable {
+                        binary: "f3d".into(),
+                        check_arg: "--version".into(),
+                    },
+                    available: false,
+                    details: None,
+                    unavailable_reason: Some("f3d not found on PATH".into()),
                 },
-                available: false,
-                details: None,
-                unavailable_reason: Some("f3d not found on PATH".into()),
-            });
+            );
             return;
         }
     };
 
-    let has_display = std::env::var("DISPLAY").ok()
+    let has_display = std::env::var("DISPLAY")
+        .ok()
         .or_else(|| std::env::var("WAYLAND_DISPLAY").ok())
         .is_some();
 
@@ -344,27 +386,30 @@ fn probe_f3d(report: &mut EnvReport) {
                     .to_string();
                 (Some(format!("{}: {}", path.display(), first_line)), None)
             }
-            Err(e) => {
-                (Some(format!("found at {}", path.display())),
-                 Some(format!("f3d --version: {e}")))
-            }
+            Err(e) => (
+                Some(format!("found at {}", path.display())),
+                Some(format!("f3d --version: {e}")),
+            ),
         }
     } else {
         // F3D --version crashes without a display; just note it was found.
         (Some(format!("{} (display required for version check)", path.display())), None)
     };
 
-    report.backends.insert("f3d".into(), BackendInfo {
-        name: "f3d".into(),
-        category: "geometry".into(),
-        method: ProbeMethod::Executable {
-            binary: "f3d".into(),
-            check_arg: "--version".into(),
+    report.backends.insert(
+        "f3d".into(),
+        BackendInfo {
+            name: "f3d".into(),
+            category: "geometry".into(),
+            method: ProbeMethod::Executable {
+                binary: "f3d".into(),
+                check_arg: "--version".into(),
+            },
+            available: true,
+            details,
+            unavailable_reason: reason,
         },
-        available: true,
-        details,
-        unavailable_reason: reason,
-    });
+    );
 }
 
 // ── Python + usd-core probe ───────────────────────────────────────────────────
@@ -378,17 +423,20 @@ fn probe_python_usd(report: &mut EnvReport) {
     let python = match which::which("python3") {
         Ok(p) => p,
         Err(_) => {
-            report.backends.insert("python3".into(), BackendInfo {
-                name: "python3".into(),
-                category: "runtime".into(),
-                method: ProbeMethod::Executable {
-                    binary: "python3".into(),
-                    check_arg: "--version".into(),
+            report.backends.insert(
+                "python3".into(),
+                BackendInfo {
+                    name: "python3".into(),
+                    category: "runtime".into(),
+                    method: ProbeMethod::Executable {
+                        binary: "python3".into(),
+                        check_arg: "--version".into(),
+                    },
+                    available: false,
+                    details: None,
+                    unavailable_reason: Some("python3 not found on PATH".into()),
                 },
-                available: false,
-                details: None,
-                unavailable_reason: Some("python3 not found on PATH".into()),
-            });
+            );
             return;
         }
     };
@@ -421,21 +469,29 @@ fn probe_python_usd(report: &mut EnvReport) {
         .map(|s| s.success())
         .unwrap_or(false);
 
-    report.backends.insert("python3".into(), BackendInfo {
-        name: "python3".into(),
-        category: "runtime".into(),
-        method: ProbeMethod::Executable {
-            binary: "python3".into(),
-            check_arg: "--version".into(),
+    report.backends.insert(
+        "python3".into(),
+        BackendInfo {
+            name: "python3".into(),
+            category: "runtime".into(),
+            method: ProbeMethod::Executable {
+                binary: "python3".into(),
+                check_arg: "--version".into(),
+            },
+            available: true,
+            details: Some(format!(
+                "{}: {}; usd-core {}",
+                python.display(),
+                py_ver,
+                if usd_ok { "available" } else { "NOT FOUND" }
+            )),
+            unavailable_reason: if usd_ok {
+                None
+            } else {
+                Some("usd-core not installed (pip install usd-core)".into())
+            },
         },
-        available: true,
-        details: Some(format!("{}: {}; usd-core {}",
-            python.display(), py_ver,
-            if usd_ok { "available" } else { "NOT FOUND" })),
-        unavailable_reason: if usd_ok { None } else {
-            Some("usd-core not installed (pip install usd-core)".into())
-        },
-    });
+    );
 }
 
 // ── Low-level probe helpers ───────────────────────────────────────────────────
@@ -450,9 +506,7 @@ fn try_dlopen(soname: &str, _desc: &str) -> (bool, Option<String>, Option<String
             drop(lib);
             (true, Some(format!("dlopen({soname}) succeeded")), None)
         }
-        Err(e) => {
-            (false, None, Some(format!("dlopen({soname}): {e}")))
-        }
+        Err(e) => (false, None, Some(format!("dlopen({soname}): {e}"))),
     }
 }
 
@@ -480,10 +534,11 @@ fn try_executable(binary: &str, check_arg: &str, _desc: &str) -> (bool, Option<S
                 .to_string();
             (true, Some(format!("{}: {}", path.display(), first_line)), None)
         }
-        Err(e) => {
-            (false, Some(format!("found at {}", path.display())),
-             Some(format!("{binary} {check_arg}: {e}")))
-        }
+        Err(e) => (
+            false,
+            Some(format!("found at {}", path.display())),
+            Some(format!("{binary} {check_arg}: {e}")),
+        ),
     }
 }
 
@@ -504,27 +559,35 @@ fn try_executable_at(path: &str, _desc: &str) -> (bool, Option<String>, Option<S
     };
 
     match std::fs::metadata(&resolved) {
-        Ok(meta) if meta.is_file() => {
-            check_file_executable(meta, &resolved)
-        }
+        Ok(meta) if meta.is_file() => check_file_executable(meta, &resolved),
         Ok(_) => (false, None, Some(format!("{}: not a regular file", resolved.display()))),
         Err(e) => (false, None, Some(format!("{}: {e}", resolved.display()))),
     }
 }
 
 #[cfg(unix)]
-fn check_file_executable(meta: std::fs::Metadata, resolved: &std::path::Path) -> (bool, Option<String>, Option<String>) {
+fn check_file_executable(
+    meta: std::fs::Metadata,
+    resolved: &std::path::Path,
+) -> (bool, Option<String>, Option<String>) {
     use std::os::unix::fs::PermissionsExt;
     let mode = meta.permissions().mode();
     if mode & 0o111 != 0 {
         (true, Some(format!("executable at {}", resolved.display())), None)
     } else {
-        (false, None, Some(format!("{}: not executable (mode {mode:o})", resolved.display())))
+        (
+            false,
+            None,
+            Some(format!("{}: not executable (mode {mode:o})", resolved.display())),
+        )
     }
 }
 
 #[cfg(not(unix))]
-fn check_file_executable(_meta: std::fs::Metadata, resolved: &std::path::Path) -> (bool, Option<String>, Option<String>) {
+fn check_file_executable(
+    _meta: std::fs::Metadata,
+    resolved: &std::path::Path,
+) -> (bool, Option<String>, Option<String>) {
     // Windows: just check file exists — execute bits don't apply.
     (true, Some(format!("found at {}", resolved.display())), None)
 }

@@ -135,10 +135,10 @@ impl ShortcutLimits {
     /// Sized to keep the full CPU pipeline under ~15 ms and memory under
     /// the Worker heap limit.
     pub const TIER1: Self = Self {
-        max_progressive_pixels: 1_000_000,       // ~1 MP — ~7 ms decode
-        small_file_threshold:   80 * 1024,        // 80 KiB
-        zip_tail_size:          128 * 1024,        // 128 KiB
-        audio_cover_max_fetch:  128 * 1024,        // 128 KiB
+        max_progressive_pixels: 1_000_000, // ~1 MP — ~7 ms decode
+        small_file_threshold: 80 * 1024,   // 80 KiB
+        zip_tail_size: 128 * 1024,         // 128 KiB
+        audio_cover_max_fetch: 128 * 1024, // 128 KiB
     };
 
     /// Relaxed limits for Tier 2 (native server, no Worker budget).
@@ -152,8 +152,8 @@ impl ShortcutLimits {
     /// already-open connection (no Range request).
     pub const TIER2: Self = Self {
         max_progressive_pixels: u64::MAX,
-        small_file_threshold:   200 * 1024,       // 200 KiB
-        zip_tail_size:          256 * 1024,        // 256 KiB
-        audio_cover_max_fetch:  512 * 1024,        // 512 KiB
+        small_file_threshold: 200 * 1024,  // 200 KiB
+        zip_tail_size: 256 * 1024,         // 256 KiB
+        audio_cover_max_fetch: 512 * 1024, // 512 KiB
     };
 }

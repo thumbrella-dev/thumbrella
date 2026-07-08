@@ -51,12 +51,12 @@
 //! is generic over `S: HttpStream`.
 
 mod connect;
-mod inspect;
 pub mod deliver;
+mod inspect;
 mod shortcut;
 
 pub use connect::connect;
 pub use deliver::deliver;
-pub use inspect::inspect;
 pub use inspect::canonical_extension;
+pub use inspect::inspect;
 pub use shortcut::shortcut;

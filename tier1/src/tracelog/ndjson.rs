@@ -23,24 +23,23 @@ use crate::tracelog::TraceBackend;
 /// Append-only NDJSON file backend.  Thread-safe via an internal mutex.
 pub struct NdjsonTraceBackend {
     writer: Arc<Mutex<BufWriter<File>>>,
-    path:   String,
+    path: String,
 }
 
 impl NdjsonTraceBackend {
     /// Open (or create) an NDJSON file at `path` for appending.
     pub fn open(path: &str) -> std::io::Result<Self> {
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
         Ok(Self {
             writer: Arc::new(Mutex::new(BufWriter::new(file))),
-            path:   path.to_string(),
+            path: path.to_string(),
         })
     }
 
     /// Path this backend is writing to.
-    pub fn path(&self) -> &str { &self.path }
+    pub fn path(&self) -> &str {
+        &self.path
+    }
 
     /// Diagnostic check for a configured NDJSON trace path.
     ///
@@ -52,13 +51,17 @@ impl NdjsonTraceBackend {
 }
 
 impl TraceBackend for NdjsonTraceBackend {
-    fn name(&self) -> &'static str { "ndjson" }
+    fn name(&self) -> &'static str {
+        "ndjson"
+    }
 
     fn record_task(&self, trace: Arc<ThumbTrace>) -> DeferredFuture {
         let writer = Arc::clone(&self.writer);
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
-                let Ok(mut line) = serde_json::to_string(&*trace) else { return };
+                let Ok(mut line) = serde_json::to_string(&*trace) else {
+                    return;
+                };
                 line.push('\n');
                 if let Ok(mut guard) = writer.lock() {
                     let _ = guard.write_all(line.as_bytes());

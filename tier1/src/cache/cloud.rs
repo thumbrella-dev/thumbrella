@@ -47,12 +47,18 @@ impl CloudCacheBackend {
             .build()
             .map_err(|e| format!("cloud cache: failed to create HTTP client: {e}"))?;
 
-        Ok(Self { base_url, auth_token: token, client })
+        Ok(Self {
+            base_url,
+            auth_token: token,
+            client,
+        })
     }
 }
 
 impl CacheBackend for CloudCacheBackend {
-    fn name(&self) -> &'static str { "cloud" }
+    fn name(&self) -> &'static str {
+        "cloud"
+    }
 
     fn get<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = Option<String>> + Send + 'a>> {
         let url = format!("{}/cache/lookup", self.base_url);
@@ -122,9 +128,7 @@ pub async fn ping_cloud_token(token: &str) -> Result<(), String> {
 
     let status = resp.status();
     if !status.is_success() {
-        return Err(format!(
-            "health check returned HTTP {status} - check the auth token"
-        ));
+        return Err(format!("health check returned HTTP {status} - check the auth token"));
     }
 
     let body: serde_json::Value = resp

@@ -38,9 +38,9 @@ use std::sync::{Arc, OnceLock};
 
 use futures::channel::oneshot;
 
-use serde::{Deserialize, Serialize};
 use crate::cook::{InputSpec, MediaInfo, SourceIdentity};
 use crate::result::{ThumbResult, ThumbTrace};
+use serde::{Deserialize, Serialize};
 
 /// Shared secret header name for server-to-server requests.
 pub const HANDSHAKE_HEADER: &str = "x-tbr-handshake";
@@ -48,9 +48,9 @@ pub const HANDSHAKE_HEADER: &str = "x-tbr-handshake";
 /// Serialisable bundle forwarded to a higher-tier renderer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThumbHandoff {
-    pub input:  InputSpec,
-    pub media:  MediaInfo,
-    pub src:    SourceIdentity,
+    pub input: InputSpec,
+    pub media: MediaInfo,
+    pub src: SourceIdentity,
 
     /// First ~4 KiB of the remote file captured from the inspect page cache.
     ///
@@ -114,12 +114,7 @@ pub async fn post_handoff(
     payload: &ThumbHandoff,
 ) -> Result<HandoffResponse, String> {
     if let Some(f) = HANDOFF_IMPL.get() {
-        return f(
-            base_url.to_string(),
-            headers.clone(),
-            payload.clone(),
-        )
-        .await;
+        return f(base_url.to_string(), headers.clone(), payload.clone()).await;
     }
     native_post_handoff(base_url, headers, payload).await
 }
@@ -145,10 +140,7 @@ async fn native_post_handoff(
         req = req.header(k.as_str(), v.as_str());
     }
 
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| format!("handoff request failed: {e}"))?;
+    let resp = req.send().await.map_err(|e| format!("handoff request failed: {e}"))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -168,11 +160,9 @@ async fn native_post_handoff(
     _headers: &HashMap<String, String>,
     _payload: &ThumbHandoff,
 ) -> Result<HandoffResponse, String> {
-    Err(
-        "no handoff implementation registered; \
+    Err("no handoff implementation registered; \
          call tier1::handoff::register_handoff_fn() at startup"
-            .to_string(),
-    )
+        .to_string())
 }
 
 // ── HandoffInflight ───────────────────────────────────────────────────────────
@@ -206,10 +196,7 @@ impl HandoffInflight {
     ///                       then call [`complete`](Self::complete).
     /// Returns `Some(rx)` → caller is a **joiner**; `.await rx` to receive
     ///                       the shared result once the leader finishes.
-    pub fn try_lead(
-        &self,
-        key: &str,
-    ) -> Option<oneshot::Receiver<Arc<Result<HandoffResponse, String>>>> {
+    pub fn try_lead(&self, key: &str) -> Option<oneshot::Receiver<Arc<Result<HandoffResponse, String>>>> {
         let mut map = self.0.lock();
         if map.contains_key(key) {
             let (tx, rx) = oneshot::channel();

@@ -10,18 +10,13 @@ use std::process::Command;
 fn main() {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
 
-    let script  = Path::new(&manifest).join("build_placeholders.py");
+    let script = Path::new(&manifest).join("build_placeholders.py");
     let out_dir = Path::new(&manifest).join("assets/placeholders");
 
     // Rerun only if the generator script itself is edited.
     println!("cargo:rerun-if-changed={}", script.display());
 
-    match Command::new("python3")
-        .arg(&script)
-        .arg("--out")
-        .arg(&out_dir)
-        .status()
-    {
+    match Command::new("python3").arg(&script).arg("--out").arg(&out_dir).status() {
         Ok(s) if s.success() => {}
         Ok(s) => println!(
             "cargo:warning=build_placeholders.py exited with {s}; \

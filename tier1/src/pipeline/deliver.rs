@@ -6,8 +6,8 @@
 
 use web_time::Instant;
 
-use image::imageops::{crop_imm, resize, unsharpen, FilterType};
 use image::DynamicImage;
+use image::imageops::{FilterType, crop_imm, resize, unsharpen};
 
 use crate::cook::{CookStatus, ThumbCook};
 use crate::http_buf::HttpStream;
@@ -20,7 +20,9 @@ use crate::spec::ThumbnailConfig;
 /// Assumes `cook.render_image.is_some()` — called only when shortcut has populated it.
 /// Sets `cook.out_thumbnail` and `status = Complete`.
 pub async fn deliver<S: HttpStream>(cook: &mut ThumbCook<S>) {
-    let Some(img) = cook.render_image.take() else { return };
+    let Some(img) = cook.render_image.take() else {
+        return;
+    };
     cook.render_resolution = Some([img.width(), img.height()]);
     let config = &ThumbnailConfig::CANONICAL;
 
@@ -37,7 +39,13 @@ pub async fn deliver<S: HttpStream>(cook: &mut ThumbCook<S>) {
 
     let t0 = Instant::now();
     let mut buf = ProcessBuffer::from_dynamic(img);
-    buf.fit_to_target(config.exact_width, config.exact_height, config.min_fill_ratio, config.fill_budget, pixel_art);
+    buf.fit_to_target(
+        config.exact_width,
+        config.exact_height,
+        config.min_fill_ratio,
+        config.fill_budget,
+        pixel_art,
+    );
     buf.place_on_canvas(
         config.exact_width,
         config.exact_height,
@@ -68,12 +76,12 @@ pub async fn deliver<S: HttpStream>(cook: &mut ThumbCook<S>) {
     let jpeg = inject_exif_comment(&jpeg);
     drop(buf);
 
-    let deliver_secs    = t0.elapsed().as_secs_f64();
+    let deliver_secs = t0.elapsed().as_secs_f64();
     let thumbnail_bytes = jpeg.len() as u64;
-    cook.out_thumbnail        = jpeg;
-    cook.tel_deliver_secs     = deliver_secs;
-    cook.tel_thumbnail_bytes  = Some(thumbnail_bytes);
-    cook.status               = CookStatus::Complete;
+    cook.out_thumbnail = jpeg;
+    cook.tel_deliver_secs = deliver_secs;
+    cook.tel_thumbnail_bytes = Some(thumbnail_bytes);
+    cook.status = CookStatus::Complete;
 }
 
 // ── Process buffer ────────────────────────────────────────────────────────────
@@ -109,7 +117,7 @@ impl ProcessBuffer {
 
     fn dimensions(&self) -> (u32, u32) {
         match &self.inner {
-            BufInner::Rgb(i)  => i.dimensions(),
+            BufInner::Rgb(i) => i.dimensions(),
             BufInner::Rgba(i) => i.dimensions(),
         }
     }
@@ -153,13 +161,13 @@ impl ProcessBuffer {
         let (resize_w, resize_h, crop_w, crop_h) = if fit_h < min_h {
             // Extremely wide: height would fall below minimum after fit-within.
             // Scale so height = min_h; width overflows target_w -> center-crop.
-            let s  = min_h as f32 / src_h as f32;
+            let s = min_h as f32 / src_h as f32;
             let rw = ((src_w as f32 * s).round() as u32).max(target_w);
             (rw, min_h, target_w, min_h)
         } else if fit_w < min_w {
             // Extremely tall: width would fall below minimum after fit-within.
             // Scale so width = min_w; height overflows target_h -> upper-crop.
-            let s  = min_w as f32 / src_w as f32;
+            let s = min_w as f32 / src_w as f32;
             let rh = ((src_h as f32 * s).round() as u32).max(target_h);
             (min_w, rh, min_w, target_h)
         } else {
@@ -174,11 +182,11 @@ impl ProcessBuffer {
             // scale up by at most 1/(1-fill_budget) × fit_scale, capped at
             // fill_scale.  Near-fill sources whose gap < fill_budget also snap to
             // full fill automatically; larger mismatches get a proportional blend.
-            let src_ar     = src_w as f32 / src_h as f32;
+            let src_ar = src_w as f32 / src_h as f32;
             let fill_scale = (target_w as f32 / src_w as f32).max(target_h as f32 / src_h as f32);
-            let max_scale  = fit_scale / (1.0 - fill_budget).max(f32::EPSILON);
+            let max_scale = fit_scale / (1.0 - fill_budget).max(f32::EPSILON);
             let blend = if src_ar >= 1.0 && src_ar <= 1.3 {
-                fill_scale  // near-square (1:1 – ~4:3): snap directly to full fill
+                fill_scale // near-square (1:1 – ~4:3): snap directly to full fill
             } else {
                 fill_scale.min(max_scale)
             };
@@ -188,7 +196,7 @@ impl ProcessBuffer {
         };
 
         let needs_resize = resize_w != src_w || resize_h != src_h;
-        let needs_crop   = crop_w != resize_w || crop_h != resize_h;
+        let needs_crop = crop_w != resize_w || crop_h != resize_h;
 
         // Skip resize when scale is trivially close to 1, no crop is needed, AND
         // the source already fits within the target bounds (upscaling / identity
@@ -196,7 +204,8 @@ impl ProcessBuffer {
         // must resize so the content never exceeds the canvas in place_on_canvas.
         let trivial = !pixel_art
             && !needs_crop
-            && src_w <= resize_w && src_h <= resize_h
+            && src_w <= resize_w
+            && src_h <= resize_h
             && (resize_w as f32 / src_w as f32 - 1.0).abs() <= 0.06
             && src_w.abs_diff(resize_w) <= 8;
 
@@ -284,15 +293,21 @@ impl ProcessBuffer {
 
     /// Unsharp mask on the final RGB buffer (call after compositing).
     pub(super) fn apply_unsharp_mask(&mut self, sigma: f32, threshold: i32) {
-        let BufInner::Rgb(ref mut img) = self.inner else { return };
+        let BufInner::Rgb(ref mut img) = self.inner else {
+            return;
+        };
         *img = unsharpen(img as &image::RgbImage, sigma, threshold);
     }
 
     /// Radial vignette using squared distance from centre — no sqrt, JPEG-friendly.
     /// `strength` = 0.0 (none) … 1.0 (corners fully black).
     pub(super) fn apply_vignette(&mut self, strength: f32) {
-        if strength <= 0.0 { return; }
-        let BufInner::Rgb(ref mut img) = self.inner else { return };
+        if strength <= 0.0 {
+            return;
+        }
+        let BufInner::Rgb(ref mut img) = self.inner else {
+            return;
+        };
         let (w, h) = img.dimensions();
         let cx = w as f32 * 0.5;
         let cy = h as f32 * 0.5;
@@ -303,10 +318,10 @@ impl ProcessBuffer {
             let dy2 = dy * dy;
             for x in 0..w {
                 let dx = x as f32 + 0.5 - cx;
-                let sq_norm = (dx * dx + dy2) / max_sq;  // 0 at centre, 1 at corner
+                let sq_norm = (dx * dx + dy2) / max_sq; // 0 at centre, 1 at corner
                 let factor = 1.0 - strength * sq_norm;
                 let i = (y * w + x) as usize * 3;
-                raw[i]     = (raw[i]     as f32 * factor) as u8;
+                raw[i] = (raw[i] as f32 * factor) as u8;
                 raw[i + 1] = (raw[i + 1] as f32 * factor) as u8;
                 raw[i + 2] = (raw[i + 2] as f32 * factor) as u8;
             }
@@ -402,7 +417,7 @@ pub fn inject_exif_comment(jpeg: &[u8]) -> Vec<u8> {
 
     let mut out = Vec::with_capacity(jpeg.len() + app1.len());
     out.extend_from_slice(&jpeg[..2]); // SOI
-    out.extend_from_slice(&app1);      // APP1 EXIF
+    out.extend_from_slice(&app1); // APP1 EXIF
     out.extend_from_slice(&jpeg[2..]); // rest of JPEG (JFIF, tables, data, …)
     out
 }
@@ -425,7 +440,9 @@ fn make_canvas(w: u32, h: u32, bg: [u8; 3], bg_image: Option<&image::RgbImage>) 
         Some(img) if img.dimensions() == (w, h) => img.clone(),
         _ => {
             let mut canvas = image::RgbImage::new(w, h);
-            for p in canvas.pixels_mut() { *p = image::Rgb(bg); }
+            for p in canvas.pixels_mut() {
+                *p = image::Rgb(bg);
+            }
             canvas
         }
     }
@@ -455,11 +472,13 @@ fn composite_rgba_onto(rgba: &image::RgbaImage, dst: &mut image::RgbImage, ox: u
         for x in 0..sw {
             let si = (y * sw + x) as usize;
             let di = ((oy + y) * dw + (ox + x)) as usize;
-            let a  = src[si * 4 + 3] as u32;
+            let a = src[si * 4 + 3] as u32;
             let ia = 255 - a;
-            dst_raw[di * 3]     = ((src[si*4]     as u32 * a + dst_raw[di*3]     as u32 * ia + 127) / 255) as u8;
-            dst_raw[di * 3 + 1] = ((src[si*4 + 1] as u32 * a + dst_raw[di*3 + 1] as u32 * ia + 127) / 255) as u8;
-            dst_raw[di * 3 + 2] = ((src[si*4 + 2] as u32 * a + dst_raw[di*3 + 2] as u32 * ia + 127) / 255) as u8;
+            dst_raw[di * 3] = ((src[si * 4] as u32 * a + dst_raw[di * 3] as u32 * ia + 127) / 255) as u8;
+            dst_raw[di * 3 + 1] =
+                ((src[si * 4 + 1] as u32 * a + dst_raw[di * 3 + 1] as u32 * ia + 127) / 255) as u8;
+            dst_raw[di * 3 + 2] =
+                ((src[si * 4 + 2] as u32 * a + dst_raw[di * 3 + 2] as u32 * ia + 127) / 255) as u8;
         }
     }
 }

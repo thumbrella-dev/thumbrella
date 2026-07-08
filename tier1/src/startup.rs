@@ -2,11 +2,11 @@
 
 use std::sync::Arc;
 
-use image;
 use crate::cache::{self, CacheStore};
 use crate::config::AppConfig;
 use crate::cook::Runtime;
 use crate::tracelog::{self, TraceStore};
+use image;
 
 /// Run all one-time startup tasks and return the shared [`Runtime`].
 ///
@@ -29,9 +29,7 @@ pub async fn startup(cfg: &AppConfig) -> Arc<Runtime> {
             CacheStore::none()
         } else {
             match cache::open_from_dsn(dsn) {
-                Ok(backend) => {
-                    CacheStore::new(backend, STICKY_TTL_SECS)
-                }
+                Ok(backend) => CacheStore::new(backend, STICKY_TTL_SECS),
                 Err(e) => {
                     tracing::error!("cache: could not open {dsn}: {e} — running without cache");
                     CacheStore::none()

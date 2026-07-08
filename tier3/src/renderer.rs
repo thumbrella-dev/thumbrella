@@ -78,7 +78,9 @@ pub struct Tier3Renderer {
 impl Tier3Renderer {
     /// Create a new tier 3 renderer.
     pub fn new() -> Self {
-        Self { tier2: Tier2Renderer::new() }
+        Self {
+            tier2: Tier2Renderer::new(),
+        }
     }
 
     /// Create a shared (Arc-wrapped) tier 3 renderer.
@@ -88,18 +90,17 @@ impl Tier3Renderer {
 }
 
 impl Default for Tier3Renderer {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl InProcessRenderer for Tier3Renderer {
-    fn render<'a>(
-        &'a self,
-        cook: &'a mut dyn RenderCook,
-    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+    fn render<'a>(&'a self, cook: &'a mut dyn RenderCook) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         Box::pin(async move {
             let kind = cook.media_kind();
-            let ext  = cook.media_extension().unwrap_or("?").to_string();
-            let cl   = cook.content_length();
+            let ext = cook.media_extension().unwrap_or("?").to_string();
+            let cl = cook.content_length();
             tbr_debug!("[tier3] render: kind={kind:?}  ext={ext}  content_length={cl:?}");
 
             // On a handoff, skip tier2 entirely — the lower tier already
@@ -108,12 +109,8 @@ impl InProcessRenderer for Tier3Renderer {
             let is_handoff = cook.is_handoff();
 
             match kind {
-                Some(FileKind::Document) => {
-                    render_document_tier3(cook, &ext).await
-                }
-                Some(FileKind::Geometry) => {
-                    render_geometry_tier3(cook, &ext).await
-                }
+                Some(FileKind::Document) => render_document_tier3(cook, &ext).await,
+                Some(FileKind::Geometry) => render_geometry_tier3(cook, &ext).await,
                 Some(FileKind::Image) if matches!(ext.as_str(), "jpeg" | "jpg") => {
                     if render_image_tier3(cook, &ext).await {
                         true
@@ -128,14 +125,8 @@ impl InProcessRenderer for Tier3Renderer {
                     // If tier2 claims the format but fails to decode
                     // (has_render_image is false), fall back to the
                     // ffmpeg/oiio CLI path below.
-                    let tier2_ok = !is_handoff
-                        && self.tier2.render(cook).await
-                        && cook.has_render_image();
-                    if tier2_ok {
-                        true
-                    } else {
-                        render_image_ffmpeg_fallback(cook, &ext).await
-                    }
+                    let tier2_ok = !is_handoff && self.tier2.render(cook).await && cook.has_render_image();
+                    if tier2_ok { true } else { render_image_ffmpeg_fallback(cook, &ext).await }
                 }
                 Some(FileKind::Video) => {
                     // Try tier2 first (libav is faster).  Fall back to
@@ -150,9 +141,7 @@ impl InProcessRenderer for Tier3Renderer {
                     // Handoff for a format tier3 doesn't specifically handle.
                     false
                 }
-                _ => {
-                    self.tier2.render(cook).await
-                }
+                _ => self.tier2.render(cook).await,
             }
         })
     }
@@ -167,24 +156,25 @@ impl InProcessRenderer for Tier3Renderer {
 /// Arithmetic-coded JPEGs (SOF9) are not supported by libav's mjpeg
 /// decoder.  Tier 3 uses ImageMagick which delegates to libjpeg-turbo
 /// and handles all JPEG variants.
-async fn render_image_tier3(
-    cook: &mut dyn RenderCook,
-    ext: &str,
-) -> bool {
+async fn render_image_tier3(cook: &mut dyn RenderCook, ext: &str) -> bool {
     if !is_arithmetic_jpeg_peek(cook) {
         return false;
     }
 
     let report = crate::env_check::cached_report();
-    let has_magick = report.as_ref()
+    let has_magick = report
+        .as_ref()
         .and_then(|r| r.backends.get("magick"))
-        .map(|b| b.available).unwrap_or(false);
+        .map(|b| b.available)
+        .unwrap_or(false);
 
     if !has_magick {
         return false;
     }
 
-    let Some(mut reader) = cook.take_reader() else { return false; };
+    let Some(mut reader) = cook.take_reader() else {
+        return false;
+    };
     let ext_owned = ext.to_string();
 
     let result = tokio::task::spawn_blocking(move || {
@@ -192,19 +182,31 @@ async fn render_image_tier3(
         use std::io::Read;
         reader.read_to_end(&mut buf).map_err(|e| format!("read: {e}"))?;
         run_magick_image_decode(&buf, &ext_owned)
-    }).await;
+    })
+    .await;
 
     match result {
-        Ok(Ok(out)) => { apply_render_output(cook, out); true }
-        Ok(Err(msg)) => { cook.fail_cook(&msg); true }
-        Err(_) => { cook.fail_cook("magick panicked"); true }
+        Ok(Ok(out)) => {
+            apply_render_output(cook, out);
+            true
+        }
+        Ok(Err(msg)) => {
+            cook.fail_cook(&msg);
+            true
+        }
+        Err(_) => {
+            cook.fail_cook("magick panicked");
+            true
+        }
     }
 }
 
 /// Peek at already-cached bytes to detect arithmetic JPEG coding.
 /// Does not consume the reader.
 fn is_arithmetic_jpeg_peek(cook: &dyn RenderCook) -> bool {
-    let Some(buf) = cook.peek_bytes(512) else { return false; };
+    let Some(buf) = cook.peek_bytes(512) else {
+        return false;
+    };
     if buf.len() < 4 || buf[0] != 0xFF || buf[1] != 0xD8 {
         return false;
     }
@@ -212,7 +214,10 @@ fn is_arithmetic_jpeg_peek(cook: &dyn RenderCook) -> bool {
     while i + 3 < buf.len() {
         if buf[i] == 0xFF {
             match buf[i + 1] {
-                0x00 | 0xFF => { i += 1; continue; }
+                0x00 | 0xFF => {
+                    i += 1;
+                    continue;
+                }
                 0xC9 | 0xCA => return true,
                 0xDA => break,
                 _ => {
@@ -232,23 +237,21 @@ fn is_arithmetic_jpeg_peek(cook: &dyn RenderCook) -> bool {
 /// to get source dimensions and colour depth.
 ///
 /// ImageMagick delegates to libjpeg-turbo which supports arithmetic coding.
-fn run_magick_image_decode(
-    bytes: &[u8],
-    ext: &str,
-) -> Result<RenderOutput, String> {
+fn run_magick_image_decode(bytes: &[u8], ext: &str) -> Result<RenderOutput, String> {
     use std::process::Command;
 
-    let arena = ScratchArena::new(50 * 1024 * 1024)
-        .map_err(|e| format!("scratch arena: {e}"))?;
+    let arena = ScratchArena::new(50 * 1024 * 1024).map_err(|e| format!("scratch arena: {e}"))?;
 
-    let input_path = arena.stage_bytes(bytes, &format!("input.{ext}"))
+    let input_path = arena
+        .stage_bytes(bytes, &format!("input.{ext}"))
         .map_err(|e| format!("stage input: {e}"))?;
 
     // ── identify: get source dimensions ───────────────────────────────────
     let (src_w, src_h) = {
         let output = Command::new("gm")
             .arg("identify")
-            .arg("-format").arg("%w %h")
+            .arg("-format")
+            .arg("%w %h")
             .arg(&input_path)
             .stderr(std::process::Stdio::piped())
             .output()
@@ -292,10 +295,11 @@ fn run_magick_image_decode(
     let resize_arg = format!("{}x{}", resize_w, resize_h);
     let png_out = format!("PNG:{}", output_path.display());
     cmd.arg(&input_path)
-       .arg("-resize").arg(&resize_arg)
-       .arg(&png_out)
-       .stdout(std::process::Stdio::null())
-       .stderr(std::process::Stdio::piped());
+        .arg("-resize")
+        .arg(&resize_arg)
+        .arg(&png_out)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
 
     // Do not apply sandbox wrappers here: xvfb-run + f3d is already running
     // entirely inside our container boundary and may fail under pre-exec
@@ -306,10 +310,8 @@ fn run_magick_image_decode(
         return Err(format!("gm convert exited with {status}"));
     }
 
-    let png_bytes = arena.read_output(&output_path)
-        .map_err(|e| format!("read output: {e}"))?;
-    let img = image::load_from_memory(&png_bytes)
-        .map_err(|e| format!("decode PNG output: {e}"))?;
+    let png_bytes = arena.read_output(&output_path).map_err(|e| format!("read output: {e}"))?;
+    let img = image::load_from_memory(&png_bytes).map_err(|e| format!("decode PNG output: {e}"))?;
 
     Ok(RenderOutput {
         image: img,
@@ -325,10 +327,27 @@ fn run_magick_image_decode(
 
 /// Check if an extension is best handled by oiiotool (skip tier2).
 fn is_oiio_format(ext: &str) -> bool {
-    matches!(ext,
-        "exr" | "sxr" | "mxr" | "hdr" | "rgbe" | "dpx" | "cin"
-        | "dds" | "fits" | "iff" | "pic" | "rla" | "zfile"
-        | "sgi" | "rgb" | "rgba" | "bw" | "int" | "inta"
+    matches!(
+        ext,
+        "exr"
+            | "sxr"
+            | "mxr"
+            | "hdr"
+            | "rgbe"
+            | "dpx"
+            | "cin"
+            | "dds"
+            | "fits"
+            | "iff"
+            | "pic"
+            | "rla"
+            | "zfile"
+            | "sgi"
+            | "rgb"
+            | "rgba"
+            | "bw"
+            | "int"
+            | "inta"
     )
 }
 
@@ -338,34 +357,31 @@ fn is_oiio_format(ext: &str) -> bool {
 /// For video: seeks to 1 second, extracts one frame.  Only the first 10 MiB
 /// of the source are passed — ffmpeg can often extract frames from truncated
 /// files.
-fn run_ffmpeg_decode(
-    bytes: &[u8],
-    ext: &str,
-    is_video: bool,
-) -> Result<RenderOutput, String> {
+fn run_ffmpeg_decode(bytes: &[u8], ext: &str, is_video: bool) -> Result<RenderOutput, String> {
     use std::process::Command;
 
-    let arena = ScratchArena::new(100 * 1024 * 1024)
-        .map_err(|e| format!("scratch arena: {e}"))?;
+    let arena = ScratchArena::new(100 * 1024 * 1024).map_err(|e| format!("scratch arena: {e}"))?;
 
-    let input_path = arena.stage_bytes(bytes, &format!("input.{ext}"))
+    let input_path = arena
+        .stage_bytes(bytes, &format!("input.{ext}"))
         .map_err(|e| format!("stage input: {e}"))?;
 
     // ── ffprobe: get dimensions, colour depth, duration, audio channels ──
     let (src_w, src_h, bits_per_pixel, duration_secs, channel_count) = {
         let output = Command::new("ffprobe")
-            .arg("-v").arg("quiet")
-            .arg("-print_format").arg("json")
+            .arg("-v")
+            .arg("quiet")
+            .arg("-print_format")
+            .arg("json")
             .arg("-show_streams")
             .arg("-show_format")
             .arg(&input_path)
             .output()
             .map_err(|e| format!("spawn ffprobe: {e}"))?;
 
-        let json: serde_json::Value = serde_json::from_slice(&output.stdout)
-            .map_err(|e| format!("ffprobe json: {e}"))?;
-        let streams = json["streams"].as_array()
-            .ok_or_else(|| "ffprobe: no streams".to_string())?;
+        let json: serde_json::Value =
+            serde_json::from_slice(&output.stdout).map_err(|e| format!("ffprobe json: {e}"))?;
+        let streams = json["streams"].as_array().ok_or_else(|| "ffprobe: no streams".to_string())?;
 
         // ── video stream ──────────────────────────────────────────────────
         let vs = streams.iter().find(|s| s["codec_type"] == "video");
@@ -375,23 +391,21 @@ fn run_ffmpeg_decode(
             if w == 0 || h == 0 {
                 return Err("ffprobe: zero dimensions".into());
             }
-            let bpp = s["pix_fmt"].as_str()
-                .map(pix_fmt_bits_per_pixel)
-                .unwrap_or(0);
+            let bpp = s["pix_fmt"].as_str().map(pix_fmt_bits_per_pixel).unwrap_or(0);
             (w, h, bpp)
         } else {
             return Err("ffprobe: no video stream".into());
         };
 
         // ── audio streams ─────────────────────────────────────────────────
-        let chan = streams.iter()
+        let chan = streams
+            .iter()
             .filter(|s| s["codec_type"] == "audio")
             .filter_map(|s| s["channels"].as_u64())
             .sum::<u64>() as u32;
 
         // ── duration ──────────────────────────────────────────────────────
-        let dur = json["format"]["duration"].as_str()
-            .and_then(|s| s.parse::<f64>().ok());
+        let dur = json["format"]["duration"].as_str().and_then(|s| s.parse::<f64>().ok());
 
         (w, h, bpp, dur, chan)
     };
@@ -400,9 +414,13 @@ fn run_ffmpeg_decode(
     let max_dim = src_w.max(src_h);
     let scale: u32 = if max_dim > 512 {
         let mut s = 1u32;
-        while max_dim / (s * 2) >= 256 { s *= 2; }
+        while max_dim / (s * 2) >= 256 {
+            s *= 2;
+        }
         s
-    } else { 1 };
+    } else {
+        1
+    };
     let resize_w = src_w / scale;
     let resize_h = src_h / scale;
 
@@ -429,11 +447,12 @@ fn run_ffmpeg_decode(
         cmd.arg("-vf").arg(format!("scale={resize_w}:{resize_h}"));
     }
 
-    cmd.arg("-frames:v").arg("1")
-       .arg(&output_path)
-       .arg("-y")
-       .stdout(std::process::Stdio::null())
-       .stderr(std::process::Stdio::piped());
+    cmd.arg("-frames:v")
+        .arg("1")
+        .arg(&output_path)
+        .arg("-y")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
 
     crate::sandbox::apply(&mut cmd, &crate::sandbox::default_strict());
 
@@ -444,10 +463,8 @@ fn run_ffmpeg_decode(
         return Err(format!("ffmpeg: {first_line}"));
     }
 
-    let png_bytes = arena.read_output(&output_path)
-        .map_err(|e| format!("read output: {e}"))?;
-    let mut img = image::load_from_memory(&png_bytes)
-        .map_err(|e| format!("decode PNG output: {e}"))?;
+    let png_bytes = arena.read_output(&output_path).map_err(|e| format!("read output: {e}"))?;
+    let mut img = image::load_from_memory(&png_bytes).map_err(|e| format!("decode PNG output: {e}"))?;
 
     // Scene-linear formats come through ffmpeg as linear 8-bit PNGs.
     // Apply a gamma-1.8 curve to approximate an sRGB display transform.
@@ -462,14 +479,21 @@ fn run_ffmpeg_decode(
         renderer: Some("ffmpeg_cli".into()),
         codec: None,
         video_seek_secs: if is_video { Some(1.0) } else { None },
-        properties: Some(build_video_properties(src_w, src_h, bits_per_pixel, duration_secs, channel_count)),
+        properties: Some(build_video_properties(
+            src_w,
+            src_h,
+            bits_per_pixel,
+            duration_secs,
+            channel_count,
+        )),
     })
 }
 
 /// Build a properties object for video/image content.  Fields are omitted
 /// when the value is unknown (0 for integers, `None` for duration).
 fn build_video_properties(
-    w: u32, h: u32,
+    w: u32,
+    h: u32,
     bits_per_pixel: u32,
     duration_secs: Option<f64>,
     channel_count: u32,
@@ -492,25 +516,65 @@ fn build_video_properties(
 /// Approximate bits-per-pixel for a given ffmpeg `pix_fmt` string.
 fn pix_fmt_bits_per_pixel(pix_fmt: &str) -> u32 {
     // Common 8-bit YUV subsampled formats.
-    if pix_fmt.starts_with("yuv420") && !pix_fmt.contains("p10") && !pix_fmt.contains("p12") && !pix_fmt.contains("p16") { return 12; }
-    if pix_fmt.starts_with("yuv422") && !pix_fmt.contains("p10") && !pix_fmt.contains("p12") && !pix_fmt.contains("p16") { return 16; }
-    if pix_fmt.starts_with("yuv444") && !pix_fmt.contains("p10") && !pix_fmt.contains("p12") && !pix_fmt.contains("p16") { return 24; }
+    if pix_fmt.starts_with("yuv420")
+        && !pix_fmt.contains("p10")
+        && !pix_fmt.contains("p12")
+        && !pix_fmt.contains("p16")
+    {
+        return 12;
+    }
+    if pix_fmt.starts_with("yuv422")
+        && !pix_fmt.contains("p10")
+        && !pix_fmt.contains("p12")
+        && !pix_fmt.contains("p16")
+    {
+        return 16;
+    }
+    if pix_fmt.starts_with("yuv444")
+        && !pix_fmt.contains("p10")
+        && !pix_fmt.contains("p12")
+        && !pix_fmt.contains("p16")
+    {
+        return 24;
+    }
     // 10-bit YUV: multiply 8-bit value by 1.25.
-    if pix_fmt.starts_with("yuv420p10") { return 15; }
-    if pix_fmt.starts_with("yuv422p10") { return 20; }
-    if pix_fmt.starts_with("yuv444p10") { return 30; }
+    if pix_fmt.starts_with("yuv420p10") {
+        return 15;
+    }
+    if pix_fmt.starts_with("yuv422p10") {
+        return 20;
+    }
+    if pix_fmt.starts_with("yuv444p10") {
+        return 30;
+    }
     // 12-bit YUV.
-    if pix_fmt.starts_with("yuv420p12") { return 18; }
-    if pix_fmt.starts_with("yuv422p12") { return 24; }
-    if pix_fmt.starts_with("yuv444p12") { return 36; }
+    if pix_fmt.starts_with("yuv420p12") {
+        return 18;
+    }
+    if pix_fmt.starts_with("yuv422p12") {
+        return 24;
+    }
+    if pix_fmt.starts_with("yuv444p12") {
+        return 36;
+    }
     // RGB, BGR, GBR — 24 bits/pixel (8-bit) or more.
-    if matches!(pix_fmt, "rgb24" | "bgr24" | "gbrp" | "gbrp9") { return 24; }
-    if matches!(pix_fmt, "rgb48" | "bgr48") { return 48; }
+    if matches!(pix_fmt, "rgb24" | "bgr24" | "gbrp" | "gbrp9") {
+        return 24;
+    }
+    if matches!(pix_fmt, "rgb48" | "bgr48") {
+        return 48;
+    }
     // Gray.
     if pix_fmt.starts_with("gray") {
-        if pix_fmt.contains("10") { return 10; }
-        if pix_fmt.contains("12") { return 12; }
-        if pix_fmt.contains("16") { return 16; }
+        if pix_fmt.contains("10") {
+            return 10;
+        }
+        if pix_fmt.contains("12") {
+            return 12;
+        }
+        if pix_fmt.contains("16") {
+            return 16;
+        }
         return 8;
     }
     0
@@ -523,25 +587,34 @@ fn pix_fmt_bits_per_pixel(pix_fmt: &str) -> u32 {
 /// |-----------|------|
 /// | exr, hdr, dpx, jp2, j2k | oiiotool |
 /// | All others | ffmpeg CLI |
-async fn render_image_ffmpeg_fallback(
-    cook: &mut dyn RenderCook,
-    ext: &str,
-) -> bool {
+async fn render_image_ffmpeg_fallback(cook: &mut dyn RenderCook, ext: &str) -> bool {
     let report = crate::env_check::cached_report();
 
     // Pick the tool for this extension.
     let use_oiiotool = is_oiio_format(ext);
     let (tool_name, tool_available): (&str, bool) = if use_oiiotool {
-        ("oiiotool", report.as_ref()
-            .and_then(|r| r.backends.get("oiiotool"))
-            .map(|b| b.available).unwrap_or(false))
+        (
+            "oiiotool",
+            report
+                .as_ref()
+                .and_then(|r| r.backends.get("oiiotool"))
+                .map(|b| b.available)
+                .unwrap_or(false),
+        )
     } else {
-        ("ffmpeg_cli", report.as_ref()
-            .and_then(|r| r.backends.get("ffmpeg_cli"))
-            .map(|b| b.available).unwrap_or(false))
+        (
+            "ffmpeg_cli",
+            report
+                .as_ref()
+                .and_then(|r| r.backends.get("ffmpeg_cli"))
+                .map(|b| b.available)
+                .unwrap_or(false),
+        )
     };
 
-    if !tool_available { return false; }
+    if !tool_available {
+        return false;
+    }
 
     let ext_owned = ext.to_string();
 
@@ -559,12 +632,22 @@ async fn render_image_ffmpeg_fallback(
             } else {
                 run_ffmpeg_decode(&buf, &ext_owned, false)
             }
-        }).await;
+        })
+        .await;
 
         match result {
-            Ok(Ok(out)) => { apply_render_output(cook, out); true }
-            Ok(Err(msg)) => { cook.fail_cook(&format!("{tool_name}: {msg}")); true }
-            Err(_) => { cook.fail_cook(&format!("{tool_name} panicked")); true }
+            Ok(Ok(out)) => {
+                apply_render_output(cook, out);
+                true
+            }
+            Ok(Err(msg)) => {
+                cook.fail_cook(&format!("{tool_name}: {msg}"));
+                true
+            }
+            Err(_) => {
+                cook.fail_cook(&format!("{tool_name} panicked"));
+                true
+            }
         }
     } else {
         // Reader was consumed by a prior tier — re-fetch.
@@ -581,29 +664,42 @@ async fn render_image_ffmpeg_fallback(
             } else {
                 run_ffmpeg_decode(&bytes, &ext_owned, false)
             }
-        }).await;
+        })
+        .await;
 
         match result {
-            Ok(Ok(out)) => { apply_render_output(cook, out); true }
-            Ok(Err(msg)) => { cook.fail_cook(&format!("{tool_name}: {msg}")); true }
-            Err(_) => { cook.fail_cook(&format!("{tool_name} panicked")); true }
+            Ok(Ok(out)) => {
+                apply_render_output(cook, out);
+                true
+            }
+            Ok(Err(msg)) => {
+                cook.fail_cook(&format!("{tool_name}: {msg}"));
+                true
+            }
+            Err(_) => {
+                cook.fail_cook(&format!("{tool_name} panicked"));
+                true
+            }
         }
     }
 }
 
 /// Tier-3 ffmpeg CLI fallback for video.  Reads only the first 10 MiB —
 /// ffmpeg can often extract a keyframe from a truncated file.
-async fn render_video_ffmpeg_fallback(
-    cook: &mut dyn RenderCook,
-    ext: &str,
-) -> bool {
+async fn render_video_ffmpeg_fallback(cook: &mut dyn RenderCook, ext: &str) -> bool {
     let report = crate::env_check::cached_report();
-    let has_ffmpeg = report.as_ref()
+    let has_ffmpeg = report
+        .as_ref()
         .and_then(|r| r.backends.get("ffmpeg_cli"))
-        .map(|b| b.available).unwrap_or(false);
-    if !has_ffmpeg { return false; }
+        .map(|b| b.available)
+        .unwrap_or(false);
+    if !has_ffmpeg {
+        return false;
+    }
 
-    let Some(mut reader) = cook.take_reader() else { return false; };
+    let Some(mut reader) = cook.take_reader() else {
+        return false;
+    };
     let ext_owned = ext.to_string();
     let result = tokio::task::spawn_blocking(move || {
         let mut buf = Vec::with_capacity(10 * 1024 * 1024);
@@ -612,32 +708,43 @@ async fn render_video_ffmpeg_fallback(
         let mut chunk = [0u8; 8192];
         loop {
             let n = reader.read(&mut chunk).map_err(|e| format!("read: {e}"))?;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             buf.extend_from_slice(&chunk[..n]);
-            if buf.len() >= 10 * 1024 * 1024 { break; }
+            if buf.len() >= 10 * 1024 * 1024 {
+                break;
+            }
         }
         run_ffmpeg_decode(&buf, &ext_owned, true)
-    }).await;
+    })
+    .await;
 
     match result {
-        Ok(Ok(out)) => { apply_render_output(cook, out); true }
-        Ok(Err(msg)) => { cook.fail_cook(&msg); true }
-        Err(_) => { cook.fail_cook("ffmpeg_cli panicked"); true }
+        Ok(Ok(out)) => {
+            apply_render_output(cook, out);
+            true
+        }
+        Ok(Err(msg)) => {
+            cook.fail_cook(&msg);
+            true
+        }
+        Err(_) => {
+            cook.fail_cook("ffmpeg_cli panicked");
+            true
+        }
     }
 }
 /// Run OpenImageIO `oiiotool` to decode a studio-format image to PNG, with
 /// properties via `--info` and power-of-2 downscaling.  Handles EXR, HDR,
 /// DPX, and other formats that ffmpeg/magick may struggle with.
-fn run_oiiotool_decode(
-    bytes: &[u8],
-    ext: &str,
-) -> Result<RenderOutput, String> {
+fn run_oiiotool_decode(bytes: &[u8], ext: &str) -> Result<RenderOutput, String> {
     use std::process::Command;
 
-    let arena = ScratchArena::new(100 * 1024 * 1024)
-        .map_err(|e| format!("scratch arena: {e}"))?;
+    let arena = ScratchArena::new(100 * 1024 * 1024).map_err(|e| format!("scratch arena: {e}"))?;
 
-    let input_path = arena.stage_bytes(bytes, &format!("input.{ext}"))
+    let input_path = arena
+        .stage_bytes(bytes, &format!("input.{ext}"))
         .map_err(|e| format!("stage input: {e}"))?;
 
     // ── oiiotool --info: get dimensions ────────────────────────────────────
@@ -679,7 +786,9 @@ fn run_oiiotool_decode(
     let max_dim = src_w.max(src_h);
     if max_dim > 512 {
         let mut s = 1u32;
-        while max_dim / (s * 2) >= 256 { s *= 2; }
+        while max_dim / (s * 2) >= 256 {
+            s *= 2;
+        }
         resize_w = src_w / s;
         resize_h = src_h / s;
     }
@@ -687,14 +796,14 @@ fn run_oiiotool_decode(
     // ── oiiotool: decode + colorspace + resize → PNG ───────────────────────
     let output_path = arena.output_path("png");
     let mut cmd = Command::new("oiiotool");
-    cmd.arg(&input_path)
-       .arg("--colorconvert").arg("linear").arg("sRGB");
+    cmd.arg(&input_path).arg("--colorconvert").arg("linear").arg("sRGB");
     if resize_w != src_w || resize_h != src_h {
         cmd.arg("--resize").arg(format!("{resize_w}x{resize_h}"));
     }
-    cmd.arg("-o").arg(&output_path)
-       .stdout(std::process::Stdio::null())
-       .stderr(std::process::Stdio::piped());
+    cmd.arg("-o")
+        .arg(&output_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
     // No sandbox — oiiotool is a trusted system tool.
 
     let output = cmd.output().map_err(|e| format!("spawn oiiotool: {e}"))?;
@@ -704,10 +813,8 @@ fn run_oiiotool_decode(
         return Err(format!("oiiotool: {first_line}"));
     }
 
-    let png_bytes = arena.read_output(&output_path)
-        .map_err(|e| format!("read output: {e}"))?;
-    let img = image::load_from_memory(&png_bytes)
-        .map_err(|e| format!("decode PNG output: {e}"))?;
+    let png_bytes = arena.read_output(&output_path).map_err(|e| format!("read output: {e}"))?;
+    let img = image::load_from_memory(&png_bytes).map_err(|e| format!("decode PNG output: {e}"))?;
 
     Ok(RenderOutput {
         image: img,
@@ -725,10 +832,7 @@ fn run_oiiotool_decode(
 /// Dispatch order:
 /// 1. Shared-library backends (dlopen) — e.g. libpdfium.
 /// 2. Subprocess backends — e.g. libreoffice headless.
-async fn render_document_tier3(
-    cook: &mut dyn RenderCook,
-    ext: &str,
-) -> bool {
+async fn render_document_tier3(cook: &mut dyn RenderCook, ext: &str) -> bool {
     // Stub: document rendering will use dlopen (pdfium) or subprocess
     // (libreoffice --headless) to render the first page.
     let _ = (cook, ext);
@@ -743,18 +847,13 @@ async fn render_document_tier3(
 ///
 /// Dispatch order:
 /// 1. Walk registered handlers, find first matching extension, invoke it.
-async fn render_geometry_tier3(
-    cook: &mut dyn RenderCook,
-    ext: &str,
-) -> bool {
+async fn render_geometry_tier3(cook: &mut dyn RenderCook, ext: &str) -> bool {
     // USDZ/USDC/USDA: extract mesh to OBJ via usd-core Python script,
     // then render the OBJ through the existing F3D handler (which provides
     // tone mapping, camera orbit, and delivery identical to STL/OBJ).
     if matches!(ext, "usdz" | "usdc" | "usda") {
         if let Some(mut reader) = cook.take_reader() {
-            let result = tokio::task::spawn_blocking(move || {
-                run_usdz_via_obj_handler(&mut *reader)
-            }).await;
+            let result = tokio::task::spawn_blocking(move || run_usdz_via_obj_handler(&mut *reader)).await;
 
             match result {
                 Ok(Ok(out)) => {
@@ -783,7 +882,8 @@ async fn render_geometry_tier3(
 
     // Check that the handler passed its availability probe.
     let report = crate::env_check::cached_report();
-    let available = report.as_ref()
+    let available = report
+        .as_ref()
         .and_then(|r| r.backends.get(handler.name))
         .map(|b| b.available)
         .unwrap_or(false);
@@ -796,9 +896,8 @@ async fn render_geometry_tier3(
     if handler.command == "f3d" {
         if let Some(mut reader) = cook.take_reader() {
             let ext_owned = ext.to_string();
-            let result = tokio::task::spawn_blocking(move || {
-                run_f3d_geometry_handler(&mut *reader, &ext_owned)
-            }).await;
+            let result =
+                tokio::task::spawn_blocking(move || run_f3d_geometry_handler(&mut *reader, &ext_owned)).await;
 
             match result {
                 Ok(Ok(out)) => {
@@ -825,9 +924,8 @@ async fn render_geometry_tier3(
         let cmd = handler.command.to_string();
         let name = handler.name.to_string();
         let ext_owned = ext.to_string();
-        let result = tokio::task::spawn_blocking(move || {
-            run_subprocess_handler(&mut *reader, &ext_owned, &cmd)
-        }).await;
+        let result =
+            tokio::task::spawn_blocking(move || run_subprocess_handler(&mut *reader, &ext_owned, &cmd)).await;
 
         match result {
             Ok(Ok(out)) => {
@@ -868,7 +966,8 @@ fn run_subprocess_handler(
     use std::process::Command;
 
     // Ensure subprocess handlers receive the full source file.
-    reader.seek(std::io::SeekFrom::Start(0))
+    reader
+        .seek(std::io::SeekFrom::Start(0))
         .map_err(|e| format!("rewind input: {e}"))?;
 
     // Create a scratch arena for this invocation.
@@ -876,37 +975,35 @@ fn run_subprocess_handler(
         .map_err(|e| format!("scratch arena: {e}"))?;
 
     // Stage the source to a temp file.
-    let input_path = arena.stage_reader(reader, &format!("input.{ext}"))
+    let input_path = arena
+        .stage_reader(reader, &format!("input.{ext}"))
         .map_err(|e| format!("stage input: {e}"))?;
 
     // Allocate output paths.
     let output_path = arena.output_path("jpg");
-    let props_path  = arena.output_path("json");
+    let props_path = arena.output_path("json");
 
     // Run the renderer in a sandboxed subprocess.
     let mut cmd = Command::new(command);
     cmd.arg(&input_path)
-       .arg(&output_path)
-       .arg(&props_path)
-       .stdout(std::process::Stdio::null())
-       .stderr(std::process::Stdio::piped());
+        .arg(&output_path)
+        .arg(&props_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
 
     crate::sandbox::apply(&mut cmd, &crate::sandbox::default_strict());
 
-    let status = cmd.status()
-        .map_err(|e| format!("spawn {command}: {e}"))?;
+    let status = cmd.status().map_err(|e| format!("spawn {command}: {e}"))?;
 
     if !status.success() {
         return Err(format!("exited with {status}"));
     }
 
     // Read back the rendered image.
-    let jpeg_bytes = arena.read_output(&output_path)
-        .map_err(|e| format!("read output: {e}"))?;
+    let jpeg_bytes = arena.read_output(&output_path).map_err(|e| format!("read output: {e}"))?;
 
     // Decode the JPEG output.
-    let img = image::load_from_memory(&jpeg_bytes)
-        .map_err(|e| format!("decode output JPEG: {e}"))?;
+    let img = image::load_from_memory(&jpeg_bytes).map_err(|e| format!("decode output JPEG: {e}"))?;
 
     // Read the renderer-produced properties.
     let props = std::fs::read_to_string(&props_path)
@@ -916,39 +1013,38 @@ fn run_subprocess_handler(
     // Arena is dropped here — temp files cleaned up.
 
     Ok(RenderOutput {
-        image:           img,
-        renderer:        Some(command.to_string()),
-        codec:           None,
+        image: img,
+        renderer: Some(command.to_string()),
+        codec: None,
         video_seek_secs: None,
-        properties:      props,
+        properties: props,
     })
 }
 
 /// Extract mesh from USDZ/USDC/USDA to OBJ, then render via the existing
 /// F3D handler (which applies tone mapping, camera orbit, and delivery).
-fn run_usdz_via_obj_handler(
-    reader: &mut dyn tier1::ReadSeek,
-) -> Result<RenderOutput, String> {
+fn run_usdz_via_obj_handler(reader: &mut dyn tier1::ReadSeek) -> Result<RenderOutput, String> {
     use std::process::Command;
 
     // Read the full USDZ data.
-    reader.seek(std::io::SeekFrom::Start(0))
+    reader
+        .seek(std::io::SeekFrom::Start(0))
         .map_err(|e| format!("rewind usdz: {e}"))?;
     let mut usdz_bytes = Vec::new();
-    reader.read_to_end(&mut usdz_bytes)
-        .map_err(|e| format!("read usdz: {e}"))?;
+    reader.read_to_end(&mut usdz_bytes).map_err(|e| format!("read usdz: {e}"))?;
 
-    let arena = ScratchArena::new(100 * 1024 * 1024)
-        .map_err(|e| format!("scratch arena: {e}"))?;
+    let arena = ScratchArena::new(100 * 1024 * 1024).map_err(|e| format!("scratch arena: {e}"))?;
 
     // Stage the USDZ to a temp file so the Python script can open it.
-    let usdz_path = arena.stage_bytes(&usdz_bytes, "input.usdz")
+    let usdz_path = arena
+        .stage_bytes(&usdz_bytes, "input.usdz")
         .map_err(|e| format!("stage usdz: {e}"))?;
 
     let obj_path = arena.output_path("obj");
 
     // Stage the embedded usd_extract.py script to a temp file.
-    let script_path = arena.stage_bytes(USD_EXTRACT_PY.as_bytes(), "usd_extract.py")
+    let script_path = arena
+        .stage_bytes(USD_EXTRACT_PY.as_bytes(), "usd_extract.py")
         .map_err(|e| format!("stage usd_extract script: {e}"))?;
 
     // Run usd_extract.py (embedded) to convert USDZ → OBJ.
@@ -966,8 +1062,7 @@ fn run_usdz_via_obj_handler(
     }
 
     // Read the extracted OBJ.
-    let obj_bytes = std::fs::read(&obj_path)
-        .map_err(|e| format!("read obj output: {e}"))?;
+    let obj_bytes = std::fs::read(&obj_path).map_err(|e| format!("read obj output: {e}"))?;
 
     if obj_bytes.is_empty() {
         return Err("usd_extract produced empty OBJ".into());
@@ -980,19 +1075,16 @@ fn run_usdz_via_obj_handler(
 
 /// Run F3D directly to render STL/OBJ/glTF/GLB geometry to a PNG, then
 /// load the resulting image into a RenderOutput.
-fn run_f3d_geometry_handler(
-    reader: &mut dyn tier1::ReadSeek,
-    ext: &str,
-) -> Result<RenderOutput, String> {
+fn run_f3d_geometry_handler(reader: &mut dyn tier1::ReadSeek, ext: &str) -> Result<RenderOutput, String> {
     use std::process::{Command, Stdio};
 
     // Read the full source so we can sanitise GLB files before staging.
-    reader.seek(std::io::SeekFrom::Start(0))
+    reader
+        .seek(std::io::SeekFrom::Start(0))
         .map_err(|e| format!("rewind input: {e}"))?;
 
     let mut source_bytes = Vec::new();
-    reader.read_to_end(&mut source_bytes)
-        .map_err(|e| format!("read input: {e}"))?;
+    reader.read_to_end(&mut source_bytes).map_err(|e| format!("read input: {e}"))?;
 
     // STL/OBJ assets are commonly authored Z-up, while glTF assets are
     // typically Y-up. This is only a default hint; camera transforms still
@@ -1009,19 +1101,19 @@ fn run_f3d_geometry_handler(
     const RESOLUTION: &str = "512,512";
     const BASE_COLOR: &str = "1,.9,.5";
 
-    let arena = ScratchArena::new(100 * 1024 * 1024)
-        .map_err(|e| format!("scratch arena: {e}"))?;
+    let arena = ScratchArena::new(100 * 1024 * 1024).map_err(|e| format!("scratch arena: {e}"))?;
 
     // Stage the source, then sanitise GLB files in-place (VTK 9.1 crashes
     // on embedded textures and KHR_texture_transform).
-    let input_path = arena.stage_bytes(&source_bytes, &format!("input.{ext}"))
+    let input_path = arena
+        .stage_bytes(&source_bytes, &format!("input.{ext}"))
         .map_err(|e| format!("stage input: {e}"))?;
 
     if ext == "glb" {
         // Stage the embedded sanitize_glb.py script to a temp file.
-        let script_path = arena.stage_bytes(
-            SANITIZE_GLB_PY.as_bytes(), "sanitize_glb.py",
-        ).map_err(|e| format!("stage sanitize script: {e}"))?;
+        let script_path = arena
+            .stage_bytes(SANITIZE_GLB_PY.as_bytes(), "sanitize_glb.py")
+            .map_err(|e| format!("stage sanitize script: {e}"))?;
 
         let output = std::process::Command::new("python3")
             .arg(&script_path)
@@ -1031,8 +1123,7 @@ fn run_f3d_geometry_handler(
         if !output.status.success() {
             return Err("sanitize_glb.py failed".into());
         }
-        std::fs::write(&input_path, &output.stdout)
-            .map_err(|e| format!("write sanitized glb: {e}"))?;
+        std::fs::write(&input_path, &output.stdout).map_err(|e| format!("write sanitized glb: {e}"))?;
     }
 
     let output_path = arena.output_path("png");
@@ -1042,55 +1133,53 @@ fn run_f3d_geometry_handler(
     let mut cmd = if std::env::var("DISPLAY").is_ok() {
         let mut c = Command::new("f3d");
         c.arg(&input_path)
-         .arg(format!("--output={}", output_path.display()))
-         .arg("--dry-run")
-         .arg(format!("--resolution={}", RESOLUTION))
-         .arg("--quiet")
-         .arg("--no-background")
-         .arg("--up")
-         .arg(up_axis)
-         .arg("--color")
-         .arg(BASE_COLOR)
-         .arg("--camera-azimuth-angle")
-         .arg(AZIMUTH)
-         .arg("--camera-elevation-angle")
-         .arg(ELEVATION)
-         .arg("--camera-view-angle")
-         .arg(VIEW_ANGLE);
+            .arg(format!("--output={}", output_path.display()))
+            .arg("--dry-run")
+            .arg(format!("--resolution={}", RESOLUTION))
+            .arg("--quiet")
+            .arg("--no-background")
+            .arg("--up")
+            .arg(up_axis)
+            .arg("--color")
+            .arg(BASE_COLOR)
+            .arg("--camera-azimuth-angle")
+            .arg(AZIMUTH)
+            .arg("--camera-elevation-angle")
+            .arg(ELEVATION)
+            .arg("--camera-view-angle")
+            .arg(VIEW_ANGLE);
         c
     } else {
         let mut c = Command::new("xvfb-run");
         c.arg("-a")
-         .arg("-s")
-         .arg("-screen 0 1600x1200x24")
-         .arg("f3d")
-         .arg(&input_path)
-         .arg(format!("--output={}", output_path.display()))
-         .arg("--dry-run")
-         .arg(format!("--resolution={}", RESOLUTION))
-         .arg("--quiet")
-         .arg("--no-background")
-         .arg("--up")
-         .arg(up_axis)
-         .arg("--color")
-         .arg(BASE_COLOR)
-         .arg("--camera-azimuth-angle")
-         .arg(AZIMUTH)
-         .arg("--camera-elevation-angle")
-         .arg(ELEVATION)
-         .arg("--camera-view-angle")
-         .arg(VIEW_ANGLE);
+            .arg("-s")
+            .arg("-screen 0 1600x1200x24")
+            .arg("f3d")
+            .arg(&input_path)
+            .arg(format!("--output={}", output_path.display()))
+            .arg("--dry-run")
+            .arg(format!("--resolution={}", RESOLUTION))
+            .arg("--quiet")
+            .arg("--no-background")
+            .arg("--up")
+            .arg(up_axis)
+            .arg("--color")
+            .arg(BASE_COLOR)
+            .arg("--camera-azimuth-angle")
+            .arg(AZIMUTH)
+            .arg("--camera-elevation-angle")
+            .arg(ELEVATION)
+            .arg("--camera-view-angle")
+            .arg(VIEW_ANGLE);
         c
     };
 
-    cmd.stdout(Stdio::null())
-       .stderr(Stdio::piped());
+    cmd.stdout(Stdio::null()).stderr(Stdio::piped());
 
-     // Do not apply the strict sandbox here: F3D rendering under Xvfb requires
-     // GL/X11 process setup that may be terminated by the default bwrap profile.
+    // Do not apply the strict sandbox here: F3D rendering under Xvfb requires
+    // GL/X11 process setup that may be terminated by the default bwrap profile.
 
-    let output = cmd.output()
-        .map_err(|e| format!("spawn f3d: {e}"))?;
+    let output = cmd.output().map_err(|e| format!("spawn f3d: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1107,11 +1196,9 @@ fn run_f3d_geometry_handler(
         return Err(format!("f3d exited {:?}: {detail}", output.status.code()));
     }
 
-    let png_bytes = arena.read_output(&output_path)
-        .map_err(|e| format!("read output: {e}"))?;
+    let png_bytes = arena.read_output(&output_path).map_err(|e| format!("read output: {e}"))?;
 
-    let img = image::load_from_memory(&png_bytes)
-        .map_err(|e| format!("decode output PNG: {e}"))?;
+    let img = image::load_from_memory(&png_bytes).map_err(|e| format!("decode output PNG: {e}"))?;
 
     // Only apply the project tone map to formats that are typically unmaterialed.
     // For textured/material-rich formats (for example FBX/glTF/USD), preserve
@@ -1200,13 +1287,10 @@ fn stylize_f3d_image(img: image::DynamicImage) -> image::DynamicImage {
         let cool_red = 16.0 * shadow_mix + 18.0 * deep_boost;
         let cool_blue = 26.0 * shadow_mix + 28.0 * deep_boost;
 
-        let nr = ((wr * (1.0 - shadow_mix) + shadow_purple[0] * shadow_mix - cool_red)
-            * lift * shade)
+        let nr = ((wr * (1.0 - shadow_mix) + shadow_purple[0] * shadow_mix - cool_red) * lift * shade)
             .clamp(0.0, 255.0);
-        let ng = ((wg * (1.0 - shadow_mix) + shadow_purple[1] * shadow_mix) * lift * shade)
-            .clamp(0.0, 255.0);
-        let nb = ((wb * (1.0 - shadow_mix) + shadow_purple[2] * shadow_mix + cool_blue)
-            * lift * shade)
+        let ng = ((wg * (1.0 - shadow_mix) + shadow_purple[1] * shadow_mix) * lift * shade).clamp(0.0, 255.0);
+        let nb = ((wb * (1.0 - shadow_mix) + shadow_purple[2] * shadow_mix + cool_blue) * lift * shade)
             .clamp(0.0, 255.0);
 
         px[0] = nr as u8;
@@ -1216,7 +1300,6 @@ fn stylize_f3d_image(img: image::DynamicImage) -> image::DynamicImage {
 
     image::DynamicImage::ImageRgba8(rgba)
 }
-
 
 /// Heuristic gate for aggressive color remapping.
 ///
@@ -1292,34 +1375,34 @@ fn autocrop_transparent(img: image::DynamicImage) -> image::DynamicImage {
     let (w, h) = (rgba.width(), rgba.height());
 
     // Find the first non-transparent row from the top.
-    let top = (0..h).find(|&y| rgba.rows().nth(y as usize)
-        .is_some_and(|mut row| row.any(|p| p[3] != 0)))
+    let top = (0..h)
+        .find(|&y| rgba.rows().nth(y as usize).is_some_and(|mut row| row.any(|p| p[3] != 0)))
         .unwrap_or(0);
 
     // First non-transparent row from the bottom.
-    let bottom = (0..h).rev().find(|&y| rgba.rows().nth(y as usize)
-        .is_some_and(|mut row| row.any(|p| p[3] != 0)))
+    let bottom = (0..h)
+        .rev()
+        .find(|&y| rgba.rows().nth(y as usize).is_some_and(|mut row| row.any(|p| p[3] != 0)))
         .unwrap_or(h - 1);
 
     // First non-transparent column from the left.
-    let left = (0..w).find(|&x| {
-        (0..h).any(|y| rgba.get_pixel(x, y)[3] != 0)
-    }).unwrap_or(0);
+    let left = (0..w).find(|&x| (0..h).any(|y| rgba.get_pixel(x, y)[3] != 0)).unwrap_or(0);
 
     // First non-transparent column from the right.
-    let right = (0..w).rev().find(|&x| {
-        (0..h).any(|y| rgba.get_pixel(x, y)[3] != 0)
-    }).unwrap_or(w - 1);
+    let right = (0..w)
+        .rev()
+        .find(|&x| (0..h).any(|y| rgba.get_pixel(x, y)[3] != 0))
+        .unwrap_or(w - 1);
 
     if top >= bottom || left >= right {
         return img; // fully transparent — passthrough
     }
 
     // Back off by BORDER pixels, clamped to image bounds.
-    let top    = top.saturating_sub(BORDER);
+    let top = top.saturating_sub(BORDER);
     let bottom = (bottom + BORDER).min(h - 1);
-    let left   = left.saturating_sub(BORDER);
-    let right  = (right + BORDER).min(w - 1);
+    let left = left.saturating_sub(BORDER);
+    let right = (right + BORDER).min(w - 1);
 
     let cropped = image::imageops::crop_imm(&rgba, left, top, right - left + 1, bottom - top + 1);
     image::DynamicImage::ImageRgba8(cropped.to_image())

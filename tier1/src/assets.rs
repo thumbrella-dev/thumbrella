@@ -8,8 +8,7 @@
 use crate::media::FileKind;
 
 /// Background image used for thumbnail compositing (PNG).
-pub static BACKGROUND_PNG: &[u8] =
-    include_bytes!("../assets/background.png");
+pub static BACKGROUND_PNG: &[u8] = include_bytes!("../assets/background.png");
 
 // ── Per-kind placeholder icons ────────────────────────────────────────────────
 //
@@ -21,32 +20,32 @@ pub static BACKGROUND_PNG: &[u8] =
 
 /// Per-kind 250×200 JPEG placeholder thumbnails.
 pub mod placeholders {
-    pub static IMAGE:    &[u8] = include_bytes!("../assets/placeholders/image.jpeg");
-    pub static VIDEO:    &[u8] = include_bytes!("../assets/placeholders/video.jpeg");
-    pub static AUDIO:    &[u8] = include_bytes!("../assets/placeholders/audio.jpeg");
-    pub static VECTOR:   &[u8] = include_bytes!("../assets/placeholders/vector.jpeg");
+    pub static IMAGE: &[u8] = include_bytes!("../assets/placeholders/image.jpeg");
+    pub static VIDEO: &[u8] = include_bytes!("../assets/placeholders/video.jpeg");
+    pub static AUDIO: &[u8] = include_bytes!("../assets/placeholders/audio.jpeg");
+    pub static VECTOR: &[u8] = include_bytes!("../assets/placeholders/vector.jpeg");
     pub static DOCUMENT: &[u8] = include_bytes!("../assets/placeholders/document.jpeg");
     pub static GEOMETRY: &[u8] = include_bytes!("../assets/placeholders/geometry.jpeg");
-    pub static ARCHIVE:  &[u8] = include_bytes!("../assets/placeholders/archive.jpeg");
-    pub static TEXT:     &[u8] = include_bytes!("../assets/placeholders/text.jpeg");
-    pub static BINARY:   &[u8] = include_bytes!("../assets/placeholders/binary.jpeg");
-    pub static UNKNOWN:  &[u8] = include_bytes!("../assets/placeholders/unknown.jpeg");
-    pub static FAILED:   &[u8] = include_bytes!("../assets/placeholders/failed.jpeg");
+    pub static ARCHIVE: &[u8] = include_bytes!("../assets/placeholders/archive.jpeg");
+    pub static TEXT: &[u8] = include_bytes!("../assets/placeholders/text.jpeg");
+    pub static BINARY: &[u8] = include_bytes!("../assets/placeholders/binary.jpeg");
+    pub static UNKNOWN: &[u8] = include_bytes!("../assets/placeholders/unknown.jpeg");
+    pub static FAILED: &[u8] = include_bytes!("../assets/placeholders/failed.jpeg");
 }
 
 /// Return the appropriate placeholder JPEG for a known [`FileKind`], or the
 /// generic `UNKNOWN` icon when the kind could not be determined.
 pub fn placeholder_for_kind(kind: FileKind) -> &'static [u8] {
     match kind {
-        FileKind::Image    => placeholders::IMAGE,
-        FileKind::Video    => placeholders::VIDEO,
-        FileKind::Audio    => placeholders::AUDIO,
-        FileKind::Vector   => placeholders::VECTOR,
+        FileKind::Image => placeholders::IMAGE,
+        FileKind::Video => placeholders::VIDEO,
+        FileKind::Audio => placeholders::AUDIO,
+        FileKind::Vector => placeholders::VECTOR,
         FileKind::Document => placeholders::DOCUMENT,
         FileKind::Geometry => placeholders::GEOMETRY,
-        FileKind::Archive  => placeholders::ARCHIVE,
-        FileKind::Text     => placeholders::TEXT,
-        FileKind::Binary   => placeholders::BINARY,
-        FileKind::Unknown  => placeholders::UNKNOWN,
+        FileKind::Archive => placeholders::ARCHIVE,
+        FileKind::Text => placeholders::TEXT,
+        FileKind::Binary => placeholders::BINARY,
+        FileKind::Unknown => placeholders::UNKNOWN,
     }
 }

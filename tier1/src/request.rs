@@ -33,7 +33,6 @@ pub struct ThumbObject {
     /// fetches and client-side freshness checks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache: Option<String>,
-
 }
 
 impl ThumbInput {

@@ -66,10 +66,10 @@ const RAW_HEADER_SCAN: usize = 32 * 1024;
 
 /// Known thumbnail paths inside ZIP-based container formats, checked in order.
 const ZIP_THUMB_NAMES: &[&str] = &[
-    "Thumbnails/thumbnail.png",   // ODT / ODS / ODP (ODF family)
-    "docProps/thumbnail.jpeg",    // DOCX / XLSX / PPTX (OOXML family)
-    "docProps/thumbnail.jpg",     // OOXML variant
-    "docProps/thumbnail.png",     // OOXML variant
+    "Thumbnails/thumbnail.png", // ODT / ODS / ODP (ODF family)
+    "docProps/thumbnail.jpeg",  // DOCX / XLSX / PPTX (OOXML family)
+    "docProps/thumbnail.jpg",   // OOXML variant
+    "docProps/thumbnail.png",   // OOXML variant
 ];
 
 // ── Progressive JPEG shortcut ─────────────────────────────────────────────────
@@ -86,7 +86,8 @@ const ZIP_THUMB_NAMES: &[&str] = &[
 /// reconstruct a coarse whole-frame image for most camera/web JPEGs.
 /// 10 KiB is the minimum to ensure we have a complete SOF+SOS header.
 fn progressive_partial_read_bytes(w: Option<u32>, h: Option<u32>) -> usize {
-    let estimated = w.zip(h)
+    let estimated = w
+        .zip(h)
         .map(|(w, h)| ((w as u64 * h as u64) / 42) as usize)
         .unwrap_or(256 * 1024);
     estimated.max(10 * 1024)
@@ -175,15 +176,15 @@ async fn try_progressive_jpeg_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
         Err(_) => return,
     };
     let decode_secs = t_render.elapsed().as_secs_f64();
-    let color_type  = img.color();
-    let img         = pre_scale_to_target(img, config.exact_width, config.exact_height);
-    let dl_bytes    = cook.http_bytes_fetched();
+    let color_type = img.color();
+    let img = pre_scale_to_target(img, config.exact_width, config.exact_height);
+    let dl_bytes = cook.http_bytes_fetched();
 
-    cook.render_renderer    = Some("shortcut/progressive".into());
-    cook.render_handler     = RenderHandler::Builtin;
-    cook.tel_decode_secs    = decode_secs;
+    cook.render_renderer = Some("shortcut/progressive".into());
+    cook.render_handler = RenderHandler::Builtin;
+    cook.tel_decode_secs = decode_secs;
     cook.out_download_bytes = dl_bytes;
-    cook.render_is_progressive_partial = true;  // Mark as partial decode to suppress pixel-art heuristic
+    cook.render_is_progressive_partial = true; // Mark as partial decode to suppress pixel-art heuristic
     if src_w > 0 && src_h > 0 {
         cook.media.properties = Some(image_properties(src_w, src_h, color_type));
     }
@@ -215,15 +216,21 @@ async fn try_exif_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     let span = find_jpeg_exif_shortcut(&header)
         .map(|i| (i.thumb_file_offset, i.thumb_len, i.source_dims))
         .or_else(|| find_tiff_embedded_jpeg_file_span(&header).map(|(o, l)| (o, l, None)))
-        .or_else(|| find_png_exif_shortcut(&header).map(|i| (i.thumb_file_offset, i.thumb_len, i.source_dims)));
-    let Some((thumb_offset, thumb_len, source_dims)) = span else { return };
+        .or_else(|| {
+            find_png_exif_shortcut(&header).map(|i| (i.thumb_file_offset, i.thumb_len, i.source_dims))
+        });
+    let Some((thumb_offset, thumb_len, source_dims)) = span else {
+        return;
+    };
 
     let embedded = match cook.http_read_at(thumb_offset, thumb_len).await {
         Ok(b) => b,
         Err(_) => return,
     };
 
-    if embedded.len() < 4 || embedded[0] != 0xFF || embedded[1] != 0xD8 { return; }
+    if embedded.len() < 4 || embedded[0] != 0xFF || embedded[1] != 0xD8 {
+        return;
+    }
 
     // When EXIF IFD0/ExifIFD don't have dimension tags, try to locate the
     // real JPEG SOF marker.  First attempt: walk APP segments in the cached
@@ -233,25 +240,33 @@ async fn try_exif_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     let source_dims: Option<(u32, u32)> = if let Some(dims) = source_dims {
         Some(dims)
     } else if let Some(sof_offset) = super::inspect::jpeg_app_segments_end(&header) {
-        cook.http_read_at(sof_offset, 512).await.ok()
+        cook.http_read_at(sof_offset, 512)
+            .await
+            .ok()
             .and_then(|chunk| super::inspect::find_sof_in_bytes(&chunk))
             .map(|(w, h, _)| (w, h))
     } else {
         // Header scan couldn't find the SOF boundary — read a larger prefix.
-        let Ok(big) = cook.http_read_at(0, 65536).await else { return };
+        let Ok(big) = cook.http_read_at(0, 65536).await else {
+            return;
+        };
         super::inspect::jpeg_sof_dimensions(&big).map(|(w, h, _)| (w, h))
     };
-    let Some((prop_w, prop_h)) = source_dims else { return };
+    let Some((prop_w, prop_h)) = source_dims else {
+        return;
+    };
 
-    let Ok(img) = image::load_from_memory(&embedded) else { return };
+    let Ok(img) = image::load_from_memory(&embedded) else {
+        return;
+    };
     let color_type = img.color();
     let dl_bytes = cook.http_bytes_fetched();
 
     let img = pre_scale_to_target(img, config.exact_width, config.exact_height);
     cook.http_close().await;
 
-    cook.render_renderer    = Some("shortcut/exif".into());
-    cook.render_handler     = RenderHandler::Builtin;
+    cook.render_renderer = Some("shortcut/exif".into());
+    cook.render_handler = RenderHandler::Builtin;
     cook.out_download_bytes = dl_bytes;
     if prop_w > 0 && prop_h > 0 {
         cook.media.properties = Some(image_properties(prop_w, prop_h, color_type));
@@ -308,16 +323,23 @@ async fn try_raw_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
         // SubIFD (tag 0x014A) whose IFD table typically lies well past the
         // RAW_HEADER_SCAN window.  Parse IFD0 to collect those offsets, then
         // stream forward on the open connection to read each SubIFD table.
-        let ifd0_off = match read_u32(&header, 4, little) { Some(v) => v as usize, None => return };
+        let ifd0_off = match read_u32(&header, 4, little) {
+            Some(v) => v as usize,
+            None => return,
+        };
         let subifd_span: Option<(u64, usize)> =
             if let Some((_, sub_ifds, _, _)) = parse_tiff_ifd(&header, ifd0_off, little) {
                 let mut best: Option<(u64, usize)> = None;
                 for sub_off in sub_ifds {
-                    if sub_off + 2 <= header.len() { continue; } // already covered
-                    let Ok(sub_data) = cook.http_read_at(sub_off as u64, IFD1_FETCH).await
-                        else { continue };
-                    let Some((_, _, jpeg_off, jpeg_len)) = parse_tiff_ifd(&sub_data, 0, little)
-                        else { continue };
+                    if sub_off + 2 <= header.len() {
+                        continue;
+                    } // already covered
+                    let Ok(sub_data) = cook.http_read_at(sub_off as u64, IFD1_FETCH).await else {
+                        continue;
+                    };
+                    let Some((_, _, jpeg_off, jpeg_len)) = parse_tiff_ifd(&sub_data, 0, little) else {
+                        continue;
+                    };
                     if let (Some(o), Some(l)) = (jpeg_off, jpeg_len) {
                         if l >= 4 && best.is_none_or(|(_, bl)| l > bl) {
                             best = Some((o as u64, l));
@@ -334,11 +356,18 @@ async fn try_raw_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
         } else {
             // IFD1 fallback: regular TIFFs (and some CR2/NEF) store the
             // embedded thumbnail in IFD1 using JPEGInterchangeFormat.
-            let Some((_, ifd1_off)) = tiff_endian_and_ifd1_offset(&header) else { return };
-            if ifd1_off <= header.len() as u64 { return; }
-            let Ok(ifd1_data) = cook.http_read_at(ifd1_off, IFD1_FETCH).await else { return };
-            let Some((_, _, jpeg_off, jpeg_len)) = parse_tiff_ifd(&ifd1_data, 0, little)
-                else { return };
+            let Some((_, ifd1_off)) = tiff_endian_and_ifd1_offset(&header) else {
+                return;
+            };
+            if ifd1_off <= header.len() as u64 {
+                return;
+            }
+            let Ok(ifd1_data) = cook.http_read_at(ifd1_off, IFD1_FETCH).await else {
+                return;
+            };
+            let Some((_, _, jpeg_off, jpeg_len)) = parse_tiff_ifd(&ifd1_data, 0, little) else {
+                return;
+            };
             match (jpeg_off, jpeg_len) {
                 (Some(o), Some(l)) if l >= 4 => (o as u64, l),
                 _ => return,
@@ -351,9 +380,13 @@ async fn try_raw_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
         Err(_) => return,
     };
 
-    if embedded.len() < 4 || embedded[0] != 0xFF || embedded[1] != 0xD8 { return; }
+    if embedded.len() < 4 || embedded[0] != 0xFF || embedded[1] != 0xD8 {
+        return;
+    }
 
-    let Ok(img) = image::load_from_memory(&embedded) else { return };
+    let Ok(img) = image::load_from_memory(&embedded) else {
+        return;
+    };
     let color_type = img.color();
     let dl_bytes = cook.http_bytes_fetched();
 
@@ -362,8 +395,8 @@ async fn try_raw_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     // tag (0x0112) says how to rotate it for correct display.
     let img = match tiff_ifd0_orientation(&header, little) {
         3 => img.rotate180(),
-        6 => img.rotate90(),   // right-top: rotate 90° CW to display
-        8 => img.rotate270(),  // left-bottom: rotate 90° CCW to display
+        6 => img.rotate90(),  // right-top: rotate 90° CW to display
+        8 => img.rotate270(), // left-bottom: rotate 90° CCW to display
         _ => img,
     };
     let (thumb_w, thumb_h) = (img.width(), img.height());
@@ -371,8 +404,8 @@ async fn try_raw_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     let img = pre_scale_to_target(img, config.exact_width, config.exact_height);
     cook.http_close().await;
 
-    cook.render_renderer    = Some("shortcut/tiff".into());
-    cook.render_handler     = RenderHandler::Builtin;
+    cook.render_renderer = Some("shortcut/tiff".into());
+    cook.render_handler = RenderHandler::Builtin;
     cook.out_download_bytes = dl_bytes;
     // Prefer IFD0 sensor resolution over the embedded preview dimensions.
     if let Some((sw, sh)) = tiff_ifd0_dimensions(&header, little) {
@@ -403,19 +436,21 @@ async fn try_zip_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     };
 
     let config = &ThumbnailConfig::CANONICAL;
-    let Ok(img) = image::load_from_memory(&image_bytes) else { return };
+    let Ok(img) = image::load_from_memory(&image_bytes) else {
+        return;
+    };
     let (src_w, src_h) = (img.width(), img.height());
-    let color_type  = img.color();
-    let t_render    = Instant::now();
-    let img         = pre_scale_to_target(img, config.exact_width, config.exact_height);
+    let color_type = img.color();
+    let t_render = Instant::now();
+    let img = pre_scale_to_target(img, config.exact_width, config.exact_height);
     let render_secs = t_render.elapsed().as_secs_f64();
 
     cook.http_close().await;
 
-    cook.render_renderer         = Some("shortcut/zip".into());
-    cook.render_handler          = RenderHandler::Builtin;
-    cook.tel_decode_secs         = render_secs;
-    cook.out_download_bytes      = dl_bytes;
+    cook.render_renderer = Some("shortcut/zip".into());
+    cook.render_handler = RenderHandler::Builtin;
+    cook.tel_decode_secs = render_secs;
+    cook.out_download_bytes = dl_bytes;
     cook.tel_download_tail_bytes = tail_bytes;
     // Document thumbnails are just previews — the source file isn't an image
     // so reporting the thumbnail's pixel dimensions as "properties" is misleading.
@@ -436,14 +471,14 @@ async fn try_zip_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
 /// Range request.  Tier 1 gives up here (the out-of-tail path is guarded by
 /// `zip_tail_size`, which is small on tier 1 — if the thumbnail was far enough
 /// to miss the tail, tier 1 hands off to tier 2).
-async fn zip_extract<S: HttpStream>(
-    cook: &mut ThumbCook<S>,
-) -> Option<(Vec<u8>, u64, u64)> {
-    let file_size      = cook.http_stream_len()?;
+async fn zip_extract<S: HttpStream>(cook: &mut ThumbCook<S>) -> Option<(Vec<u8>, u64, u64)> {
+    let file_size = cook.http_stream_len()?;
     let accepts_ranges = cook.http_accepts_ranges;
-    if file_size < 22 { return None; }
+    if file_size < 22 {
+        return None;
+    }
 
-    let tail_size  = (cook.runtime.shortcut_limits.zip_tail_size as u64).min(file_size) as usize;
+    let tail_size = (cook.runtime.shortcut_limits.zip_tail_size as u64).min(file_size) as usize;
     let tail_start = file_size - tail_size as u64;
 
     // When the tail window covers the entire file, reuse the already-open
@@ -451,7 +486,9 @@ async fn zip_extract<S: HttpStream>(
     let tail = if tail_start == 0 {
         cook.http_read_at(0, file_size as usize).await.ok()?
     } else {
-        if !accepts_ranges { return None; }
+        if !accepts_ranges {
+            return None;
+        }
         cook.http_fetch_range(tail_start, tail_size).await.ok()?
     };
 
@@ -475,12 +512,8 @@ async fn zip_extract<S: HttpStream>(
         // practice tier 1 gives up here (the read would exceed the CPU
         // budget) and hands off to tier 2, where the buffer is already
         // open and streaming is cheap.
-        let fetch_size = (entry.comp_size as u64)
-            .saturating_add(512); // local header + filename + extra overhead
-        let lh_data = cook
-            .http_read_at(entry.local_offset, fetch_size as usize)
-            .await
-            .ok()?;
+        let fetch_size = (entry.comp_size as u64).saturating_add(512); // local header + filename + extra overhead
+        let lh_data = cook.http_read_at(entry.local_offset, fetch_size as usize).await.ok()?;
         zip_extract_from_buffer(&lh_data, &entry, entry.local_offset)?
     };
 
@@ -493,15 +526,21 @@ async fn zip_extract<S: HttpStream>(
 /// is incomplete.
 fn zip_find_thumb_entry(tail: &[u8], tail_start: u64) -> Option<ZipEntry> {
     let eocd = zip_find_eocd(tail)?;
-    if eocd + 22 > tail.len() { return None; }
+    if eocd + 22 > tail.len() {
+        return None;
+    }
 
-    let cd_size   = zip_u32(tail, eocd + 12) as usize;
+    let cd_size = zip_u32(tail, eocd + 12) as usize;
     let cd_offset = zip_u32(tail, eocd + 16) as u64;
 
-    if cd_offset < tail_start { return None; }
+    if cd_offset < tail_start {
+        return None;
+    }
     let cd_in_tail = (cd_offset - tail_start) as usize;
-    let cd_end     = cd_in_tail.checked_add(cd_size)?;
-    if cd_end > tail.len() { return None; }
+    let cd_end = cd_in_tail.checked_add(cd_size)?;
+    if cd_end > tail.len() {
+        return None;
+    }
 
     zip_find_thumb(&tail[cd_in_tail..cd_end])
 }
@@ -510,18 +549,26 @@ fn zip_find_thumb_entry(tail: &[u8], tail_start: u64) -> Option<ZipEntry> {
 /// file header + compressed data, starting at `buf_start` (absolute file offset
 /// of the first byte in `buf`).
 fn zip_extract_from_buffer(buf: &[u8], entry: &ZipEntry, buf_start: u64) -> Option<Vec<u8>> {
-    if entry.local_offset < buf_start { return None; }
+    if entry.local_offset < buf_start {
+        return None;
+    }
     let lh_off = (entry.local_offset - buf_start) as usize;
-    if lh_off + 30 > buf.len() { return None; }
+    if lh_off + 30 > buf.len() {
+        return None;
+    }
     let lh = &buf[lh_off..];
-    if &lh[..4] != b"PK\x03\x04" { return None; }
+    if &lh[..4] != b"PK\x03\x04" {
+        return None;
+    }
 
     let fname_len = zip_u16(lh, 26) as usize;
     let extra_len = zip_u16(lh, 28) as usize;
 
     let data_off = lh_off + 30 + fname_len + extra_len;
     let data_end = data_off.checked_add(entry.comp_size as usize)?;
-    if data_end > buf.len() { return None; }
+    if data_end > buf.len() {
+        return None;
+    }
 
     let compressed = &buf[data_off..data_end];
 
@@ -536,9 +583,9 @@ fn zip_extract_from_buffer(buf: &[u8], entry: &ZipEntry, buf_start: u64) -> Opti
 
 struct ZipEntry {
     local_offset: u64,
-    comp_size:    u64,
-    uncomp_size:  u64,
-    method:       u16,
+    comp_size: u64,
+    uncomp_size: u64,
+    method: u16,
 }
 
 // ── ZIP helper functions ──────────────────────────────────────────────────────
@@ -570,19 +617,24 @@ fn zip_find_thumb(cd: &[u8]) -> Option<ZipEntry> {
         //  34  disk_start (2) | int_attr (2) | ext_attr (4)
         //  42  local_offset (4)
         //  46  fname … extra … comment
-        let method       = zip_u16(cd, pos + 10);
-        let comp_size    = zip_u32(cd, pos + 20) as u64;
-        let uncomp_size  = zip_u32(cd, pos + 24) as u64;
-        let fname_len    = zip_u16(cd, pos + 28) as usize;
-        let extra_len    = zip_u16(cd, pos + 30) as usize;
-        let comment_len  = zip_u16(cd, pos + 32) as usize;
+        let method = zip_u16(cd, pos + 10);
+        let comp_size = zip_u32(cd, pos + 20) as u64;
+        let uncomp_size = zip_u32(cd, pos + 24) as u64;
+        let fname_len = zip_u16(cd, pos + 28) as usize;
+        let extra_len = zip_u16(cd, pos + 30) as usize;
+        let comment_len = zip_u16(cd, pos + 32) as usize;
         let local_offset = zip_u32(cd, pos + 42) as u64;
 
         let name_end = pos + 46 + fname_len;
         if name_end <= cd.len() {
             let fname = std::str::from_utf8(&cd[pos + 46..name_end]).unwrap_or("");
             if ZIP_THUMB_NAMES.contains(&fname) {
-                return Some(ZipEntry { local_offset, comp_size, uncomp_size, method });
+                return Some(ZipEntry {
+                    local_offset,
+                    comp_size,
+                    uncomp_size,
+                    method,
+                });
             }
         }
         pos += 46 + fname_len + extra_len + comment_len;
@@ -638,21 +690,34 @@ fn find_jpeg_exif_shortcut(bytes: &[u8]) -> Option<JpegExifShortcutInfo> {
     }
     let mut pos = 2usize;
     while pos + 4 <= bytes.len() {
-        if bytes[pos] != 0xFF { pos += 1; continue; }
-        while pos < bytes.len() && bytes[pos] == 0xFF { pos += 1; }
-        if pos >= bytes.len() { break; }
+        if bytes[pos] != 0xFF {
+            pos += 1;
+            continue;
+        }
+        while pos < bytes.len() && bytes[pos] == 0xFF {
+            pos += 1;
+        }
+        if pos >= bytes.len() {
+            break;
+        }
 
         let marker = bytes[pos];
         pos += 1;
 
         if marker == 0x01 || (0xD0..=0xD9).contains(&marker) {
-            if marker == 0xD9 { break; } // EOI
+            if marker == 0xD9 {
+                break;
+            } // EOI
             continue;
         }
 
-        if pos + 2 > bytes.len() { break; }
+        if pos + 2 > bytes.len() {
+            break;
+        }
         let seg_len = u16::from_be_bytes([bytes[pos], bytes[pos + 1]]) as usize;
-        if seg_len < 2 { break; }
+        if seg_len < 2 {
+            break;
+        }
 
         if marker == 0xE1 {
             // `pos` is the offset of the APP1 length field.
@@ -667,16 +732,17 @@ fn find_jpeg_exif_shortcut(bytes: &[u8]) -> Option<JpegExifShortcutInfo> {
         }
 
         pos += seg_len;
-        if marker == 0xDA { break; } // SOS — stop scanning
+        if marker == 0xDA {
+            break;
+        } // SOS — stop scanning
     }
     None
 }
 
-fn parse_exif_shortcut_info(
-    app1_data: &[u8],
-    app1_file_offset: u64,
-) -> Option<JpegExifShortcutInfo> {
-    if app1_data.len() < 6 || &app1_data[0..6] != b"Exif\0\0" { return None; }
+fn parse_exif_shortcut_info(app1_data: &[u8], app1_file_offset: u64) -> Option<JpegExifShortcutInfo> {
+    if app1_data.len() < 6 || &app1_data[0..6] != b"Exif\0\0" {
+        return None;
+    }
     parse_tiff_exif_thumbnail(&app1_data[6..], app1_file_offset + 6)
 }
 
@@ -684,34 +750,39 @@ fn parse_exif_shortcut_info(
 ///
 /// Used by both the JPEG/TIFF EXIF path (which strips the APP1 `Exif\0\0`
 /// header) and the PNG `eXIf` chunk path (which stores raw TIFF directly).
-fn parse_tiff_exif_thumbnail(
-    tiff: &[u8],
-    tiff_file_offset: u64,
-) -> Option<JpegExifShortcutInfo> {
-    if tiff.len() < 8 { return None; }
+fn parse_tiff_exif_thumbnail(tiff: &[u8], tiff_file_offset: u64) -> Option<JpegExifShortcutInfo> {
+    if tiff.len() < 8 {
+        return None;
+    }
     let little = match &tiff[0..2] {
         b"II" => true,
         b"MM" => false,
         _ => return None,
     };
-    if read_u16(tiff, 2, little)? != 42 { return None; }
+    if read_u16(tiff, 2, little)? != 42 {
+        return None;
+    }
 
-    let ifd0_off   = read_u32(tiff, 4, little)? as usize;
-    if ifd0_off + 2 > tiff.len() { return None; }
+    let ifd0_off = read_u32(tiff, 4, little)? as usize;
+    if ifd0_off + 2 > tiff.len() {
+        return None;
+    }
     let ifd0_count = read_u16(tiff, ifd0_off, little)? as usize;
 
     // Scan IFD0 for ImageWidth/ImageLength and the ExifIFD pointer.
-    let mut ifd0_width:   Option<u32>   = None;
-    let mut ifd0_height:  Option<u32>   = None;
+    let mut ifd0_width: Option<u32> = None;
+    let mut ifd0_height: Option<u32> = None;
     let mut exif_ifd_off: Option<usize> = None;
     for i in 0..ifd0_count {
         let entry = ifd0_off + 2 + i * 12;
-        if entry + 12 > tiff.len() { break; }
+        if entry + 12 > tiff.len() {
+            break;
+        }
         let tag = read_u16(tiff, entry, little)?;
-        let ft  = read_u16(tiff, entry + 2, little)?;
+        let ft = read_u16(tiff, entry + 2, little)?;
         match tag {
-            0x0100 => ifd0_width   = tiff_scalar(tiff, ft, entry + 8, little),
-            0x0101 => ifd0_height  = tiff_scalar(tiff, ft, entry + 8, little),
+            0x0100 => ifd0_width = tiff_scalar(tiff, ft, entry + 8, little),
+            0x0101 => ifd0_height = tiff_scalar(tiff, ft, entry + 8, little),
             0x8769 => exif_ifd_off = read_u32(tiff, entry + 8, little).map(|v| v as usize),
             _ => {}
         }
@@ -719,18 +790,20 @@ fn parse_tiff_exif_thumbnail(
 
     // Prefer PixelXDimension/PixelYDimension from ExifIFD — these are the
     // authoritative JPEG pixel counts, excluding MCU alignment padding.
-    let mut px_width:  Option<u32> = None;
+    let mut px_width: Option<u32> = None;
     let mut px_height: Option<u32> = None;
     if let Some(exif_off) = exif_ifd_off {
         if exif_off + 2 <= tiff.len() {
             if let Some(n) = read_u16(tiff, exif_off, little) {
                 for i in 0..n as usize {
                     let entry = exif_off + 2 + i * 12;
-                    if entry + 12 > tiff.len() { break; }
+                    if entry + 12 > tiff.len() {
+                        break;
+                    }
                     let tag = read_u16(tiff, entry, little).unwrap_or(0);
-                    let ft  = read_u16(tiff, entry + 2, little).unwrap_or(0);
+                    let ft = read_u16(tiff, entry + 2, little).unwrap_or(0);
                     match tag {
-                        0xA002 => px_width  = tiff_scalar(tiff, ft, entry + 8, little),
+                        0xA002 => px_width = tiff_scalar(tiff, ft, entry + 8, little),
                         0xA003 => px_height = tiff_scalar(tiff, ft, entry + 8, little),
                         _ => {}
                     }
@@ -746,15 +819,19 @@ fn parse_tiff_exif_thumbnail(
 
     // IFD1 holds the embedded thumbnail.
     let ifd1_ptr_off = ifd0_off + 2 + ifd0_count * 12;
-    let ifd1_off     = read_u32(tiff, ifd1_ptr_off, little)? as usize;
-    if ifd1_off == 0 || ifd1_off + 2 > tiff.len() { return None; }
+    let ifd1_off = read_u32(tiff, ifd1_ptr_off, little)? as usize;
+    if ifd1_off == 0 || ifd1_off + 2 > tiff.len() {
+        return None;
+    }
 
     let ifd1_count = read_u16(tiff, ifd1_off, little)? as usize;
-    let mut jpeg_off: Option<u64>   = None;
+    let mut jpeg_off: Option<u64> = None;
     let mut jpeg_len: Option<usize> = None;
     for i in 0..ifd1_count {
         let entry = ifd1_off + 2 + i * 12;
-        if entry + 12 > tiff.len() { break; }
+        if entry + 12 > tiff.len() {
+            break;
+        }
         let tag = read_u16(tiff, entry, little)?;
         match tag {
             0x0201 => jpeg_off = read_u32(tiff, entry + 8, little).map(|v| v as u64),
@@ -765,7 +842,9 @@ fn parse_tiff_exif_thumbnail(
 
     let off = jpeg_off?;
     let len = jpeg_len?;
-    if len < 4 { return None; }
+    if len < 4 {
+        return None;
+    }
 
     Some(JpegExifShortcutInfo {
         thumb_file_offset: tiff_file_offset + off,
@@ -778,7 +857,7 @@ fn parse_tiff_exif_thumbnail(
 fn tiff_scalar(bytes: &[u8], field_type: u16, offset: usize, little: bool) -> Option<u32> {
     match field_type {
         3 => read_u16(bytes, offset, little).map(|v| v as u32), // SHORT
-        4 => read_u32(bytes, offset, little),                    // LONG
+        4 => read_u32(bytes, offset, little),                   // LONG
         _ => None,
     }
 }
@@ -792,18 +871,23 @@ fn tiff_scalar(bytes: &[u8], field_type: u16, offset: usize, little: bool) -> Op
 /// images this fits entirely within the 4 KiB `HEADER_SCAN` window.
 fn find_png_exif_shortcut(bytes: &[u8]) -> Option<JpegExifShortcutInfo> {
     const PNG_SIG: &[u8] = b"\x89PNG\r\n\x1a\n";
-    if bytes.len() < 8 || &bytes[0..8] != PNG_SIG { return None; }
+    if bytes.len() < 8 || &bytes[0..8] != PNG_SIG {
+        return None;
+    }
     let mut pos = 8usize;
     while pos + 12 <= bytes.len() {
-        let chunk_len  = u32::from_be_bytes([bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3]]) as usize;
-        let chunk_type = &bytes[pos+4..pos+8];
+        let chunk_len =
+            u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]) as usize;
+        let chunk_type = &bytes[pos + 4..pos + 8];
         let data_start = pos + 8;
-        let data_end   = data_start.saturating_add(chunk_len).min(bytes.len());
+        let data_end = data_start.saturating_add(chunk_len).min(bytes.len());
         if chunk_type == b"eXIf" {
             return parse_tiff_exif_thumbnail(&bytes[data_start..data_end], data_start as u64);
         }
         // IDAT/IEND: metadata chunks only appear before image data.
-        if chunk_type == b"IDAT" || chunk_type == b"IEND" { break; }
+        if chunk_type == b"IDAT" || chunk_type == b"IEND" {
+            break;
+        }
         // Chunk layout: 4 (length) + 4 (type) + chunk_len (data) + 4 (CRC)
         pos += 8 + chunk_len + 4;
     }
@@ -866,8 +950,9 @@ async fn try_webp_exif_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     // can't walk chunk headers — search for the 4-byte marker directly.
     let mut pos = 0usize;
     while pos + 12 <= tail.len() {
-        if &tail[pos..pos+4] == b"EXIF" {
-            let chunk_len = u32::from_le_bytes([tail[pos+4], tail[pos+5], tail[pos+6], tail[pos+7]]) as usize;
+        if &tail[pos..pos + 4] == b"EXIF" {
+            let chunk_len =
+                u32::from_le_bytes([tail[pos + 4], tail[pos + 5], tail[pos + 6], tail[pos + 7]]) as usize;
             let data_start = pos + 8;
             let data_end = (data_start + chunk_len).min(tail.len());
             let file_offset = tail_offset + data_start as u64;
@@ -884,18 +969,25 @@ async fn try_webp_exif_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
                     Some(dims)
                 } else {
                     // WebP header contains dimensions; parse from the first 30 bytes.
-                    cook.http_read_at(0, 4096).await.ok()
-                        .and_then(|hdr| webp_dimensions(&hdr))
+                    cook.http_read_at(0, 4096).await.ok().and_then(|hdr| webp_dimensions(&hdr))
                 };
-                let Some((prop_w, prop_h)) = source_dims else { return };
+                let Some((prop_w, prop_h)) = source_dims else {
+                    return;
+                };
 
-                let Ok(img) = image::load_from_memory(&embedded) else { return };
+                let Ok(img) = image::load_from_memory(&embedded) else {
+                    return;
+                };
                 let color_type = img.color();
                 let dl_bytes = cook.http_bytes_fetched();
-                let img = pre_scale_to_target(img, ThumbnailConfig::CANONICAL.exact_width, ThumbnailConfig::CANONICAL.exact_height);
+                let img = pre_scale_to_target(
+                    img,
+                    ThumbnailConfig::CANONICAL.exact_width,
+                    ThumbnailConfig::CANONICAL.exact_height,
+                );
                 cook.http_close().await;
-                cook.render_renderer    = Some("shortcut/webp_exif".into());
-                cook.render_handler     = RenderHandler::Builtin;
+                cook.render_renderer = Some("shortcut/webp_exif".into());
+                cook.render_handler = RenderHandler::Builtin;
                 cook.out_download_bytes = dl_bytes;
                 if prop_w > 0 && prop_h > 0 {
                     cook.media.properties = Some(image_properties(prop_w, prop_h, color_type));
@@ -920,12 +1012,22 @@ fn find_tiff_embedded_jpeg_file_span(bytes: &[u8]) -> Option<(u64, usize)> {
 /// Read the TIFF Orientation tag (0x0112) from IFD0.  Returns 1 (normal) if
 /// the tag is absent or the header is too short.
 fn tiff_ifd0_orientation(bytes: &[u8], little: bool) -> u16 {
-    let ifd0_off = match read_u32(bytes, 4, little) { Some(v) => v as usize, None => return 1 };
-    let count    = match read_u16(bytes, ifd0_off, little) { Some(v) => v as usize, None => return 1 };
+    let ifd0_off = match read_u32(bytes, 4, little) {
+        Some(v) => v as usize,
+        None => return 1,
+    };
+    let count = match read_u16(bytes, ifd0_off, little) {
+        Some(v) => v as usize,
+        None => return 1,
+    };
     for i in 0..count {
         let entry = ifd0_off + 2 + i * 12;
-        if entry + 12 > bytes.len() { break; }
-        let Some(tag) = read_u16(bytes, entry, little) else { break };
+        if entry + 12 > bytes.len() {
+            break;
+        }
+        let Some(tag) = read_u16(bytes, entry, little) else {
+            break;
+        };
         if tag == 0x0112 {
             return read_u16(bytes, entry + 8, little).unwrap_or(1);
         }
@@ -938,16 +1040,20 @@ fn tiff_ifd0_orientation(bytes: &[u8], little: bool) -> u16 {
 /// absent — raw files should fall back to embedded-preview dimensions.
 fn tiff_ifd0_dimensions(bytes: &[u8], little: bool) -> Option<(u32, u32)> {
     let ifd0_off = read_u32(bytes, 4, little)? as usize;
-    let count     = read_u16(bytes, ifd0_off, little)? as usize;
-    let mut width:  Option<u32> = None;
+    let count = read_u16(bytes, ifd0_off, little)? as usize;
+    let mut width: Option<u32> = None;
     let mut height: Option<u32> = None;
     for i in 0..count {
         let entry = ifd0_off + 2 + i * 12;
-        if entry + 12 > bytes.len() { break; }
-        let Some(tag) = read_u16(bytes, entry, little) else { break };
+        if entry + 12 > bytes.len() {
+            break;
+        }
+        let Some(tag) = read_u16(bytes, entry, little) else {
+            break;
+        };
         let val = read_u32(bytes, entry + 8, little);
         match tag {
-            0x0100 => width  = val,
+            0x0100 => width = val,
             0x0101 => height = val,
             _ => {}
         }
@@ -964,41 +1070,71 @@ fn tiff_ifd0_dimensions(bytes: &[u8], little: bool) -> Option<(u32, u32)> {
 /// Used as a fallback when `find_tiff_embedded_jpeg_file_span` returns `None`
 /// because IFD1 lies beyond the initial scan window.
 fn tiff_endian_and_ifd1_offset(bytes: &[u8]) -> Option<(bool, u64)> {
-    if bytes.len() < 8 { return None; }
-    let little = match &bytes[0..2] { b"II" => true, b"MM" => false, _ => return None };
-    if read_u16(bytes, 2, little)? != 42 { return None; }
-    let ifd0_off = read_u32(bytes, 4, little)? as usize;
-    if ifd0_off + 2 > bytes.len() { return None; }
-    let count = read_u16(bytes, ifd0_off, little)? as usize;
-    let next_ptr_off = ifd0_off.checked_add(2)?.checked_add(count.checked_mul(12)?)?;
-    if next_ptr_off + 4 > bytes.len() { return None; }
-    let ifd1_off = read_u32(bytes, next_ptr_off, little)?;
-    if ifd1_off == 0 { return None; }
-    Some((little, ifd1_off as u64))
-}
-
-fn find_tiff_embedded_jpeg_span(bytes: &[u8]) -> Option<(usize, usize)> {
-    if bytes.len() < 8 { return None; }
+    if bytes.len() < 8 {
+        return None;
+    }
     let little = match &bytes[0..2] {
         b"II" => true,
         b"MM" => false,
         _ => return None,
     };
-    if read_u16(bytes, 2, little)? != 42 { return None; } // classic TIFF magic
+    if read_u16(bytes, 2, little)? != 42 {
+        return None;
+    }
+    let ifd0_off = read_u32(bytes, 4, little)? as usize;
+    if ifd0_off + 2 > bytes.len() {
+        return None;
+    }
+    let count = read_u16(bytes, ifd0_off, little)? as usize;
+    let next_ptr_off = ifd0_off.checked_add(2)?.checked_add(count.checked_mul(12)?)?;
+    if next_ptr_off + 4 > bytes.len() {
+        return None;
+    }
+    let ifd1_off = read_u32(bytes, next_ptr_off, little)?;
+    if ifd1_off == 0 {
+        return None;
+    }
+    Some((little, ifd1_off as u64))
+}
+
+fn find_tiff_embedded_jpeg_span(bytes: &[u8]) -> Option<(usize, usize)> {
+    if bytes.len() < 8 {
+        return None;
+    }
+    let little = match &bytes[0..2] {
+        b"II" => true,
+        b"MM" => false,
+        _ => return None,
+    };
+    if read_u16(bytes, 2, little)? != 42 {
+        return None;
+    } // classic TIFF magic
 
     let ifd0_off = read_u32(bytes, 4, little)? as usize;
-    if ifd0_off + 2 > bytes.len() { return None; }
+    if ifd0_off + 2 > bytes.len() {
+        return None;
+    }
 
     let mut queue = VecDeque::from([ifd0_off]);
     let mut visited = HashSet::new();
     let mut best: Option<(usize, usize)> = None;
 
     while let Some(ifd_off) = queue.pop_front() {
-        if !visited.insert(ifd_off) { continue; }
-        let Some((next, subs, joff, jlen)) = parse_tiff_ifd(bytes, ifd_off, little) else { continue };
+        if !visited.insert(ifd_off) {
+            continue;
+        }
+        let Some((next, subs, joff, jlen)) = parse_tiff_ifd(bytes, ifd_off, little) else {
+            continue;
+        };
 
-        if next != 0 && next + 2 <= bytes.len() { queue.push_back(next); }
-        for s in subs { if s != 0 && s + 2 <= bytes.len() { queue.push_back(s); } }
+        if next != 0 && next + 2 <= bytes.len() {
+            queue.push_back(next);
+        }
+        for s in subs {
+            if s != 0 && s + 2 <= bytes.len() {
+                queue.push_back(s);
+            }
+        }
 
         if let (Some(o), Some(l)) = (joff, jlen) {
             if l >= 4 && best.is_none_or(|(_, bl)| l > bl) {
@@ -1014,11 +1150,15 @@ fn parse_tiff_ifd(
     ifd_off: usize,
     little: bool,
 ) -> Option<(usize, Vec<usize>, Option<usize>, Option<usize>)> {
-    if ifd_off + 2 > bytes.len() { return None; }
+    if ifd_off + 2 > bytes.len() {
+        return None;
+    }
     let count = read_u16(bytes, ifd_off, little)? as usize;
     let entries_off = ifd_off + 2;
     let next_ptr_off = entries_off.checked_add(count.checked_mul(12)?)?;
-    if next_ptr_off + 4 > bytes.len() { return None; }
+    if next_ptr_off + 4 > bytes.len() {
+        return None;
+    }
 
     let mut jpeg_off: Option<usize> = None;
     let mut jpeg_len: Option<usize> = None;
@@ -1031,7 +1171,9 @@ fn parse_tiff_ifd(
 
     for i in 0..count {
         let entry = entries_off + i * 12;
-        if entry + 12 > bytes.len() { break; }
+        if entry + 12 > bytes.len() {
+            break;
+        }
         let tag = read_u16(bytes, entry, little)?;
         let ft = read_u16(bytes, entry + 2, little)?;
         let fc = read_u32(bytes, entry + 4, little)? as usize;
@@ -1041,10 +1183,30 @@ fn parse_tiff_ifd(
             0x0103 => compression = Some(v as u16),
             0x0201 => jpeg_off = Some(v),
             0x0202 => jpeg_len = Some(v),
-            0x0111 => strip_off = tiff_u32_values(bytes, ft, fc, v, little, 1).first().copied().map(|x| x as usize),
-            0x0117 => strip_cnt = tiff_u32_values(bytes, ft, fc, v, little, 1).first().copied().map(|x| x as usize),
-            0x0144 => tile_off  = tiff_u32_values(bytes, ft, fc, v, little, 1).first().copied().map(|x| x as usize),
-            0x0145 => tile_cnt  = tiff_u32_values(bytes, ft, fc, v, little, 1).first().copied().map(|x| x as usize),
+            0x0111 => {
+                strip_off = tiff_u32_values(bytes, ft, fc, v, little, 1)
+                    .first()
+                    .copied()
+                    .map(|x| x as usize)
+            }
+            0x0117 => {
+                strip_cnt = tiff_u32_values(bytes, ft, fc, v, little, 1)
+                    .first()
+                    .copied()
+                    .map(|x| x as usize)
+            }
+            0x0144 => {
+                tile_off = tiff_u32_values(bytes, ft, fc, v, little, 1)
+                    .first()
+                    .copied()
+                    .map(|x| x as usize)
+            }
+            0x0145 => {
+                tile_cnt = tiff_u32_values(bytes, ft, fc, v, little, 1)
+                    .first()
+                    .copied()
+                    .map(|x| x as usize)
+            }
             0x014A => sub_ifds.extend(tiff_subifd_offsets(bytes, ft, fc, v, little)),
             _ => {}
         }
@@ -1053,8 +1215,13 @@ fn parse_tiff_ifd(
     // JPEG-compressed IFDs may use strip/tile layout instead of JPEGInterchangeFormat.
     if jpeg_off.is_none() || jpeg_len.is_none() {
         if matches!(compression, Some(6 | 7)) {
-            if let (Some(o), Some(l)) = (strip_off, strip_cnt) { jpeg_off = Some(o); jpeg_len = Some(l); }
-            else if let (Some(o), Some(l)) = (tile_off, tile_cnt) { jpeg_off = Some(o); jpeg_len = Some(l); }
+            if let (Some(o), Some(l)) = (strip_off, strip_cnt) {
+                jpeg_off = Some(o);
+                jpeg_len = Some(l);
+            } else if let (Some(o), Some(l)) = (tile_off, tile_cnt) {
+                jpeg_off = Some(o);
+                jpeg_len = Some(l);
+            }
         }
     }
 
@@ -1063,8 +1230,12 @@ fn parse_tiff_ifd(
 }
 
 fn tiff_subifd_offsets(bytes: &[u8], ft: u16, fc: usize, v: usize, little: bool) -> Vec<usize> {
-    if fc == 0 || ft != 4 { return Vec::new(); }
-    if fc == 1 { return vec![v]; }
+    if fc == 0 || ft != 4 {
+        return Vec::new();
+    }
+    if fc == 1 {
+        return vec![v];
+    }
     (0..fc.min(32))
         .filter_map(|i| read_u32(bytes, v + i * 4, little).map(|x| x as usize))
         .collect()
@@ -1072,15 +1243,27 @@ fn tiff_subifd_offsets(bytes: &[u8], ft: u16, fc: usize, v: usize, little: bool)
 
 fn tiff_u32_values(bytes: &[u8], ft: u16, fc: usize, v: usize, little: bool, max: usize) -> Vec<u32> {
     let count = fc.min(max);
-    if count == 0 { return Vec::new(); }
+    if count == 0 {
+        return Vec::new();
+    }
     match ft {
-        3 => { // SHORT
-            if fc == 1 { vec![v as u32] }
-            else { (0..count).filter_map(|i| read_u16(bytes, v + i * 2, little).map(|x| x as u32)).collect() }
+        3 => {
+            // SHORT
+            if fc == 1 {
+                vec![v as u32]
+            } else {
+                (0..count)
+                    .filter_map(|i| read_u16(bytes, v + i * 2, little).map(|x| x as u32))
+                    .collect()
+            }
         }
-        4 => { // LONG
-            if fc == 1 { vec![v as u32] }
-            else { (0..count).filter_map(|i| read_u32(bytes, v + i * 4, little)).collect() }
+        4 => {
+            // LONG
+            if fc == 1 {
+                vec![v as u32]
+            } else {
+                (0..count).filter_map(|i| read_u32(bytes, v + i * 4, little)).collect()
+            }
         }
         _ => Vec::new(),
     }
@@ -1108,12 +1291,18 @@ fn pre_scale_to_target(img: DynamicImage, target_w: u32, target_h: u32) -> Dynam
     let mut divisor = 1u32;
     loop {
         let next = divisor * 2;
-        if w / next >= tw * 2 && h / next >= th * 2 { divisor = next; } else { break; }
+        if w / next >= tw * 2 && h / next >= th * 2 {
+            divisor = next;
+        } else {
+            break;
+        }
     }
     let img = if divisor > 1 {
         let steps = divisor.trailing_zeros();
         let mut img = img;
-        for _ in 0..steps { img = box_half(img); }
+        for _ in 0..steps {
+            img = box_half(img);
+        }
         img
     } else {
         img
@@ -1145,7 +1334,9 @@ fn box_half(img: DynamicImage) -> DynamicImage {
     let (w, h) = (img.width(), img.height());
     let ow = w / 2;
     let oh = h / 2;
-    if ow == 0 || oh == 0 { return img; }
+    if ow == 0 || oh == 0 {
+        return img;
+    }
 
     // Luma8 — 1 byte/pixel
     if matches!(img, DynamicImage::ImageLuma8(_)) {
@@ -1154,11 +1345,15 @@ fn box_half(img: DynamicImage) -> DynamicImage {
         for oy in 0..oh as usize {
             let row0 = oy * 2 * stride;
             let row1 = row0 + stride;
-            let dst  = oy * ow as usize;
+            let dst = oy * ow as usize;
             for ox in 0..ow as usize {
                 let sx = ox * 2;
-                buf[dst + ox] = ((buf[row0+sx] as u16 + buf[row0+sx+1] as u16
-                                + buf[row1+sx] as u16 + buf[row1+sx+1] as u16 + 2) >> 2) as u8;
+                buf[dst + ox] = ((buf[row0 + sx] as u16
+                    + buf[row0 + sx + 1] as u16
+                    + buf[row1 + sx] as u16
+                    + buf[row1 + sx + 1] as u16
+                    + 2)
+                    >> 2) as u8;
             }
         }
         buf.truncate((ow * oh) as usize);
@@ -1172,13 +1367,16 @@ fn box_half(img: DynamicImage) -> DynamicImage {
         for oy in 0..oh as usize {
             let row0 = oy * 2 * stride;
             let row1 = row0 + stride;
-            let dst  = oy * ow as usize * 4;
+            let dst = oy * ow as usize * 4;
             for ox in 0..ow as usize {
                 let sx = ox * 8; // ox * 2 pixels * 4 channels
                 for c in 0..4usize {
-                    buf[dst + ox*4 + c] = ((buf[row0+sx+c]   as u16 + buf[row0+sx+4+c] as u16
-                                          + buf[row1+sx+c]   as u16 + buf[row1+sx+4+c] as u16
-                                          + 2) >> 2) as u8;
+                    buf[dst + ox * 4 + c] = ((buf[row0 + sx + c] as u16
+                        + buf[row0 + sx + 4 + c] as u16
+                        + buf[row1 + sx + c] as u16
+                        + buf[row1 + sx + 4 + c] as u16
+                        + 2)
+                        >> 2) as u8;
                 }
             }
         }
@@ -1192,20 +1390,22 @@ fn box_half(img: DynamicImage) -> DynamicImage {
     for oy in 0..oh as usize {
         let row0 = oy * 2 * stride;
         let row1 = row0 + stride;
-        let dst  = oy * ow as usize * 3;
+        let dst = oy * ow as usize * 3;
         for ox in 0..ow as usize {
             let sx = ox * 6; // ox * 2 pixels * 3 channels
             for c in 0..3usize {
-                buf[dst + ox*3 + c] = ((buf[row0+sx+c]   as u16 + buf[row0+sx+3+c] as u16
-                                      + buf[row1+sx+c]   as u16 + buf[row1+sx+3+c] as u16
-                                      + 2) >> 2) as u8;
+                buf[dst + ox * 3 + c] = ((buf[row0 + sx + c] as u16
+                    + buf[row0 + sx + 3 + c] as u16
+                    + buf[row1 + sx + c] as u16
+                    + buf[row1 + sx + 3 + c] as u16
+                    + 2)
+                    >> 2) as u8;
             }
         }
     }
     buf.truncate((ow * oh * 3) as usize);
     DynamicImage::ImageRgb8(RgbImage::from_raw(ow, oh, buf).unwrap())
 }
-
 
 /// Build the `properties` JSON object for a decoded image.
 ///
@@ -1242,7 +1442,11 @@ fn read_u32(buf: &[u8], off: usize, little: bool) -> Option<u32> {
     let b1 = *buf.get(off + 1)?;
     let b2 = *buf.get(off + 2)?;
     let b3 = *buf.get(off + 3)?;
-    Some(if little { u32::from_le_bytes([b0, b1, b2, b3]) } else { u32::from_be_bytes([b0, b1, b2, b3]) })
+    Some(if little {
+        u32::from_le_bytes([b0, b1, b2, b3])
+    } else {
+        u32::from_be_bytes([b0, b1, b2, b3])
+    })
 }
 
 // ── Audio: ID3v2 APIC cover art shortcut ────────────────────────────────────
@@ -1278,9 +1482,7 @@ async fn try_audio_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
 
     // ── Locate the first MPEG audio frame ─────────────────────────────────
     // With ID3: starts 10 + tag_size bytes in.  Without: starts at byte 0.
-    let audio_body_offset = id3.as_ref()
-        .map(|h| 10usize + h.tag_size)
-        .unwrap_or(0);
+    let audio_body_offset = id3.as_ref().map(|h| 10usize + h.tag_size).unwrap_or(0);
 
     let (channel_count, duration_secs) = if tag_bytes.len() > audio_body_offset + 4 {
         parse_first_mp3_frame(&tag_bytes[audio_body_offset..])
@@ -1310,8 +1512,7 @@ async fn try_audio_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     // ── Scan ID3v2 frames for APIC cover art ──────────────────────────────
     let image_bytes = id3.and_then(|h| {
         let result = find_id3_apic(&tag_bytes, h.version_major);
-        if result.is_none() {
-        }
+        if result.is_none() {}
         result
     });
 
@@ -1326,13 +1527,15 @@ async fn try_audio_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     let dl_bytes = cook.http_bytes_fetched();
     cook.http_close().await;
 
-    let Ok(img) = image::load_from_memory(&image_bytes) else { return };
+    let Ok(img) = image::load_from_memory(&image_bytes) else {
+        return;
+    };
     let img = pre_scale_to_target(img, config.exact_width, config.exact_height);
 
     cook.media.properties = Some(props);
 
-    cook.render_renderer    = Some("shortcut/audio".into());
-    cook.render_handler     = RenderHandler::Builtin;
+    cook.render_renderer = Some("shortcut/audio".into());
+    cook.render_handler = RenderHandler::Builtin;
     cook.out_download_bytes = dl_bytes;
     cook.render_image = Some(img);
 }
@@ -1354,15 +1557,21 @@ struct Id3Header {
 /// Parse the ID3v2 header from the first bytes of a file.
 /// Returns `None` if the magic `"ID3"` is absent or the header is truncated.
 fn parse_id3_header(bytes: &[u8]) -> Option<Id3Header> {
-    if bytes.len() < 10 { return None; }
-    if &bytes[0..3] != b"ID3" { return None; }
+    if bytes.len() < 10 {
+        return None;
+    }
+    if &bytes[0..3] != b"ID3" {
+        return None;
+    }
 
     let version_major = bytes[3];
     let _version_minor = bytes[4];
     let flags = bytes[5];
 
     // ID3v2.2 is ancient; we only support ≥ v2.3.
-    if version_major < 3 { return None; }
+    if version_major < 3 {
+        return None;
+    }
 
     let has_extended_header = (flags & 0x40) != 0;
     let has_footer = version_major >= 4 && (flags & 0x10) != 0;
@@ -1370,7 +1579,12 @@ fn parse_id3_header(bytes: &[u8]) -> Option<Id3Header> {
     // All four size bytes are 28-bit synchsafe (MSB of each byte is 0).
     let tag_size = synchsafe_u32(&bytes[6..10]) as usize;
 
-    Some(Id3Header { version_major, tag_size, has_extended_header, has_footer })
+    Some(Id3Header {
+        version_major,
+        tag_size,
+        has_extended_header,
+        has_footer,
+    })
 }
 
 /// Decode a 4-byte synchsafe integer (each byte uses only 7 bits, MSB is 0).
@@ -1416,7 +1630,9 @@ fn find_id3_apic(bytes: &[u8], version_major: u8) -> Option<Vec<u8>> {
 
     // Skip extended header if present.
     if id3.has_extended_header {
-        if pos + 4 > bytes.len() { return None; }
+        if pos + 4 > bytes.len() {
+            return None;
+        }
         let ext_size = synchsafe_u32(&bytes[pos..pos + 4]) as usize;
         // Extended header size includes the 4-byte size field itself.
         pos = pos.checked_add(ext_size)?;
@@ -1447,8 +1663,7 @@ fn find_id3_apic(bytes: &[u8], version_major: u8) -> Option<Vec<u8>> {
             let data_end = data_start.checked_add(frame_size)?.min(bytes.len());
             let apic_data = &bytes[data_start..data_end];
             let result = extract_apic_image(apic_data);
-            if result.is_none() {
-            }
+            if result.is_none() {}
             return result;
         }
 
@@ -1469,8 +1684,10 @@ fn find_id3_apic(bytes: &[u8], version_major: u8) -> Option<Vec<u8>> {
 fn is_valid_frame_id(id: &[u8]) -> bool {
     id.len() == 4
         && id[0].is_ascii_uppercase()
-        && id[1].is_ascii_alphanumeric() && id[1].is_ascii_uppercase()
-        && id[2].is_ascii_alphanumeric() && id[2].is_ascii_uppercase()
+        && id[1].is_ascii_alphanumeric()
+        && id[1].is_ascii_uppercase()
+        && id[2].is_ascii_alphanumeric()
+        && id[2].is_ascii_uppercase()
         && id[3].is_ascii_alphanumeric()
 }
 
@@ -1486,7 +1703,9 @@ fn is_valid_frame_id(id: &[u8]) -> bool {
 /// | …      | var    | Description (null-terminated) |
 /// | …      | rest   | Binary image data |
 fn extract_apic_image(apic_data: &[u8]) -> Option<Vec<u8>> {
-    if apic_data.len() < 4 { return None; }
+    if apic_data.len() < 4 {
+        return None;
+    }
 
     let encoding = apic_data[0];
 
@@ -1499,10 +1718,14 @@ fn extract_apic_image(apic_data: &[u8]) -> Option<Vec<u8>> {
             // UTF-16: find double-null (0x00 0x00) at an even offset.
             let mut i = mime_start;
             while i + 1 < apic_data.len() {
-                if apic_data[i] == 0x00 && apic_data[i + 1] == 0x00 { break; }
+                if apic_data[i] == 0x00 && apic_data[i + 1] == 0x00 {
+                    break;
+                }
                 i += 2;
             }
-            if i + 1 >= apic_data.len() { return None; }
+            if i + 1 >= apic_data.len() {
+                return None;
+            }
             i + 2 // skip past the double null
         }
         _ => {
@@ -1512,21 +1735,29 @@ fn extract_apic_image(apic_data: &[u8]) -> Option<Vec<u8>> {
         }
     };
 
-    if mime_end >= apic_data.len() { return None; }
+    if mime_end >= apic_data.len() {
+        return None;
+    }
 
     // Skip picture type byte.
     let desc_start = mime_end + 1;
-    if desc_start >= apic_data.len() { return None; }
+    if desc_start >= apic_data.len() {
+        return None;
+    }
 
     // Find the null terminator for the description.
     let image_start = match encoding {
         1 | 2 => {
             let mut i = desc_start;
             while i + 1 < apic_data.len() {
-                if apic_data[i] == 0x00 && apic_data[i + 1] == 0x00 { break; }
+                if apic_data[i] == 0x00 && apic_data[i + 1] == 0x00 {
+                    break;
+                }
                 i += 2;
             }
-            if i + 1 >= apic_data.len() { return None; }
+            if i + 1 >= apic_data.len() {
+                return None;
+            }
             i + 2
         }
         _ => {
@@ -1535,7 +1766,9 @@ fn extract_apic_image(apic_data: &[u8]) -> Option<Vec<u8>> {
         }
     };
 
-    if image_start >= apic_data.len() { return None; }
+    if image_start >= apic_data.len() {
+        return None;
+    }
 
     Some(apic_data[image_start..].to_vec())
 }
@@ -1579,11 +1812,15 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     let is_tiff = matches!(ext, "tiff");
     if is_jpeg || is_tiff || ext == "png" {
         try_exif_shortcut(cook).await;
-        if !cook.http_is_open() { return; }
+        if !cook.http_is_open() {
+            return;
+        }
     }
     if ext == "webp" {
         try_webp_exif_shortcut(cook).await;
-        if !cook.http_is_open() { return; }
+        if !cook.http_is_open() {
+            return;
+        }
     }
 
     // ── Small image: known `image`-crate formats, ≤ SMALL_FILE_THRESHOLD ──
@@ -1597,12 +1834,11 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     //
     // Keep this BEFORE the progressive JPEG path so genuinely small files
     // always use a full decode for reliability/quality.
-    let is_tier1_image_format = matches!(ext,
-        "jpeg" | "png" | "gif" | "bmp" | "tiff" | "ico"
-    );
+    let is_tier1_image_format = matches!(ext, "jpeg" | "png" | "gif" | "bmp" | "tiff" | "ico");
     let is_small_image = cook.media.kind == Some(FileKind::Image)
         && is_tier1_image_format
-        && cook.http_stream_len()
+        && cook
+            .http_stream_len()
             .map(|n| n <= cook.runtime.shortcut_limits.small_file_threshold)
             .unwrap_or(false);
 
@@ -1612,21 +1848,20 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
         // read_at has pread semantics: the cursor is saved and restored, and
         // streaming mode is never entered.  If load_from_memory fails the
         // buffer is left intact at cursor 0 so tier2 can call take_reader().
-        let data = cook.http_read_at(0, file_size as usize).await
-            .unwrap_or_default();
+        let data = cook.http_read_at(0, file_size as usize).await.unwrap_or_default();
 
         if !data.is_empty() {
             if let Ok(img) = image::load_from_memory(&data) {
                 let (src_w, src_h) = (img.width(), img.height());
-                let color_type     = img.color();
+                let color_type = img.color();
                 let dl_bytes = cook.http_bytes_fetched();
 
                 cook.http_close().await;
 
                 let img = pre_scale_to_target(img, config.exact_width, config.exact_height);
 
-                cook.render_renderer   = Some("shortcut/small".into());
-                cook.render_handler    = RenderHandler::Builtin;
+                cook.render_renderer = Some("shortcut/small".into());
+                cook.render_handler = RenderHandler::Builtin;
                 cook.out_download_bytes = dl_bytes;
                 if src_w > 0 && src_h > 0 {
                     cook.media.properties = Some(image_properties(src_w, src_h, color_type));
@@ -1643,29 +1878,40 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     // ── Progressive JPEG (falls through from EXIF and small-image checks) ─
     if is_jpeg {
         try_progressive_jpeg_shortcut(cook).await;
-        if !cook.http_is_open() { return; }
+        if !cook.http_is_open() {
+            return;
+        }
     }
 
     // ── Camera-raw embedded JPEG preview ─────────────────────────────────
     let is_raw = cook.media.kind == Some(FileKind::Image)
-        && matches!(cook.media.extension.as_deref(),
-            Some("dng" | "cr2" | "nef" | "arw" | "orf" | "rw2"
-               | "pef" | "srw" | "3fr" | "mef" | "rwl"));
+        && matches!(
+            cook.media.extension.as_deref(),
+            Some("dng" | "cr2" | "nef" | "arw" | "orf" | "rw2" | "pef" | "srw" | "3fr" | "mef" | "rwl")
+        );
     if is_raw {
         try_raw_shortcut(cook).await;
-        if !cook.http_is_open() { return; }
+        if !cook.http_is_open() {
+            return;
+        }
     }
 
     // ── ZIP containers (ODT, DOCX, …) ────────────────────────────────────
     let is_zip_doc = cook.media.kind == Some(FileKind::Document)
-        && matches!(cook.media.extension.as_deref(),
-            Some("docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp"));
-    if is_zip_doc { try_zip_shortcut(cook).await; }
+        && matches!(
+            cook.media.extension.as_deref(),
+            Some("docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp")
+        );
+    if is_zip_doc {
+        try_zip_shortcut(cook).await;
+    }
 
     // ── Audio: ID3v2 APIC cover art ─────────────────────────────────────
-    let is_audio = cook.media.kind == Some(FileKind::Audio)
-        && matches!(cook.media.extension.as_deref(), Some("mp3"));
-    if is_audio { try_audio_shortcut(cook).await; }
+    let is_audio =
+        cook.media.kind == Some(FileKind::Audio) && matches!(cook.media.extension.as_deref(), Some("mp3"));
+    if is_audio {
+        try_audio_shortcut(cook).await;
+    }
 }
 
 // ── MP3 frame header parser ──────────────────────────────────────────────────
@@ -1711,21 +1957,27 @@ fn parse_first_mp3_frame(bytes: &[u8]) -> Option<Mp3FrameInfo> {
 
 /// Parse a single MPEG audio frame header starting at `bytes[0]`.
 fn parse_mp3_frame_header(bytes: &[u8]) -> Option<Mp3FrameInfo> {
-    if bytes.len() < 4 { return None; }
+    if bytes.len() < 4 {
+        return None;
+    }
 
     let hdr = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
 
     // Sync: 11 bits of 1.
-    if (hdr >> 21) != 0x7FF { return None; }
+    if (hdr >> 21) != 0x7FF {
+        return None;
+    }
 
-    let version = (hdr >> 19) & 0x3;  // 00=MPEG2.5, 10=MPEG2, 11=MPEG1
-    let layer = (hdr >> 17) & 0x3;    // 01=Layer3, 10=Layer2, 11=Layer1
+    let version = (hdr >> 19) & 0x3; // 00=MPEG2.5, 10=MPEG2, 11=MPEG1
+    let layer = (hdr >> 17) & 0x3; // 01=Layer3, 10=Layer2, 11=Layer1
     let bitrate_idx = ((hdr >> 12) & 0xF) as usize;
     let sample_rate_idx = ((hdr >> 10) & 0x3) as usize;
     let channel_mode = ((hdr >> 6) & 0x3) as u8;
 
     // Only Layer III is common for MP3 files.
-    if layer != 0x01 { return None; }
+    if layer != 0x01 {
+        return None;
+    }
 
     let bitrate = match version {
         3 => MPEG1_LAYER3_BITRATE.get(bitrate_idx).copied()?, // MPEG1
@@ -1738,24 +1990,24 @@ fn parse_mp3_frame_header(bytes: &[u8]) -> Option<Mp3FrameInfo> {
         _ => MPEG25_SAMPLE_RATE.get(sample_rate_idx).copied()?,
     };
 
-    if bitrate == 0 { return None; } // "free" bitrate — can't estimate
+    if bitrate == 0 {
+        return None;
+    } // "free" bitrate — can't estimate
 
-    Some(Mp3FrameInfo { bitrate: bitrate * 1000, sample_rate, channel_mode })
+    Some(Mp3FrameInfo {
+        bitrate: bitrate * 1000,
+        sample_rate,
+        channel_mode,
+    })
 }
 
 // Bitrate tables in kbps, index 0 = free (invalid for estimation).
 
-const MPEG1_LAYER3_BITRATE: [u32; 16] = [
-    0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0,
-];
+const MPEG1_LAYER3_BITRATE: [u32; 16] = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0];
 
-const MPEG2_LAYER3_BITRATE: [u32; 16] = [
-    0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0,
-];
+const MPEG2_LAYER3_BITRATE: [u32; 16] = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0];
 
-const MPEG25_LAYER3_BITRATE: [u32; 16] = [
-    0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0,
-];
+const MPEG25_LAYER3_BITRATE: [u32; 16] = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0];
 
 const MPEG1_SAMPLE_RATE: [u32; 4] = [44100, 48000, 32000, 0];
 const MPEG2_SAMPLE_RATE: [u32; 4] = [22050, 24000, 16000, 0];

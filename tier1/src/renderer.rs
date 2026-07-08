@@ -95,7 +95,9 @@ pub trait RenderCook: Send {
     /// Whether a render image was stored (i.e. the format was decoded
     /// successfully).  Higher tiers use this to decide whether to try
     /// a fallback renderer after a lower tier claims the format.
-    fn has_render_image(&self) -> bool { false }
+    fn has_render_image(&self) -> bool {
+        false
+    }
     /// Low-level renderer label for the trace (e.g. `"ffmpeg"`, `"image_crate"`).
     fn set_render_renderer(&mut self, label: String);
     /// Codec or container detail for the trace (e.g. `"hevc"`, `"av1"`).
@@ -123,20 +125,28 @@ pub trait RenderCook: Send {
 /// Renderer implementations return this from their internal decode helpers,
 /// then apply it to the cook via [`apply_render_output`].
 pub struct RenderOutput {
-    pub image:           DynamicImage,
-    pub renderer:        Option<String>,
-    pub codec:           Option<String>,
+    pub image: DynamicImage,
+    pub renderer: Option<String>,
+    pub codec: Option<String>,
     pub video_seek_secs: Option<f64>,
-    pub properties:      Option<serde_json::Value>,
+    pub properties: Option<serde_json::Value>,
 }
 
 /// Apply a `RenderOutput` to a `dyn RenderCook` in one call.
 pub fn apply_render_output(cook: &mut dyn RenderCook, out: RenderOutput) {
     cook.set_render_image(out.image);
-    if let Some(r) = out.renderer      { cook.set_render_renderer(r); }
-    if let Some(c) = out.codec         { cook.set_render_codec(c); }
-    if let Some(s) = out.video_seek_secs { cook.set_render_video_seek_secs(s); }
-    if let Some(p) = out.properties    { cook.set_media_properties(p); }
+    if let Some(r) = out.renderer {
+        cook.set_render_renderer(r);
+    }
+    if let Some(c) = out.codec {
+        cook.set_render_codec(c);
+    }
+    if let Some(s) = out.video_seek_secs {
+        cook.set_render_video_seek_secs(s);
+    }
+    if let Some(p) = out.properties {
+        cook.set_media_properties(p);
+    }
 }
 
 // ── InProcessRenderer ─────────────────────────────────────────────────────────
@@ -150,10 +160,7 @@ pub trait InProcessRenderer: Send + Sync + 'static {
     /// Returns `true` when the format was claimed (regardless of success —
     /// call `cook.fail_cook(msg)` on decode errors).
     /// Returns `false` to signal "not my format".
-    fn render<'a>(
-        &'a self,
-        cook: &'a mut dyn RenderCook,
-    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
+    fn render<'a>(&'a self, cook: &'a mut dyn RenderCook) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
 }
 
 // ── Type alias ────────────────────────────────────────────────────────────────
@@ -165,8 +172,7 @@ pub type SharedRenderer = Arc<dyn InProcessRenderer>;
 
 /// Attach an in-process renderer to an existing [`Runtime`].
 pub fn with_renderer(runtime: Arc<Runtime>, renderer: SharedRenderer) -> Arc<Runtime> {
-    let mut r = Arc::try_unwrap(runtime)
-        .unwrap_or_else(|arc| (*arc).clone());
+    let mut r = Arc::try_unwrap(runtime).unwrap_or_else(|arc| (*arc).clone());
     r.renderer = Some(renderer);
     Arc::new(r)
 }

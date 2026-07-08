@@ -208,10 +208,7 @@ impl CacheStore {
             match fe.try_lead(key) {
                 Some(rx) => {
                     // Joiner — wait for the leader with a 30 s safety timeout.
-                    let result = tokio::time::timeout(
-                        std::time::Duration::from_secs(30),
-                        rx,
-                    ).await;
+                    let result = tokio::time::timeout(std::time::Duration::from_secs(30), rx).await;
 
                     match result {
                         Ok(Ok(arc)) => return Some(((*arc).clone(), "sticky")),
@@ -274,13 +271,14 @@ impl CacheStore {
 
         // ── Durable backend ───────────────────────────────────────────────
         // Skip durable storage when the cache string is empty (uncacheable).
-        let uncacheable = result.media.as_ref()
-            .map_or(true, |m| m.cache.is_empty());
+        let uncacheable = result.media.as_ref().map_or(true, |m| m.cache.is_empty());
         if uncacheable {
             return;
         }
         if let Some(ref backend) = self.backend {
-            let Ok(json) = serde_json::to_string(result) else { return };
+            let Ok(json) = serde_json::to_string(result) else {
+                return;
+            };
             after.push(backend.put(key.to_string(), json, cost, expires_at));
         }
     }
@@ -318,9 +316,9 @@ pub fn open_from_dsn(dsn: &str) -> Result<Arc<dyn CacheBackend>, String> {
         return Err("none: takes no parameters — use just 'none:' to disable caching".to_string());
     }
 
-    let (scheme, rest) = dsn.split_once(':').ok_or_else(||
-        format!("invalid cache spec '{dsn}' — expected <scheme>:<value>")
-    )?;
+    let (scheme, rest) = dsn
+        .split_once(':')
+        .ok_or_else(|| format!("invalid cache spec '{dsn}' — expected <scheme>:<value>"))?;
 
     match scheme {
         "mem" => {
@@ -331,7 +329,7 @@ pub fn open_from_dsn(dsn: &str) -> Result<Arc<dyn CacheBackend>, String> {
                     .map_err(|e| format!("mem cache: {e}"))?
                     .unwrap_or((100 * 1024 * 1024, "bytes"));
                 match kind {
-                    "bytes"   => memory::MemoryCacheBackend::with_max_bytes(value),
+                    "bytes" => memory::MemoryCacheBackend::with_max_bytes(value),
                     "entries" => memory::MemoryCacheBackend::with_max_entries(value),
                     _ => unreachable!(),
                 }
@@ -350,9 +348,7 @@ pub fn open_from_dsn(dsn: &str) -> Result<Arc<dyn CacheBackend>, String> {
                 .map_err(|e| format!("sqlite cache: {e}"))?;
             Ok(Arc::new(backend))
         }
-        "cloud" => {
-            cloud::CloudCacheBackend::new(rest).map(|b| Arc::new(b) as Arc<dyn CacheBackend>)
-        }
+        "cloud" => cloud::CloudCacheBackend::new(rest).map(|b| Arc::new(b) as Arc<dyn CacheBackend>),
         other => Err(format!(
             "unsupported cache scheme '{other}' — supported: mem:, sqlite:, cloud:, none:"
         )),
@@ -367,7 +363,9 @@ pub fn validate_dsn(dsn: &str) -> (crate::check::Validation, Option<crate::check
     }
     if dsn.starts_with("none:") {
         return (
-            crate::check::Validation::error("none: takes no parameters — use just 'none:' to disable caching"),
+            crate::check::Validation::error(
+                "none: takes no parameters — use just 'none:' to disable caching",
+            ),
             None,
         );
     }
@@ -392,7 +390,10 @@ pub fn validate_dsn(dsn: &str) -> (crate::check::Validation, Option<crate::check
             if path.is_empty() {
                 return (crate::check::Validation::error("sqlite: requires a file path"), None);
             }
-            (crate::check::Validation::skipped(), Some(sqlite::SqliteCacheBackend::check(path)))
+            (
+                crate::check::Validation::skipped(),
+                Some(sqlite::SqliteCacheBackend::check(path)),
+            )
         }
         _ => (
             crate::check::Validation::error(format!(

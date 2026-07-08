@@ -36,12 +36,7 @@ fn resolve_path(raw: &str) -> PathBuf {
 
 /// Wrap `body` in a prominent banner so it stands out from cargo's own output.
 fn banner(body: &str) -> ! {
-    let width = body
-        .lines()
-        .map(|l| l.len())
-        .max()
-        .unwrap_or(60)
-        .max(50);
+    let width = body.lines().map(|l| l.len()).max().unwrap_or(60).max(50);
     let line = "=".repeat(width);
     panic!("\n\n{line}\n{body}\n{line}\n");
 }
@@ -159,8 +154,13 @@ fn check_git() {
 #[cfg(windows)]
 fn check_ffmpeg_libs(dir: &std::path::Path, env_var: &str, env_value: &std::path::Path) {
     let required = [
-        "avcodec.lib", "avdevice.lib", "avfilter.lib", "avformat.lib",
-        "avutil.lib", "swresample.lib", "swscale.lib",
+        "avcodec.lib",
+        "avdevice.lib",
+        "avfilter.lib",
+        "avformat.lib",
+        "avutil.lib",
+        "swresample.lib",
+        "swscale.lib",
     ];
     let lib_dir = dir.join("lib");
     if !lib_dir.exists() {
@@ -195,8 +195,13 @@ fn check_ffmpeg_libs(dir: &std::path::Path, env_var: &str, env_value: &std::path
 #[cfg(not(windows))]
 fn check_ffmpeg_libs_unix(dir: &std::path::Path, env_var: &str, env_value: &std::path::Path) {
     let required = [
-        "libavcodec.a", "libavdevice.a", "libavfilter.a", "libavformat.a",
-        "libavutil.a", "libswresample.a", "libswscale.a",
+        "libavcodec.a",
+        "libavdevice.a",
+        "libavfilter.a",
+        "libavformat.a",
+        "libavutil.a",
+        "libswresample.a",
+        "libswscale.a",
     ];
     let lib_dir = dir.join("lib");
     if !lib_dir.exists() {

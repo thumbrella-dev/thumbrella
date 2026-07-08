@@ -63,15 +63,21 @@ pub enum OutputStyle {
 impl OutputStyle {
     pub fn from_env() -> Self {
         match std::env::var("TBR_LOG").as_deref() {
-            Ok("full")     => Self::Full,
-            Ok("minimal")  => Self::Minimal,
-            _              => Self::Standard,
+            Ok("full") => Self::Full,
+            Ok("minimal") => Self::Minimal,
+            _ => Self::Standard,
         }
     }
 
-    pub fn show_banner(self) -> bool { matches!(self, Self::Full | Self::Standard) }
-    pub fn show_hints(self)  -> bool { self.show_banner() }
-    pub fn show_raw_logs(self) -> bool { matches!(self, Self::Full) }
+    pub fn show_banner(self) -> bool {
+        matches!(self, Self::Full | Self::Standard)
+    }
+    pub fn show_hints(self) -> bool {
+        self.show_banner()
+    }
+    pub fn show_raw_logs(self) -> bool {
+        matches!(self, Self::Full)
+    }
 }
 
 // ── Colour helpers ────────────────────────────────────────────────────────────
@@ -92,13 +98,27 @@ pub fn colour_enabled() -> bool {
 struct Colour;
 
 impl Colour {
-    fn green(s: &str)   -> String { if use_colour() { format!("\x1b[32m{s}\x1b[0m") } else { s.to_string() } }
-    fn red(s: &str)     -> String { if use_colour() { format!("\x1b[31m{s}\x1b[0m") } else { s.to_string() } }
-    fn yellow(s: &str)  -> String { if use_colour() { format!("\x1b[33m{s}\x1b[0m") } else { s.to_string() } }
-    fn cyan(s: &str)    -> String { if use_colour() { format!("\x1b[36m{s}\x1b[0m") } else { s.to_string() } }
-    fn magenta(s: &str) -> String { if use_colour() { format!("\x1b[35m{s}\x1b[0m") } else { s.to_string() } }
-    fn dim(s: &str)     -> String { if use_colour() { format!("\x1b[2m{s}\x1b[0m") } else { s.to_string() } }
-    fn bold(s: &str)    -> String { if use_colour() { format!("\x1b[1m{s}\x1b[0m") } else { s.to_string() } }
+    fn green(s: &str) -> String {
+        if use_colour() { format!("\x1b[32m{s}\x1b[0m") } else { s.to_string() }
+    }
+    fn red(s: &str) -> String {
+        if use_colour() { format!("\x1b[31m{s}\x1b[0m") } else { s.to_string() }
+    }
+    fn yellow(s: &str) -> String {
+        if use_colour() { format!("\x1b[33m{s}\x1b[0m") } else { s.to_string() }
+    }
+    fn cyan(s: &str) -> String {
+        if use_colour() { format!("\x1b[36m{s}\x1b[0m") } else { s.to_string() }
+    }
+    fn magenta(s: &str) -> String {
+        if use_colour() { format!("\x1b[35m{s}\x1b[0m") } else { s.to_string() }
+    }
+    fn dim(s: &str) -> String {
+        if use_colour() { format!("\x1b[2m{s}\x1b[0m") } else { s.to_string() }
+    }
+    fn bold(s: &str) -> String {
+        if use_colour() { format!("\x1b[1m{s}\x1b[0m") } else { s.to_string() }
+    }
 }
 
 // ── Global UX instance ────────────────────────────────────────────────────────
@@ -136,13 +156,27 @@ pub struct Ux {
 impl Ux {
     // ── Public colour helpers (for CLI output) ────────────────────────────────
 
-    pub fn green(&self, s: &str) -> String   { Colour::green(s) }
-    pub fn red(&self, s: &str) -> String     { Colour::red(s) }
-    pub fn yellow(&self, s: &str) -> String  { Colour::yellow(s) }
-    pub fn cyan(&self, s: &str) -> String    { Colour::cyan(s) }
-    pub fn magenta(&self, s: &str) -> String { Colour::magenta(s) }
-    pub fn dim(&self, s: &str) -> String     { Colour::dim(s) }
-    pub fn bold(&self, s: &str) -> String    { Colour::bold(s) }
+    pub fn green(&self, s: &str) -> String {
+        Colour::green(s)
+    }
+    pub fn red(&self, s: &str) -> String {
+        Colour::red(s)
+    }
+    pub fn yellow(&self, s: &str) -> String {
+        Colour::yellow(s)
+    }
+    pub fn cyan(&self, s: &str) -> String {
+        Colour::cyan(s)
+    }
+    pub fn magenta(&self, s: &str) -> String {
+        Colour::magenta(s)
+    }
+    pub fn dim(&self, s: &str) -> String {
+        Colour::dim(s)
+    }
+    pub fn bold(&self, s: &str) -> String {
+        Colour::bold(s)
+    }
 
     /// Pretty-print and colour a JSON string for terminal display.
     ///
@@ -176,7 +210,9 @@ impl Ux {
         tier2_configured: bool,
         tier3_configured: bool,
     ) {
-        if !self.style.show_banner() { return; }
+        if !self.style.show_banner() {
+            return;
+        }
 
         let mut lines: Vec<String> = Vec::new();
 
@@ -196,9 +232,7 @@ impl Ux {
         }
 
         // ── Docs ──────────────────────────────────────────────────────────
-        lines.push(format!(
-            "  # docs: https://thumbrella.dev/docs/",
-        ));
+        lines.push(format!("  # docs: https://thumbrella.dev/docs/",));
 
         // ── Hints ─────────────────────────────────────────────────────────
         if self.style.show_hints() {
@@ -222,15 +256,11 @@ impl Ux {
         // ── Connection ────────────────────────────────────────────────────
         let connect = if let Some(hs) = handshake {
             let masked = Self::mask_handshake(hs);
-            Colour::dim(&format!(
-                "TBR_CONNECT=http://localhost:{port},{masked} (use secret handshake)"
-            ))
+            Colour::dim(&format!("TBR_CONNECT=http://localhost:{port},{masked} (use secret handshake)"))
         } else {
             Colour::dim(&format!("TBR_CONNECT=http://localhost:{port}"))
         };
-        lines.push(format!(
-            "  # clients:  {connect}",
-        ));
+        lines.push(format!("  # clients:  {connect}",));
 
         // ── Listening (always last) ───────────────────────────────────────
         let listen_addr = if in_container() {
@@ -288,9 +318,9 @@ impl Ux {
         let header = format!(
             "{method} {path}  {count} {items}{ip}\n",
             method = Colour::cyan(method),
-            path   = path,
-            count  = count,
-            items  = if count == 1 { "item" } else { "items" },
+            path = path,
+            count = count,
+            items = if count == 1 { "item" } else { "items" },
         );
         let _ = io::stdout().write_all(header.as_bytes());
     }
@@ -316,8 +346,8 @@ impl Ux {
 
         let format_str = match (kind, extension) {
             (Some(k), Some(e)) if !e.is_empty() => format!("{k} {e}"),
-            (Some(k), _)                       => k.to_string(),
-            _                                  => String::new(),
+            (Some(k), _) => k.to_string(),
+            _ => String::new(),
         };
 
         let msg_str = match message {
@@ -327,11 +357,11 @@ impl Ux {
 
         let line = format!(
             "  {status}  {duration:>5}ms  {format_str:<16}  {url}{msg_str}\n",
-            status   = status_str,
+            status = status_str,
             duration = duration_ms,
             format_str = format_str,
-            url      = Colour::dim(url),
-            msg_str  = Colour::yellow(&msg_str),
+            url = Colour::dim(url),
+            msg_str = Colour::yellow(&msg_str),
         );
         let _ = io::stdout().write_all(line.as_bytes());
     }
@@ -354,11 +384,7 @@ impl Ux {
             Some(ip) => format!(" from {ip}"),
             None => String::new(),
         };
-        let header = format!(
-            "{method} {path}{ip}\n",
-            method = Colour::cyan(method),
-            path   = path,
-        );
+        let header = format!("{method} {path}{ip}\n", method = Colour::cyan(method), path = path,);
         let _ = io::stdout().write_all(header.as_bytes());
         self.log_thumb_result(url, status, duration_ms, kind, extension, source, message);
     }
@@ -369,7 +395,7 @@ impl Ux {
     pub fn fatal(&self, problem: &str, suggestion: &str) -> ! {
         let msg = format!(
             "\n  {label} {problem}\n  {fix_label} {suggestion}\n",
-            label   = Colour::red("error:"),
+            label = Colour::red("error:"),
             problem = problem,
             fix_label = Colour::dim("  fix:"),
             suggestion = suggestion,
@@ -382,7 +408,7 @@ impl Ux {
     pub fn warn(&self, problem: &str, suggestion: &str) {
         let msg = format!(
             "  {label} {problem}\n  {fix_label} {suggestion}\n",
-            label   = Colour::yellow("warn:"),
+            label = Colour::yellow("warn:"),
             problem = problem,
             fix_label = Colour::dim("  fix:"),
             suggestion = suggestion,
@@ -392,11 +418,7 @@ impl Ux {
 
     /// Print a single-line startup issue (used by `serve` after the banner).
     pub fn print_startup_issue(&self, msg: &str) {
-        let line = format!(
-            "  {} {}\n",
-            Colour::red("error:"),
-            msg,
-        );
+        let line = format!("  {} {}\n", Colour::red("error:"), msg,);
         let _ = io::stdout().write_all(line.as_bytes());
     }
 }
@@ -424,7 +446,9 @@ fn colorize_json_str(json: &str) -> String {
                 let start = i;
                 i += 1; // skip opening quote
                 while i < len && chars[i] != '"' {
-                    if chars[i] == '\\' { i += 1; } // skip escaped char
+                    if chars[i] == '\\' {
+                        i += 1;
+                    } // skip escaped char
                     i += 1;
                 }
                 i += 1; // skip closing quote
@@ -433,7 +457,8 @@ fn colorize_json_str(json: &str) -> String {
 
                 // Peek ahead for ':' (key) vs ',' or '}' or end (value).
                 let mut j = i;
-                while j < len && (chars[j] == ' ' || chars[j] == '\n' || chars[j] == '\r' || chars[j] == '\t') {
+                while j < len && (chars[j] == ' ' || chars[j] == '\n' || chars[j] == '\r' || chars[j] == '\t')
+                {
                     j += 1;
                 }
                 if j < len && chars[j] == ':' {

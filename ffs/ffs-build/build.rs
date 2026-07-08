@@ -10,18 +10,14 @@ fn main() {
             .find_package("ffmpeg")
             .expect("ffmpeg not found in vcpkg tree");
 
-        let ffmpeg_libs = [
-            "avcodec", "avdevice", "avfilter", "avformat",
-            "avutil", "swresample", "swscale",
-        ];
+        let ffmpeg_libs = ["avcodec", "avdevice", "avfilter", "avformat", "avutil", "swresample", "swscale"];
         for name in &ffmpeg_libs {
             println!("cargo:rustc-link-lib=static={}", name);
         }
 
         let system_libs = [
-            "psapi", "uuid", "oleaut32", "shlwapi", "gdi32", "vfw32",
-            "secur32", "ncrypt", "crypt32", "ws2_32", "mfuuid", "strmiids",
-            "ole32", "user32", "bcrypt",
+            "psapi", "uuid", "oleaut32", "shlwapi", "gdi32", "vfw32", "secur32", "ncrypt", "crypt32",
+            "ws2_32", "mfuuid", "strmiids", "ole32", "user32", "bcrypt",
         ];
         for name in &system_libs {
             println!("cargo:rustc-link-lib={}", name);

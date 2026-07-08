@@ -51,7 +51,9 @@ pub struct ConnectTarget {
 /// - Auth token (`tbr_[a-z]_` prefix) → `Authorization: Bearer <token>`, `url: None`
 /// - Otherwise → `x-tbr-handshake: <value>`, `url: None`
 pub fn parse_connect_target(raw: Option<String>) -> ConnectTarget {
-    let Some(raw) = raw else { return ConnectTarget::default(); };
+    let Some(raw) = raw else {
+        return ConnectTarget::default();
+    };
 
     // Bare value (no scheme) — either an auth token or a handshake.
     if !raw.contains("://") {
@@ -115,8 +117,5 @@ pub fn parse_connect_target(raw: Option<String>) -> ConnectTarget {
 /// value matches this prefix, it was almost certainly set by mistake.
 pub(crate) fn looks_like_auth_token(value: &str) -> bool {
     let b = value.as_bytes();
-    b.len() >= 6
-        && b.starts_with(b"tbr_")
-        && b[4].is_ascii_lowercase()
-        && b[5] == b'_'
+    b.len() >= 6 && b.starts_with(b"tbr_") && b[4].is_ascii_lowercase() && b[5] == b'_'
 }

@@ -83,19 +83,34 @@ pub struct Validation {
 
 impl Validation {
     pub fn ok() -> Self {
-        Self { status: ValidationStatus::Ok, message: None }
+        Self {
+            status: ValidationStatus::Ok,
+            message: None,
+        }
     }
     pub fn not_configured() -> Self {
-        Self { status: ValidationStatus::NotConfigured, message: None }
+        Self {
+            status: ValidationStatus::NotConfigured,
+            message: None,
+        }
     }
     pub fn error(msg: impl Into<String>) -> Self {
-        Self { status: ValidationStatus::Error, message: Some(msg.into()) }
+        Self {
+            status: ValidationStatus::Error,
+            message: Some(msg.into()),
+        }
     }
     pub fn warn(msg: impl Into<String>) -> Self {
-        Self { status: ValidationStatus::Warn, message: Some(msg.into()) }
+        Self {
+            status: ValidationStatus::Warn,
+            message: Some(msg.into()),
+        }
     }
     pub fn skipped() -> Self {
-        Self { status: ValidationStatus::Skipped, message: None }
+        Self {
+            status: ValidationStatus::Skipped,
+            message: None,
+        }
     }
 }
 
@@ -185,8 +200,10 @@ pub struct CheckReport {
 
     // ── Server config ─────────────────────────────────────────────────────────
     /// HTTP port the server binds on.
-    pub server_port: u16,    /// Whether the configured port is available and bindable by this process.
-    pub port_available: bool,    /// Server identifier (colo code or operator label).
+    pub server_port: u16,
+    /// Whether the configured port is available and bindable by this process.
+    pub port_available: bool,
+    /// Server identifier (colo code or operator label).
     /// Developer / debug mode enabled.
     /// Whether local-URL access is enabled (`TBR_ALLOW_LOCAL`).
     pub allow_local: bool,
@@ -206,7 +223,6 @@ pub struct CheckReport {
     /// Checks whether the configured `TBR_HANDSHAKE` value looks like an auth
     /// token (starts with `tbr_[a-z]_`), which would indicate a misconfiguration.
     pub handshake_validation: Validation,
-
 
     // ── Tier 1 ────────────────────────────────────────────────────────────────
     /// Tier 1 is always builtin — this field is informational only.
@@ -253,7 +269,6 @@ pub struct CheckReport {
     /// Which tier binary this is (1, 2, or 3).  `None` when unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_tier: Option<u8>,
-
 }
 
 // ── Collector ────────────────────────────────────────────────────────────────
@@ -324,22 +339,32 @@ fn build_cache_summary(dsn: &str, _cfg: &crate::config::AppConfig) -> String {
 pub fn collect(cfg: &crate::config::AppConfig) -> CheckReport {
     // Tier 2 — prefer builtin when the renderer is compiled in, otherwise
     // check for a handoff URL, otherwise missing.
-    let (tier2, tier2_handoff, tier2_validation) = if TIER2_BUILTIN.load(std::sync::atomic::Ordering::Acquire) {
+    let (tier2, tier2_handoff, tier2_validation) = if TIER2_BUILTIN.load(std::sync::atomic::Ordering::Acquire)
+    {
         (TierStatus::Builtin, None, Validation::ok())
     } else {
         match cfg.tier2.url.as_ref() {
-            Some(url) => (TierStatus::Handoff, Some(url.clone()), validate_handoff_target(url, &cfg.tier2.headers)),
-            None      => (TierStatus::Missing, None,              Validation::not_configured()),
+            Some(url) => (
+                TierStatus::Handoff,
+                Some(url.clone()),
+                validate_handoff_target(url, &cfg.tier2.headers),
+            ),
+            None => (TierStatus::Missing, None, Validation::not_configured()),
         }
     };
 
     // Tier 3 — same logic: builtin > handoff > missing.
-    let (tier3, tier3_handoff, tier3_validation) = if TIER3_BUILTIN.load(std::sync::atomic::Ordering::Acquire) {
+    let (tier3, tier3_handoff, tier3_validation) = if TIER3_BUILTIN.load(std::sync::atomic::Ordering::Acquire)
+    {
         (TierStatus::Builtin, None, Validation::ok())
     } else {
         match cfg.tier3.url.as_ref() {
-            Some(url) => (TierStatus::Handoff, Some(url.clone()), validate_handoff_target(url, &cfg.tier3.headers)),
-            None      => (TierStatus::Missing, None,              Validation::not_configured()),
+            Some(url) => (
+                TierStatus::Handoff,
+                Some(url.clone()),
+                validate_handoff_target(url, &cfg.tier3.headers),
+            ),
+            None => (TierStatus::Missing, None, Validation::not_configured()),
         }
     };
 
@@ -364,7 +389,7 @@ pub fn collect(cfg: &crate::config::AppConfig) -> CheckReport {
     // Trace sink
     let trace_url = cfg.trace_url.clone();
     let (trace_validation, trace_file_check) = match cfg.trace_url.as_deref() {
-        None      => (Validation::not_configured(), None),
+        None => (Validation::not_configured(), None),
         Some(dsn) => crate::tracelog::validate_dsn(dsn),
     };
 
@@ -380,12 +405,10 @@ pub fn collect(cfg: &crate::config::AppConfig) -> CheckReport {
     // Handshake validation — flag values that look like auth tokens.
     let handshake_validation = match cfg.handshake.as_deref() {
         None => Validation::not_configured(),
-        Some(hs) if crate::connect::looks_like_auth_token(hs) => {
-            Validation::error(
-                "looks like an auth token (starts with 'tbr_'); \
+        Some(hs) if crate::connect::looks_like_auth_token(hs) => Validation::error(
+            "looks like an auth token (starts with 'tbr_'); \
                  set a simple shared secret instead",
-            )
-        }
+        ),
         Some(_) => Validation::ok(),
     };
 
@@ -397,7 +420,8 @@ pub fn collect(cfg: &crate::config::AppConfig) -> CheckReport {
         && !matches!(trace_validation.status, ValidationStatus::Error)
         && !matches!(handshake_validation.status, ValidationStatus::Error)
         && port_available
-        && cache_file_check.as_ref()
+        && cache_file_check
+            .as_ref()
             .and_then(|fc| fc.sqlite_validation.as_ref())
             .map(|v| v.status != ValidationStatus::Error)
             .unwrap_or(true);
@@ -450,9 +474,7 @@ pub(crate) fn check_file_path(path: &str) -> FileCheck {
     let (check_path, note) = if target.exists() {
         (target.to_path_buf(), None)
     } else {
-        let parent = target.parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
+        let parent = target.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
         (
             parent.to_path_buf(),
             Some("file does not exist; parent directory checked".to_string()),
@@ -466,7 +488,13 @@ pub(crate) fn check_file_path(path: &str) -> FileCheck {
 
     let free_bytes = free_bytes_at(&check_path);
 
-    FileCheck { path: path.to_string(), writable, note, free_bytes, sqlite_validation: None }
+    FileCheck {
+        path: path.to_string(),
+        writable,
+        note,
+        free_bytes,
+        sqlite_validation: None,
+    }
 }
 
 /// On Windows, the file-backed path check is simplified — no `access(2)`
@@ -480,16 +508,20 @@ pub(crate) fn check_file_path(path: &str) -> FileCheck {
     let (writable, note) = if target.exists() {
         (target.metadata().map(|m| !m.permissions().readonly()).unwrap_or(false), None)
     } else {
-        let parent = target.parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
+        let parent = target.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
         (
             parent.exists(),
             Some("file does not exist; parent directory checked".to_string()),
         )
     };
 
-    FileCheck { path: path.to_string(), writable, note, free_bytes: None, sqlite_validation: None }
+    FileCheck {
+        path: path.to_string(),
+        writable,
+        note,
+        free_bytes: None,
+        sqlite_validation: None,
+    }
 }
 
 /// Query free bytes on the filesystem hosting `path` via `statvfs(2)`.
@@ -503,18 +535,24 @@ pub(crate) fn free_bytes_at(path: &std::path::Path) -> Option<u64> {
 
     let mut p = path.to_path_buf();
     loop {
-        if p.exists() { break; }
+        if p.exists() {
+            break;
+        }
         let parent = p.parent().map(|q| q.to_path_buf());
         match parent {
             Some(q) if !q.as_os_str().is_empty() => p = q,
             _ => p = std::path::PathBuf::from("."),
         }
-        if p.exists() { break; }
+        if p.exists() {
+            break;
+        }
     }
 
     let c = CString::new(p.as_os_str().as_bytes()).ok()?;
     let mut buf: libc::statvfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statvfs(c.as_ptr(), &mut buf) } != 0 { return None; }
+    if unsafe { libc::statvfs(c.as_ptr(), &mut buf) } != 0 {
+        return None;
+    }
     // f_bavail: blocks available to unprivileged users; f_bsize: block size.
     Some(buf.f_bavail as u64 * buf.f_bsize as u64)
 }
@@ -540,24 +578,25 @@ fn detect_container_image() -> Option<String> {
     // 1. Operator-supplied label via environment variable.
     if let Ok(v) = std::env::var("TBR_CONTAINER_IMAGE") {
         let v = v.trim().to_string();
-        if !v.is_empty() { return Some(v); }
+        if !v.is_empty() {
+            return Some(v);
+        }
     }
 
     // 2. Thumbrella-specific release file (written into the image at build time).
     if let Ok(content) = std::fs::read_to_string("/etc/thumbrella-release") {
         let name = content.trim().to_string();
-        if !name.is_empty() { return Some(name); }
+        if !name.is_empty() {
+            return Some(name);
+        }
     }
 
     // 3. Check container presence heuristics.
-    let dockerenv    = std::path::Path::new("/.dockerenv").exists();
+    let dockerenv = std::path::Path::new("/.dockerenv").exists();
     let containerenv = std::path::Path::new("/.containerenv").exists();
-    let in_cgroup    = std::fs::read_to_string("/proc/1/cgroup")
+    let in_cgroup = std::fs::read_to_string("/proc/1/cgroup")
         .map(|s| {
-            s.contains("docker")
-            || s.contains("containerd")
-            || s.contains("kubepods")
-            || s.contains("lxc")
+            s.contains("docker") || s.contains("containerd") || s.contains("kubepods") || s.contains("lxc")
         })
         .unwrap_or(false);
 
@@ -574,7 +613,9 @@ fn detect_container_image() -> Option<String> {
         for line in content.lines() {
             if let Some(val) = line.strip_prefix("IMAGE_ID=") {
                 let v = val.trim_matches('"').trim();
-                if !v.is_empty() { return Some(v.to_string()); }
+                if !v.is_empty() {
+                    return Some(v.to_string());
+                }
             }
             if let Some(val) = line.strip_prefix("PRETTY_NAME=") {
                 pretty_name = Some(val.trim_matches('"').trim().to_string());
@@ -582,18 +623,26 @@ fn detect_container_image() -> Option<String> {
         }
         if let Some(name) = pretty_name {
             if !name.is_empty() {
-                let runtime = if dockerenv { "docker" }
-                    else if containerenv { "podman" }
-                    else { "container" };
+                let runtime = if dockerenv {
+                    "docker"
+                } else if containerenv {
+                    "podman"
+                } else {
+                    "container"
+                };
                 return Some(format!("{runtime} ({name})"));
             }
         }
     }
 
     // 5. Generic fallback: we know it's a container but not which image.
-    let runtime = if dockerenv { "docker container" }
-        else if containerenv { "podman container" }
-        else { "container (unknown image)" };
+    let runtime = if dockerenv {
+        "docker container"
+    } else if containerenv {
+        "podman container"
+    } else {
+        "container (unknown image)"
+    };
     Some(runtime.to_string())
 }
 
@@ -653,11 +702,7 @@ impl CheckReport {
 
         // ── Status ────────────────────────────────────────────────────────
         println!();
-        let status = if self.healthy {
-            ux.green("ready")
-        } else {
-            ux.red("error")
-        };
+        let status = if self.healthy { ux.green("ready") } else { ux.red("error") };
         println!("status: {status}");
     }
 
@@ -697,12 +742,7 @@ fn print_env_default(name: &str, value: &str) {
 }
 
 /// Print a DSN-backed env var (TBR_TRACE, TBR_CACHE).
-fn print_dsn_var(
-    name: &str,
-    dsn: &Option<String>,
-    validation: &Validation,
-    file_check: &Option<FileCheck>,
-) {
+fn print_dsn_var(name: &str, dsn: &Option<String>, validation: &Validation, file_check: &Option<FileCheck>) {
     let ux = crate::ux::get();
 
     let Some(raw) = dsn else {
@@ -735,12 +775,7 @@ fn print_dsn_var(
 }
 
 /// Print a tier env var line (TBR_TIER2, TBR_TIER3).
-fn print_tier_var(
-    name: &str,
-    status: &TierStatus,
-    handoff: Option<&str>,
-    validation: &Validation,
-) {
+fn print_tier_var(name: &str, status: &TierStatus, handoff: Option<&str>, validation: &Validation) {
     let ux = crate::ux::get();
 
     match status {

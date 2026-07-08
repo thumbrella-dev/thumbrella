@@ -17,8 +17,8 @@
 use std::{convert::Infallible, sync::Arc};
 
 use axum::{
-    body::Body,
     Json,
+    body::Body,
     extract::{ConnectInfo, Query, Request, State},
     http::{HeaderMap, Method, StatusCode, header},
     middleware::Next,
@@ -26,15 +26,15 @@ use axum::{
 };
 use bytes::Bytes;
 use futures::stream::{self, FuturesUnordered, StreamExt};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::net::SocketAddr;
 use tokio::{sync::mpsc, task::JoinSet};
 use web_time::Instant;
 
-use crate::cook::{InputSpec, Runtime, ThumbCook};
 use crate::cache::CacheStore;
-use crate::http_buf::PlatformStream;
+use crate::cook::{InputSpec, Runtime, ThumbCook};
 use crate::handoff::{HANDSHAKE_HEADER, HandoffResponse, ThumbHandoff};
+use crate::http_buf::PlatformStream;
 use crate::media::FileKind;
 use crate::request::CallRequest;
 use crate::result::ResultSource;
@@ -56,29 +56,29 @@ fn client_ip(headers: &HeaderMap, connect_info: Option<&SocketAddr>) -> Option<S
 /// Return a human-readable string for a FileKind.
 fn kind_str(kind: FileKind) -> &'static str {
     match kind {
-        FileKind::Image    => "image",
-        FileKind::Video    => "video",
-        FileKind::Audio    => "audio",
-        FileKind::Vector   => "vector",
+        FileKind::Image => "image",
+        FileKind::Video => "video",
+        FileKind::Audio => "audio",
+        FileKind::Vector => "vector",
         FileKind::Document => "document",
         FileKind::Geometry => "geometry",
-        FileKind::Archive  => "archive",
-        FileKind::Text     => "text",
-        FileKind::Binary   => "binary",
-        FileKind::Unknown  => "unknown",
+        FileKind::Archive => "archive",
+        FileKind::Text => "text",
+        FileKind::Binary => "binary",
+        FileKind::Unknown => "unknown",
     }
 }
 
 /// Return a human-readable label for a ResultSource.
 fn source_label(source: &ResultSource) -> &'static str {
     match source {
-        ResultSource::Render      => "render",
-        ResultSource::Cache       => "cache",
-        ResultSource::Shortcut    => "shortcut",
+        ResultSource::Render => "render",
+        ResultSource::Cache => "cache",
+        ResultSource::Shortcut => "shortcut",
         ResultSource::Placeholder => "placeholder",
-        ResultSource::Fallback    => "fallback",
+        ResultSource::Fallback => "fallback",
         ResultSource::NotModified => "not_modified",
-        ResultSource::Client      => "client_error",
+        ResultSource::Client => "client_error",
     }
 }
 
@@ -89,9 +89,9 @@ fn log_result(result: &crate::ThumbResult, duration_ms: u64) {
     // Use the remote HTTP status when available (reflects what the source
     // server returned), falling back to our result-status mapping.
     let status_code = result.http_status.unwrap_or_else(|| match result.status {
-        crate::result::ResultStatus::Success     => 200,
-        crate::result::ResultStatus::Failed      => 500,
-        crate::result::ResultStatus::Overloaded  => 503,
+        crate::result::ResultStatus::Success => 200,
+        crate::result::ResultStatus::Failed => 500,
+        crate::result::ResultStatus::Overloaded => 503,
         crate::result::ResultStatus::Intermediate => 102,
     });
     ux.log_thumb_result(
@@ -118,10 +118,7 @@ fn log_result(result: &crate::ThumbResult, duration_ms: u64) {
 ///
 /// Logging is rate-limited: after 20 health checks, further requests are
 /// suppressed and a one-time hint is printed.
-pub async fn health(
-    headers: HeaderMap,
-    connect_info: ConnectInfo<SocketAddr>,
-) -> Json<Value> {
+pub async fn health(headers: HeaderMap, connect_info: ConnectInfo<SocketAddr>) -> Json<Value> {
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     static HEALTH_COUNT: AtomicU32 = AtomicU32::new(0);
     static HINT_SHOWN: AtomicBool = AtomicBool::new(false);
@@ -201,21 +198,18 @@ pub async fn not_found(
 /// Log a request that returned early with an error (missing param, bad URL, etc.).
 fn log_early_exit(method: &str, path: &str, reason: &str, ip: &Option<String>) {
     let ip_str = ip.as_deref().unwrap_or("?");
-    let line = format!(
-        "{} {} from {} - 400 {}\n",
-        colour::cyan(method),
-        path,
-        ip_str,
-        reason,
-    );
+    let line = format!("{} {} from {} - 400 {}\n", colour::cyan(method), path, ip_str, reason,);
     let _ = std::io::Write::write_all(&mut std::io::stdout(), line.as_bytes());
 }
 
 /// Tiny colour helpers — duplicated here to avoid a circular dep on ux.
 mod colour {
     pub(super) fn cyan(s: &str) -> String {
-        if std::env::var("NO_COLOR").is_ok_and(|v| !v.is_empty()) { s.to_string() }
-        else { format!("\x1b[36m{s}\x1b[0m") }
+        if std::env::var("NO_COLOR").is_ok_and(|v| !v.is_empty()) {
+            s.to_string()
+        } else {
+            format!("\x1b[36m{s}\x1b[0m")
+        }
     }
 }
 
@@ -231,25 +225,23 @@ mod colour {
 ///
 /// These images are embedded at compile time and never change, so the
 /// response includes aggressive cache headers.
-pub async fn placeholder(
-    axum::extract::Path(kind): axum::extract::Path<String>,
-) -> Response {
+pub async fn placeholder(axum::extract::Path(kind): axum::extract::Path<String>) -> Response {
     let Some(kind_name) = kind.strip_suffix(".jpeg") else {
         return StatusCode::NOT_FOUND.into_response();
     };
 
     let bytes: &'static [u8] = match kind_name {
-        "image"    => crate::assets::placeholders::IMAGE,
-        "video"    => crate::assets::placeholders::VIDEO,
-        "audio"    => crate::assets::placeholders::AUDIO,
-        "vector"   => crate::assets::placeholders::VECTOR,
+        "image" => crate::assets::placeholders::IMAGE,
+        "video" => crate::assets::placeholders::VIDEO,
+        "audio" => crate::assets::placeholders::AUDIO,
+        "vector" => crate::assets::placeholders::VECTOR,
         "document" => crate::assets::placeholders::DOCUMENT,
         "geometry" => crate::assets::placeholders::GEOMETRY,
-        "archive"  => crate::assets::placeholders::ARCHIVE,
-        "text"     => crate::assets::placeholders::TEXT,
-        "binary"   => crate::assets::placeholders::BINARY,
-        "unknown"  => crate::assets::placeholders::UNKNOWN,
-        "failed"   => crate::assets::placeholders::FAILED,
+        "archive" => crate::assets::placeholders::ARCHIVE,
+        "text" => crate::assets::placeholders::TEXT,
+        "binary" => crate::assets::placeholders::BINARY,
+        "unknown" => crate::assets::placeholders::UNKNOWN,
+        "failed" => crate::assets::placeholders::FAILED,
         // Forward-compatible: any unrecognised kind silently falls back to
         // the generic "unknown" placeholder rather than 404-ing, so clients
         // that reference a kind added in a newer server release still get a
@@ -321,14 +313,18 @@ pub async fn thumb(
             .into_response();
     }
     let url = match normalize_url(url_raw, runtime.allow_local) {
-        Ok(u)    => u,
+        Ok(u) => u,
         Err(msg) => {
             log_early_exit(method.as_str(), "/thumb.jpeg", msg, &ip);
             return (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response();
         }
     };
 
-    let input = InputSpec { url: url.clone(), cache: None, allow_local: runtime.allow_local };
+    let input = InputSpec {
+        url: url.clone(),
+        cache: None,
+        allow_local: runtime.allow_local,
+    };
     let (result, _trace, mut after) = ThumbCook::<PlatformStream>::from_input(input, runtime).run().await;
     after.drain_spawn();
     let duration_ms = t0.elapsed().as_millis() as u64;
@@ -336,7 +332,9 @@ pub async fn thumb(
     let media = result.media.as_ref();
     let _ux = ux::get();
     _ux.log_single_thumb(
-        method.as_str(), "/thumb.jpeg", &url,
+        method.as_str(),
+        "/thumb.jpeg",
+        &url,
         200,
         duration_ms,
         media.and_then(|m| Some(kind_str(m.kind))),
@@ -348,7 +346,10 @@ pub async fn thumb(
 
     let thumb = result.media.as_ref().map(|m| &m.thumbnail);
     if thumb.map_or(true, |t| t.is_empty()) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": result.message.unwrap_or_default() })))
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": result.message.unwrap_or_default() })),
+        )
             .into_response();
     }
 
@@ -381,10 +382,17 @@ pub async fn batch(
     for (idx, input) in req.items.into_iter().enumerate() {
         let (url, cache) = input.into_parts();
         let url = match normalize_url(url, runtime.allow_local) {
-            Ok(u)    => u,
+            Ok(u) => u,
             Err(msg) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response(),
         };
-        jobs.push((idx, InputSpec { url, cache, allow_local: runtime.allow_local }));
+        jobs.push((
+            idx,
+            InputSpec {
+                url,
+                cache,
+                allow_local: runtime.allow_local,
+            },
+        ));
     }
     let count = jobs.len();
 
@@ -411,8 +419,10 @@ pub async fn batch(
                             "type": "item.intermediate", "index": idx, "result": result,
                         })));
                     });
-                    let (result, _trace, mut after) = ThumbCook::<PlatformStream>::from_input(spec, item_runtime)
-                        .run_with_progress(Some(progress)).await;
+                    let (result, _trace, mut after) =
+                        ThumbCook::<PlatformStream>::from_input(spec, item_runtime)
+                            .run_with_progress(Some(progress))
+                            .await;
                     after.drain_spawn();
                     let dur = t_item.elapsed().as_millis() as u64;
                     log_result(&result, dur);
@@ -430,9 +440,13 @@ pub async fn batch(
         });
         return (
             StatusCode::OK,
-            [(header::CONTENT_TYPE, "application/x-ndjson"), (header::CACHE_CONTROL, "no-store")],
+            [
+                (header::CONTENT_TYPE, "application/x-ndjson"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
             Body::from_stream(stream),
-        ).into_response();
+        )
+            .into_response();
     }
 
     // Non-streaming: wait for all, then log each result.
@@ -441,7 +455,8 @@ pub async fn batch(
         let job_runtime = Arc::clone(&runtime);
         pool.push(async move {
             let t_item = Instant::now();
-            let (result, trace, after) = ThumbCook::<PlatformStream>::from_input(spec, job_runtime).run().await;
+            let (result, trace, after) =
+                ThumbCook::<PlatformStream>::from_input(spec, job_runtime).run().await;
             let dur = t_item.elapsed().as_millis() as u64;
             (idx, result, trace, after, dur)
         });
@@ -501,12 +516,10 @@ fn normalize_url(url: String, allow_local: bool) -> Result<String, &'static str>
 }
 
 fn is_private_host(host: Option<&str>) -> bool {
-    let Some(h) = host else { return false };
-    if h.eq_ignore_ascii_case("localhost")
-        || h == "127.0.0.1"
-        || h == "::1"
-        || h == "[::1]"
-    {
+    let Some(h) = host else {
+        return false;
+    };
+    if h.eq_ignore_ascii_case("localhost") || h == "127.0.0.1" || h == "::1" || h == "[::1]" {
         return true;
     }
     if let Ok(ip) = h.parse::<std::net::Ipv4Addr>() {
@@ -520,16 +533,13 @@ fn is_private_host(host: Option<&str>) -> bool {
 }
 
 fn wants_ndjson(headers: &HeaderMap) -> bool {
-    headers
-        .get(header::ACCEPT)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|accept| {
-            accept.split(',').any(|part| {
-                let mime = part.split(';').next().unwrap_or("").trim();
-                mime.eq_ignore_ascii_case("application/x-ndjson")
-                    || mime.eq_ignore_ascii_case("application/ndjson")
-            })
+    headers.get(header::ACCEPT).and_then(|v| v.to_str().ok()).is_some_and(|accept| {
+        accept.split(',').any(|part| {
+            let mime = part.split(';').next().unwrap_or("").trim();
+            mime.eq_ignore_ascii_case("application/x-ndjson")
+                || mime.eq_ignore_ascii_case("application/ndjson")
         })
+    })
 }
 
 fn as_ndjson_line(value: Value) -> Bytes {
@@ -565,14 +575,17 @@ pub async fn handoff(
     handoff_runtime.trace = TraceStore::none();
     let handoff_runtime = Arc::new(handoff_runtime);
 
-    let (mut result, trace, mut after) = ThumbCook::<PlatformStream>::from_handoff(payload, handoff_runtime).run().await;
+    let (mut result, trace, mut after) =
+        ThumbCook::<PlatformStream>::from_handoff(payload, handoff_runtime).run().await;
     after.drain_spawn();
     let duration_ms = t0.elapsed().as_millis() as u64;
 
     let media = result.media.as_ref();
     let _ux = ux::get();
     _ux.log_single_thumb(
-        "POST", "/handoff", &url,
+        "POST",
+        "/handoff",
+        &url,
         if result.status == crate::result::ResultStatus::Success { 200 } else { 500 },
         duration_ms,
         media.and_then(|m| Some(kind_str(m.kind))),
@@ -621,16 +634,10 @@ pub async fn require_handshake(
         return next.run(request).await;
     };
 
-    let provided = headers
-        .get(HANDSHAKE_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
+    let provided = headers.get(HANDSHAKE_HEADER).and_then(|v| v.to_str().ok()).unwrap_or("");
 
     if provided != expected {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": "invalid handshake"})),
-        ).into_response();
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "invalid handshake"}))).into_response();
     }
 
     next.run(request).await

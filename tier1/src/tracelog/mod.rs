@@ -66,7 +66,9 @@ impl TraceStore {
     /// (native) or `ctx.wait_until` (Workers).  Nothing happens when the store
     /// is empty.
     pub fn record(&self, trace: ThumbTrace, after: &mut AfterResponse) {
-        if self.backends.is_empty() { return; }
+        if self.backends.is_empty() {
+            return;
+        }
         let trace = Arc::new(trace);
         for backend in &self.backends {
             after.push(backend.record_task(Arc::clone(&trace)));
@@ -85,8 +87,7 @@ impl TraceStore {
 #[cfg(feature = "native")]
 pub fn open_from_dsn(dsn: &str) -> Result<Vec<Arc<dyn TraceBackend>>, String> {
     if let Some(path) = dsn.strip_prefix("ndjson:") {
-        let backend = ndjson::NdjsonTraceBackend::open(path)
-            .map_err(|e| format!("ndjson trace: {e}"))?;
+        let backend = ndjson::NdjsonTraceBackend::open(path).map_err(|e| format!("ndjson trace: {e}"))?;
         return Ok(vec![Arc::new(backend)]);
     }
     Err(format!("unsupported trace DSN scheme: {dsn}"))
@@ -100,7 +101,10 @@ pub fn open_from_dsn(dsn: &str) -> Result<Vec<Arc<dyn TraceBackend>>, String> {
 #[cfg(feature = "native")]
 pub fn validate_dsn(dsn: &str) -> (crate::check::Validation, Option<crate::check::FileCheck>) {
     if let Some(path) = dsn.strip_prefix("ndjson:") {
-        return (crate::check::Validation::skipped(), Some(ndjson::NdjsonTraceBackend::check(path)));
+        return (
+            crate::check::Validation::skipped(),
+            Some(ndjson::NdjsonTraceBackend::check(path)),
+        );
     }
     let scheme = dsn.split(':').next().unwrap_or(dsn);
     (

@@ -67,13 +67,13 @@ use crate::fetch_guard::{OriginBackoffCache, UrlFailureCache};
 use crate::handoff::{HandoffInflight, HandoffResponse};
 use crate::http_buf::{HttpBuffer, HttpStream};
 use crate::media::FileKind;
-use crate::result::{ResultStatus, RenderHandler, ResultSource, ThumbMedia, ThumbResult, ThumbTrace};
-use crate::source::CacheHints;
-use crate::spec::ShortcutLimits;
-use crate::tracelog::TraceStore;
 use crate::pipeline;
 #[cfg(feature = "native")]
 use crate::renderer::{RenderCook, SharedRenderer};
+use crate::result::{RenderHandler, ResultSource, ResultStatus, ThumbMedia, ThumbResult, ThumbTrace};
+use crate::source::CacheHints;
+use crate::spec::ShortcutLimits;
+use crate::tracelog::TraceStore;
 
 // ── CookStatus ────────────────────────────────────────────────────────────────
 
@@ -243,7 +243,10 @@ pub struct InputSpec {
 
 impl InputSpec {
     pub fn new(url: impl Into<String>) -> Self {
-        Self { url: url.into(), ..Self::default() }
+        Self {
+            url: url.into(),
+            ..Self::default()
+        }
     }
 }
 
@@ -289,7 +292,6 @@ pub struct SourceIdentity {
 /// Cloudflare Workers (workers-rs fetch).  Use the `ThumbCook` type alias
 /// defined in `lib.rs` for native-only code.
 pub struct ThumbCook<S: HttpStream> {
-
     // ── Pipeline gate ─────────────────────────────────────────────────────────
     /// Current pipeline state.  Steps check `status.is_processing()` before
     /// doing work.  Set to a terminal variant to stop the pipeline.
@@ -388,7 +390,6 @@ pub struct ThumbCook<S: HttpStream> {
 }
 
 impl<S: HttpStream> ThumbCook<S> {
-
     // ── Construction ──────────────────────────────────────────────────────────
 
     /// Create a new cook for a URL with a shared runtime.
@@ -399,45 +400,45 @@ impl<S: HttpStream> ThumbCook<S> {
     /// Create a new cook from a fully-specified [`InputSpec`].
     pub fn from_input(input: InputSpec, runtime: Arc<Runtime>) -> Self {
         Self {
-            status:  CookStatus::Processing,
+            status: CookStatus::Processing,
             runtime,
             input,
-            media:   MediaInfo::default(),
-            src:     SourceIdentity::default(),
-            http_headers:        HashMap::new(),
-            http_status:         0,
+            media: MediaInfo::default(),
+            src: SourceIdentity::default(),
+            http_headers: HashMap::new(),
+            http_status: 0,
             http_accepts_ranges: false,
-            http_buf:            None,
-            render_image:             None,
-            render_resolution:        None,
-            render_handler:           RenderHandler::default(),
-            render_renderer:          None,
-            render_codec:             None,
-            render_video_seek_secs:   None,
+            http_buf: None,
+            render_image: None,
+            render_resolution: None,
+            render_handler: RenderHandler::default(),
+            render_renderer: None,
+            render_codec: None,
+            render_video_seek_secs: None,
             render_is_progressive_partial: false,
-            out_thumbnail:       Vec::new(),
-            out_message:         String::new(),
-            out_placeholder:     None,
-            placeholder_source:  None,
-            cache_hit:           None,
-            out_duration:        0.0,
-            out_download_bytes:  0,
+            out_thumbnail: Vec::new(),
+            out_message: String::new(),
+            out_placeholder: None,
+            placeholder_source: None,
+            cache_hit: None,
+            out_duration: 0.0,
+            out_download_bytes: 0,
             render_bytes_consumed: None,
-            tel_connect_secs:    0.0,
-            tel_inspect_secs:    0.0,
-            tel_shortcut_secs:   0.0,
-            tel_decode_secs:     0.0,
-            tel_deliver_secs:    0.0,
-            tel_io_secs:         0.0,
+            tel_connect_secs: 0.0,
+            tel_inspect_secs: 0.0,
+            tel_shortcut_secs: 0.0,
+            tel_decode_secs: 0.0,
+            tel_deliver_secs: 0.0,
+            tel_io_secs: 0.0,
             tel_download_tail_bytes: 0,
             tel_thumbnail_bytes: None,
             tel_job_tier_override: None,
             tel_version_override: None,
-            ctx_caller:      None,
-            ctx_session_id:  None,
+            ctx_caller: None,
+            ctx_session_id: None,
             ctx_customer_id: None,
-            ctx_cancelled:   false,
-            ctx_handoff:     false,
+            ctx_cancelled: false,
+            ctx_handoff: false,
             cancel: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -486,41 +487,66 @@ impl<S: HttpStream> ThumbCook<S> {
     }
 
     /// Read `len` bytes starting at `offset` without moving the cursor.
-    pub async fn http_read_at(&mut self, offset: u64, len: usize) -> Result<Vec<u8>, crate::http_buf::HttpError> {
-        let buf = self.http_buf.as_mut().ok_or_else(|| crate::http_buf::HttpError::Network("no open connection".into()))?;
+    pub async fn http_read_at(
+        &mut self,
+        offset: u64,
+        len: usize,
+    ) -> Result<Vec<u8>, crate::http_buf::HttpError> {
+        let buf = self
+            .http_buf
+            .as_mut()
+            .ok_or_else(|| crate::http_buf::HttpError::Network("no open connection".into()))?;
         buf.read_at(offset, len).await
     }
 
     /// Read up to `out.len()` bytes from the current cursor position.
     pub async fn http_read(&mut self, out: &mut [u8]) -> Result<usize, crate::http_buf::HttpError> {
-        let buf = self.http_buf.as_mut().ok_or_else(|| crate::http_buf::HttpError::Network("no open connection".into()))?;
+        let buf = self
+            .http_buf
+            .as_mut()
+            .ok_or_else(|| crate::http_buf::HttpError::Network("no open connection".into()))?;
         buf.read(out).await
     }
 
     /// Issue a direct Range GET for `len` bytes starting at `start`.
-    pub async fn http_fetch_range(&mut self, start: u64, len: usize) -> Result<Vec<u8>, crate::http_buf::HttpError> {
-        let buf = self.http_buf.as_mut().ok_or_else(|| crate::http_buf::HttpError::Network("no open connection".into()))?;
+    pub async fn http_fetch_range(
+        &mut self,
+        start: u64,
+        len: usize,
+    ) -> Result<Vec<u8>, crate::http_buf::HttpError> {
+        let buf = self
+            .http_buf
+            .as_mut()
+            .ok_or_else(|| crate::http_buf::HttpError::Network("no open connection".into()))?;
         buf.fetch_range(start, len).await
     }
 
     /// Rewind the read cursor to byte 0.
     pub fn http_rewind(&mut self) {
-        if let Some(b) = self.http_buf.as_mut() { b.rewind(); }
+        if let Some(b) = self.http_buf.as_mut() {
+            b.rewind();
+        }
     }
 
     /// Set an artificial EOF limit.
     pub fn http_set_eof(&mut self, len: u64) {
-        if let Some(b) = self.http_buf.as_mut() { b.set_eof(len); }
+        if let Some(b) = self.http_buf.as_mut() {
+            b.set_eof(len);
+        }
     }
 
     /// Remove the artificial EOF limit.
     pub fn http_clear_eof(&mut self) {
-        if let Some(b) = self.http_buf.as_mut() { b.clear_eof(); }
+        if let Some(b) = self.http_buf.as_mut() {
+            b.clear_eof();
+        }
     }
 
     /// Enter streaming mode (one-way; new chunks bypass the page cache).
     pub fn http_enter_streaming_mode(&mut self) {
-        if let Some(b) = self.http_buf.as_mut() { b.enter_streaming_mode(); }
+        if let Some(b) = self.http_buf.as_mut() {
+            b.enter_streaming_mode();
+        }
     }
 
     /// Effective file length (artificial EOF if set, else Content-Length).
@@ -592,18 +618,18 @@ impl<S: HttpStream> ThumbCook<S> {
         let status = match self.status {
             CookStatus::Processing | CookStatus::Complete => ResultStatus::Success,
             CookStatus::Fresh => ResultStatus::Success,
-            CookStatus::Failed      => ResultStatus::Failed,
-            CookStatus::Overloaded  => ResultStatus::Overloaded,
-            CookStatus::Intermediate   => ResultStatus::Intermediate,
+            CookStatus::Failed => ResultStatus::Failed,
+            CookStatus::Overloaded => ResultStatus::Overloaded,
+            CookStatus::Intermediate => ResultStatus::Intermediate,
         };
         ThumbResult {
-            url:           self.input.url.clone(),
+            url: self.input.url.clone(),
             status,
-            duration:      self.out_duration,
+            duration: self.out_duration,
             download_size: self.out_download_bytes,
-            message:       if self.out_message.is_empty() { None } else { Some(self.out_message.clone()) },
-            http_status:   if self.http_status > 0 { Some(self.http_status) } else { None },
-            source:        if self.status == CookStatus::Fresh {
+            message: if self.out_message.is_empty() { None } else { Some(self.out_message.clone()) },
+            http_status: if self.http_status > 0 { Some(self.http_status) } else { None },
+            source: if self.status == CookStatus::Fresh {
                 Some(ResultSource::NotModified)
             } else if let Some(ps) = self.placeholder_source {
                 Some(ps)
@@ -614,17 +640,27 @@ impl<S: HttpStream> ThumbCook<S> {
             } else {
                 Some(ResultSource::Render)
             },
-            media:         Some(ThumbMedia {
-                url:        self.input.url.clone(),
-                thumbnail:  self.out_thumbnail.clone(),
-                mime:       self.media.mime.clone().unwrap_or_default(),
-                file_size:  self.media.file_size.unwrap_or(0),
-                kind:       self.media.kind.unwrap_or(FileKind::Unknown),
-                extension:  crate::pipeline::canonical_extension(
-                    &self.media.extension.clone().unwrap_or_default()),
-                properties: self.media.properties.clone().unwrap_or_else(|| Value::Object(Default::default())),
+            media: Some(ThumbMedia {
+                url: self.input.url.clone(),
+                thumbnail: self.out_thumbnail.clone(),
+                mime: self.media.mime.clone().unwrap_or_default(),
+                file_size: self.media.file_size.unwrap_or(0),
+                kind: self.media.kind.unwrap_or(FileKind::Unknown),
+                extension: crate::pipeline::canonical_extension(
+                    &self.media.extension.clone().unwrap_or_default(),
+                ),
+                properties: self
+                    .media
+                    .properties
+                    .clone()
+                    .unwrap_or_else(|| Value::Object(Default::default())),
                 placeholder: self.out_placeholder.clone().unwrap_or_default(),
-                cache:      self.src.cache_hints.as_ref().map(|h| h.encode(self.runtime.cache_default_ttl_secs)).unwrap_or_default(),
+                cache: self
+                    .src
+                    .cache_hints
+                    .as_ref()
+                    .map(|h| h.encode(self.runtime.cache_default_ttl_secs))
+                    .unwrap_or_default(),
             }),
         }
     }
@@ -636,24 +672,34 @@ impl<S: HttpStream> ThumbCook<S> {
     pub fn to_progress_result(&self, duration: f64) -> ThumbResult {
         let kind = self.media.kind.unwrap_or(FileKind::Unknown);
         ThumbResult {
-            url:           self.input.url.clone(),
-            status:        ResultStatus::Intermediate,
+            url: self.input.url.clone(),
+            status: ResultStatus::Intermediate,
             duration,
             download_size: self.out_download_bytes.max(self.http_bytes_fetched()),
-            message:       None,
-            http_status:   if self.http_status > 0 { Some(self.http_status) } else { None },
-            source:        None,
-            media:         Some(ThumbMedia {
-                url:        self.input.url.clone(),
-                thumbnail:  crate::assets::placeholder_for_kind(kind).to_vec(),
-                mime:       self.media.mime.clone().unwrap_or_default(),
-                file_size:  self.media.file_size.unwrap_or(0),
+            message: None,
+            http_status: if self.http_status > 0 { Some(self.http_status) } else { None },
+            source: None,
+            media: Some(ThumbMedia {
+                url: self.input.url.clone(),
+                thumbnail: crate::assets::placeholder_for_kind(kind).to_vec(),
+                mime: self.media.mime.clone().unwrap_or_default(),
+                file_size: self.media.file_size.unwrap_or(0),
                 kind,
-                extension:  crate::pipeline::canonical_extension(
-                    &self.media.extension.clone().unwrap_or_default()),
-                properties: self.media.properties.clone().unwrap_or_else(|| Value::Object(Default::default())),
+                extension: crate::pipeline::canonical_extension(
+                    &self.media.extension.clone().unwrap_or_default(),
+                ),
+                properties: self
+                    .media
+                    .properties
+                    .clone()
+                    .unwrap_or_else(|| Value::Object(Default::default())),
                 placeholder: self.out_placeholder.clone().unwrap_or_default(),
-                cache:      self.src.cache_hints.as_ref().map(|h| h.encode(self.runtime.cache_default_ttl_secs)).unwrap_or_default(),
+                cache: self
+                    .src
+                    .cache_hints
+                    .as_ref()
+                    .map(|h| h.encode(self.runtime.cache_default_ttl_secs))
+                    .unwrap_or_default(),
             }),
         }
     }
@@ -673,9 +719,9 @@ impl<S: HttpStream> ThumbCook<S> {
         let status = match self.status {
             CookStatus::Processing | CookStatus::Complete => ResultStatus::Success,
             CookStatus::Fresh => ResultStatus::Success,
-            CookStatus::Failed      => ResultStatus::Failed,
-            CookStatus::Overloaded  => ResultStatus::Overloaded,
-            CookStatus::Intermediate   => ResultStatus::Intermediate,
+            CookStatus::Failed => ResultStatus::Failed,
+            CookStatus::Overloaded => ResultStatus::Overloaded,
+            CookStatus::Intermediate => ResultStatus::Intermediate,
         };
 
         #[cfg(feature = "native")]
@@ -689,31 +735,34 @@ impl<S: HttpStream> ThumbCook<S> {
         ThumbTrace {
             timestamp,
             status,
-            kind:                self.media.kind,
-            extension:           self.media.extension.as_deref()
-                .map(|e| crate::pipeline::canonical_extension(e)),
-            canonical_url:       self.src.canonical_url.clone(),
-            cache_key:           self.src.cache_key.clone(),
-            cache_key_source:    self.src.cache_key_source.clone(),
-            source_etag:         self.src.cache_hints.as_ref().and_then(|h| h.etag.clone()),
-            download_bytes:      self.out_download_bytes,
+            kind: self.media.kind,
+            extension: self.media.extension.as_deref().map(|e| crate::pipeline::canonical_extension(e)),
+            canonical_url: self.src.canonical_url.clone(),
+            cache_key: self.src.cache_key.clone(),
+            cache_key_source: self.src.cache_key_source.clone(),
+            source_etag: self.src.cache_hints.as_ref().and_then(|h| h.etag.clone()),
+            download_bytes: self.out_download_bytes,
             download_tail_bytes: self.tel_download_tail_bytes,
-            io_secs:             self.tel_connect_secs + self.tel_io_secs,
-            inspect_secs:        self.tel_inspect_secs + if shortcut_succeeded { 0.0 } else { self.tel_shortcut_secs },
-            render_secs:         if shortcut_succeeded { self.tel_shortcut_secs } else { self.tel_decode_secs },
-            deliver_secs:        self.tel_deliver_secs,
-            thumbnail_bytes:     self.tel_thumbnail_bytes,
-            job_tier:            self.tel_job_tier_override.unwrap_or(default_tier),
-            job_renderer:        self.render_renderer.clone(),
-            session_id:          self.ctx_session_id.clone(),
-            customer_id:         self.ctx_customer_id.clone(),
-            message:             if self.out_message.is_empty() { None } else { Some(self.out_message.clone()) },
-            cache_hit:           self.cache_hit.clone(),
-            server:              self.runtime.server.clone(),
-            render_handler:      self.render_handler,
-            caller:              self.ctx_caller.clone(),
-            cancelled:           self.ctx_cancelled,
-            version:             self.tel_version_override.clone().unwrap_or_else(|| self.runtime.version.clone()),
+            io_secs: self.tel_connect_secs + self.tel_io_secs,
+            inspect_secs: self.tel_inspect_secs
+                + if shortcut_succeeded { 0.0 } else { self.tel_shortcut_secs },
+            render_secs: if shortcut_succeeded { self.tel_shortcut_secs } else { self.tel_decode_secs },
+            deliver_secs: self.tel_deliver_secs,
+            thumbnail_bytes: self.tel_thumbnail_bytes,
+            job_tier: self.tel_job_tier_override.unwrap_or(default_tier),
+            job_renderer: self.render_renderer.clone(),
+            session_id: self.ctx_session_id.clone(),
+            customer_id: self.ctx_customer_id.clone(),
+            message: if self.out_message.is_empty() { None } else { Some(self.out_message.clone()) },
+            cache_hit: self.cache_hit.clone(),
+            server: self.runtime.server.clone(),
+            render_handler: self.render_handler,
+            caller: self.ctx_caller.clone(),
+            cancelled: self.ctx_cancelled,
+            version: self
+                .tel_version_override
+                .clone()
+                .unwrap_or_else(|| self.runtime.version.clone()),
         }
     }
 
@@ -731,9 +780,9 @@ impl<S: HttpStream> ThumbCook<S> {
     {
         let first_page = self.http_close().await;
         crate::handoff::ThumbHandoff {
-            input:      self.input.clone(),
-            media:      self.media.clone(),
-            src:        self.src.clone(),
+            input: self.input.clone(),
+            media: self.media.clone(),
+            src: self.src.clone(),
             first_page,
         }
     }
@@ -748,41 +797,39 @@ impl<S: HttpStream> ThumbCook<S> {
     /// `local_bytes` is the number of bytes this cook fetched from the source
     /// during connect/inspect before the handoff was issued.  It is added to
     /// `remote.result.download_size` to form the complete download count.
-    fn apply_handoff_response(
-        &mut self,
-        remote: &HandoffResponse,
-        target_tier: u8,
-        local_bytes: u64,
-    ) {
-        let res   = &remote.result;
+    fn apply_handoff_response(&mut self, remote: &HandoffResponse, target_tier: u8, local_bytes: u64) {
+        let res = &remote.result;
         let trace = &remote.trace;
 
-        self.status             = cook_status_from_job(res.status);
-        self.out_message        = res.message.clone().unwrap_or_default();
-        self.out_placeholder = res.media.as_ref().and_then(|m| if m.placeholder.is_empty() { None } else { Some(m.placeholder.clone()) });
+        self.status = cook_status_from_job(res.status);
+        self.out_message = res.message.clone().unwrap_or_default();
+        self.out_placeholder = res
+            .media
+            .as_ref()
+            .and_then(|m| if m.placeholder.is_empty() { None } else { Some(m.placeholder.clone()) });
         self.out_download_bytes = local_bytes.saturating_add(res.download_size);
 
         if let Some(ref media) = res.media {
-            self.out_thumbnail      = media.thumbnail.clone();
-            self.media.mime         = Some(media.mime.clone());
-            self.media.file_size    = Some(media.file_size);
-            self.media.kind         = Some(media.kind);
-            self.media.extension    = Some(crate::pipeline::canonical_extension(&media.extension));
-            self.media.properties   = Some(media.properties.clone());
+            self.out_thumbnail = media.thumbnail.clone();
+            self.media.mime = Some(media.mime.clone());
+            self.media.file_size = Some(media.file_size);
+            self.media.kind = Some(media.kind);
+            self.media.extension = Some(crate::pipeline::canonical_extension(&media.extension));
+            self.media.properties = Some(media.properties.clone());
         }
 
-        self.tel_job_tier_override   = Some(trace.job_tier);
-        self.tel_version_override    = Some(trace.version.clone());
+        self.tel_job_tier_override = Some(trace.job_tier);
+        self.tel_version_override = Some(trace.version.clone());
         if self.render_renderer.is_none() {
             self.render_renderer = trace.job_renderer.clone();
         }
-        self.tel_thumbnail_bytes     = trace.thumbnail_bytes;
+        self.tel_thumbnail_bytes = trace.thumbnail_bytes;
         self.tel_download_tail_bytes = trace.download_tail_bytes;
-        self.tel_decode_secs         = trace.render_secs;
-        self.tel_deliver_secs        = trace.deliver_secs;
-        self.tel_io_secs            += trace.io_secs;
+        self.tel_decode_secs = trace.render_secs;
+        self.tel_deliver_secs = trace.deliver_secs;
+        self.tel_io_secs += trace.io_secs;
 
-        self.render_handler  = RenderHandler::Handoff;
+        self.render_handler = RenderHandler::Handoff;
         self.render_renderer = Some(format!("handoff/tier{target_tier}"));
     }
 
@@ -804,8 +851,7 @@ impl<S: HttpStream> ThumbCook<S> {
     /// Run the full pipeline and optionally emit intermediate progress snapshots.
     pub async fn run_with_progress(
         mut self,
-        #[allow(unused_mut, unused_variables)]
-        mut on_progress: Option<Box<dyn FnMut(ThumbResult) + Send>>,
+        #[allow(unused_mut, unused_variables)] mut on_progress: Option<Box<dyn FnMut(ThumbResult) + Send>>,
     ) -> (ThumbResult, ThumbTrace, AfterResponse)
     where
         S: Send + 'static,
@@ -834,12 +880,11 @@ impl<S: HttpStream> ThumbCook<S> {
         let mut pre_cached: Option<ThumbResult> = None;
         let mut pre_cache_backend: Option<String> = None;
         if !self.ctx_handoff && self.input.cache.is_none() {
-            use sha2::{Sha256, Digest};
-            use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
             use crate::source::canonical_url;
+            use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+            use sha2::{Digest, Sha256};
 
-            let identity = canonical_url(&self.input.url)
-                .unwrap_or_else(|| self.input.url.clone());
+            let identity = canonical_url(&self.input.url).unwrap_or_else(|| self.input.url.clone());
             let key_input = format!(
                 "v{}:{}:{identity}",
                 crate::TBR_CACHE_VERSION,
@@ -852,26 +897,31 @@ impl<S: HttpStream> ThumbCook<S> {
             if let Some((cached, backend_name)) = self.runtime.cache.check(&pre_key).await {
                 // If the cached hints say the resource is still fresh,
                 // return the cached result without any HTTP request.
-                let decoded = cached.media.as_ref()
-                    .filter(|m| !m.cache.is_empty()).map(|m| m.cache.as_str())
+                let decoded = cached
+                    .media
+                    .as_ref()
+                    .filter(|m| !m.cache.is_empty())
+                    .map(|m| m.cache.as_str())
                     .and_then(CacheHints::decode);
                 if decoded.as_ref().map_or(false, |h| h.is_fresh()) {
                     self.http_close().await;
                     if let Some(ref media) = cached.media {
-                        self.out_thumbnail      = media.thumbnail.clone();
-                        self.media.mime         = Some(media.mime.clone());
-                        self.media.file_size    = Some(media.file_size);
-                        self.media.kind         = Some(media.kind);
-                        self.media.extension    = Some(crate::pipeline::canonical_extension(&media.extension));
-                        self.media.properties   = Some(media.properties.clone());
+                        self.out_thumbnail = media.thumbnail.clone();
+                        self.media.mime = Some(media.mime.clone());
+                        self.media.file_size = Some(media.file_size);
+                        self.media.kind = Some(media.kind);
+                        self.media.extension = Some(crate::pipeline::canonical_extension(&media.extension));
+                        self.media.properties = Some(media.properties.clone());
                     }
-                    self.out_message        = cached.message.unwrap_or_default();
-                    self.out_placeholder = cached.media.as_ref().and_then(|m| if m.placeholder.is_empty() { None } else { Some(m.placeholder.clone()) });
+                    self.out_message = cached.message.unwrap_or_default();
+                    self.out_placeholder = cached.media.as_ref().and_then(|m| {
+                        if m.placeholder.is_empty() { None } else { Some(m.placeholder.clone()) }
+                    });
                     self.out_download_bytes = cached.download_size;
-                    self.src.cache_hints    = decoded;
-                    self.cache_hit          = Some(backend_name.to_string());
-                    self.status             = CookStatus::Complete;
-                    self.out_duration       = t0.elapsed().as_secs_f64();
+                    self.src.cache_hints = decoded;
+                    self.cache_hit = Some(backend_name.to_string());
+                    self.status = CookStatus::Complete;
+                    self.out_duration = t0.elapsed().as_secs_f64();
                     return self.finish(after);
                 }
 
@@ -895,20 +945,25 @@ impl<S: HttpStream> ThumbCook<S> {
                 // When we did a KV-assisted conditional fetch, return the KV data.
                 if let Some(cached) = pre_cached {
                     if let Some(ref media) = cached.media {
-                        self.out_thumbnail      = media.thumbnail.clone();
-                        self.media.mime         = Some(media.mime.clone());
-                        self.media.file_size    = Some(media.file_size);
-                        self.media.kind         = Some(media.kind);
-                        self.media.extension    = Some(crate::pipeline::canonical_extension(&media.extension));
-                        self.media.properties   = Some(media.properties.clone());
+                        self.out_thumbnail = media.thumbnail.clone();
+                        self.media.mime = Some(media.mime.clone());
+                        self.media.file_size = Some(media.file_size);
+                        self.media.kind = Some(media.kind);
+                        self.media.extension = Some(crate::pipeline::canonical_extension(&media.extension));
+                        self.media.properties = Some(media.properties.clone());
                     }
-                    self.out_message        = cached.message.unwrap_or_default();
-                    self.out_placeholder = cached.media.as_ref().and_then(|m| if m.placeholder.is_empty() { None } else { Some(m.placeholder.clone()) });
+                    self.out_message = cached.message.unwrap_or_default();
+                    self.out_placeholder = cached.media.as_ref().and_then(|m| {
+                        if m.placeholder.is_empty() { None } else { Some(m.placeholder.clone()) }
+                    });
                     self.out_download_bytes = cached.download_size;
-                    self.src.cache_hints    = cached.media.as_ref()
-                        .filter(|m| !m.cache.is_empty()).map(|m| m.cache.as_str())
+                    self.src.cache_hints = cached
+                        .media
+                        .as_ref()
+                        .filter(|m| !m.cache.is_empty())
+                        .map(|m| m.cache.as_str())
                         .and_then(CacheHints::decode);
-                    self.cache_hit          = pre_cache_backend.clone();
+                    self.cache_hit = pre_cache_backend.clone();
                 }
                 // pre_cached is None when caller provided hints → empty not_modified.
             }
@@ -919,14 +974,17 @@ impl<S: HttpStream> ThumbCook<S> {
 
         // ── cache key derivation ──────────────────────────────────────────────
         {
-            use sha2::{Sha256, Digest};
-            use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
             use crate::source::content_hash_from_headers;
+            use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+            use sha2::{Digest, Sha256};
 
             let (identity, source) = content_hash_from_headers(&self.http_headers)
                 .map(|(hash, src)| (hash, src.to_string()))
                 .unwrap_or_else(|| {
-                    let url = self.src.final_url.as_deref()
+                    let url = self
+                        .src
+                        .final_url
+                        .as_deref()
                         .or(self.src.canonical_url.as_deref())
                         .unwrap_or(self.input.url.as_str());
                     (url.to_string(), "url".to_string())
@@ -941,35 +999,40 @@ impl<S: HttpStream> ThumbCook<S> {
             // Prefix with customer_id so the KV inventory key can extract it
             // for per-account scoping (see parse_cache_key in the API crate).
             let account_id = self.ctx_customer_id.as_deref().unwrap_or("_");
-            self.src.cache_key        = Some(format!("{account_id}/{url_hash}"));
+            self.src.cache_key = Some(format!("{account_id}/{url_hash}"));
             self.src.cache_key_source = Some(source);
         }
 
         // ── cache check ───────────────────────────────────────────────────────
         if !self.ctx_handoff {
             if let Some(ref key) = self.src.cache_key.clone() {
-            if let Some((cached, backend_name)) = self.runtime.cache.check(key).await {
-                self.http_close().await;
-                if let Some(ref media) = cached.media {
-                    self.out_thumbnail     = media.thumbnail.clone();
-                    self.media.mime        = Some(media.mime.clone());
-                    self.media.file_size   = Some(media.file_size);
-                    self.media.kind        = Some(media.kind);
-                    self.media.extension   = Some(media.extension.clone());
-                    self.media.properties  = Some(media.properties.clone());
+                if let Some((cached, backend_name)) = self.runtime.cache.check(key).await {
+                    self.http_close().await;
+                    if let Some(ref media) = cached.media {
+                        self.out_thumbnail = media.thumbnail.clone();
+                        self.media.mime = Some(media.mime.clone());
+                        self.media.file_size = Some(media.file_size);
+                        self.media.kind = Some(media.kind);
+                        self.media.extension = Some(media.extension.clone());
+                        self.media.properties = Some(media.properties.clone());
+                    }
+                    self.out_message = cached.message.unwrap_or_default();
+                    self.out_placeholder = cached.media.as_ref().and_then(|m| {
+                        if m.placeholder.is_empty() { None } else { Some(m.placeholder.clone()) }
+                    });
+                    self.out_download_bytes = cached.download_size;
+                    self.src.cache_hints = cached
+                        .media
+                        .as_ref()
+                        .filter(|m| !m.cache.is_empty())
+                        .map(|m| m.cache.as_str())
+                        .and_then(CacheHints::decode);
+                    self.cache_hit = Some(backend_name.to_string());
+                    self.status = CookStatus::Complete;
+                    self.out_duration = t0.elapsed().as_secs_f64();
+                    return self.finish(after);
                 }
-                self.out_message       = cached.message.unwrap_or_default();
-                self.out_placeholder = cached.media.as_ref().and_then(|m| if m.placeholder.is_empty() { None } else { Some(m.placeholder.clone()) });
-                self.out_download_bytes = cached.download_size;
-                self.src.cache_hints   = cached.media.as_ref()
-                    .filter(|m| !m.cache.is_empty()).map(|m| m.cache.as_str())
-                    .and_then(CacheHints::decode);
-                self.cache_hit         = Some(backend_name.to_string());
-                self.status            = CookStatus::Complete;
-                self.out_duration      = t0.elapsed().as_secs_f64();
-                return self.finish(after);
             }
-        }
         }
 
         if !self.ctx_handoff {
@@ -1045,11 +1108,8 @@ impl<S: HttpStream> ThumbCook<S> {
                 // and deliver produces the thumbnail.  On failure the renderer
                 // called fail_cook() and render_image is None; status != Complete.
                 self.tel_decode_secs = t_render.elapsed().as_secs_f64();
-                self.render_handler = if self.ctx_handoff {
-                    RenderHandler::Handoff
-                } else {
-                    RenderHandler::Builtin
-                };
+                self.render_handler =
+                    if self.ctx_handoff { RenderHandler::Handoff } else { RenderHandler::Builtin };
 
                 // Use the actual bytes consumed by the renderer when available
                 // (reported via RenderCook::set_bytes_consumed); fall back to
@@ -1095,9 +1155,7 @@ impl<S: HttpStream> ThumbCook<S> {
             let ext = self.media.extension.clone().unwrap_or_default();
             let kind = self.media.kind;
 
-            let routed_tier = kind
-                .map(|k| crate::dispatch::route(k, Some(&ext)).tier)
-                .unwrap_or(2);
+            let routed_tier = kind.map(|k| crate::dispatch::route(k, Some(&ext)).tier).unwrap_or(2);
 
             // Escalate tier-1 images to tier 2 when tier 2 is available.
             let start_tier = if routed_tier == 1
@@ -1143,7 +1201,10 @@ impl<S: HttpStream> ThumbCook<S> {
                 let outcome: Result<HandoffResponse, String> = if first_attempt {
                     first_attempt = false;
                     // ── Single-flight dedup (first attempt only) ─────────────
-                    let hkey = self.src.cache_key.clone()
+                    let hkey = self
+                        .src
+                        .cache_key
+                        .clone()
                         .or_else(|| self.src.canonical_url.clone())
                         .unwrap_or_else(|| self.input.url.clone());
                     match self.runtime.handoff_inflight.try_lead(&hkey) {
@@ -1159,12 +1220,9 @@ impl<S: HttpStream> ThumbCook<S> {
                         }
                         None => {
                             // Leader: perform the handoff, wake joiners.
-                            let result = crate::handoff::post_handoff(
-                                url, &target.headers, &payload,
-                            ).await;
+                            let result = crate::handoff::post_handoff(url, &target.headers, &payload).await;
                             let shared = Arc::new(result);
-                            self.runtime.handoff_inflight
-                                .complete(&hkey, Arc::clone(&shared));
+                            self.runtime.handoff_inflight.complete(&hkey, Arc::clone(&shared));
                             match &*shared {
                                 Ok(remote) => Ok(remote.clone()),
                                 Err(e) => Err(e.clone()),
@@ -1173,8 +1231,7 @@ impl<S: HttpStream> ThumbCook<S> {
                     }
                 } else {
                     // ── Fallback attempt (no dedup) ──────────────────────────
-                    crate::handoff::post_handoff(url, &target.headers, &payload)
-                        .await
+                    crate::handoff::post_handoff(url, &target.headers, &payload).await
                 };
 
                 match outcome {
@@ -1188,9 +1245,9 @@ impl<S: HttpStream> ThumbCook<S> {
                         self.out_message.clear();
                     }
                     Ok(ref remote) => {
-                        self.out_message = remote.result.message
-                            .clone()
-                            .unwrap_or_else(|| format!("tier {attempt_tier} returned status {:?}", remote.result.status));
+                        self.out_message = remote.result.message.clone().unwrap_or_else(|| {
+                            format!("tier {attempt_tier} returned status {:?}", remote.result.status)
+                        });
                     }
                     Err(e) => {
                         self.out_message = format!("handoff to tier {attempt_tier} failed: {e}");
@@ -1225,7 +1282,8 @@ impl<S: HttpStream> ThumbCook<S> {
         let default_expiry = now + self.runtime.cache_default_ttl_secs;
         let max_expiry = now + self.runtime.cache_max_ttl_secs;
 
-        self.src.cache_hints
+        self.src
+            .cache_hints
             .as_ref()
             .and_then(|h| h.expires_at)
             .unwrap_or(default_expiry)
@@ -1252,7 +1310,7 @@ impl<S: HttpStream> ThumbCook<S> {
                     self.placeholder_source = Some(ResultSource::Fallback);
                 }
                 let slug = kind_slug(kind);
-                self.out_thumbnail   = crate::assets::placeholder_for_kind(kind).to_vec();
+                self.out_thumbnail = crate::assets::placeholder_for_kind(kind).to_vec();
                 self.out_placeholder = Some(slug.to_string());
 
                 // Inject a cache expiry so clients know when to retry.
@@ -1267,22 +1325,21 @@ impl<S: HttpStream> ThumbCook<S> {
             } else {
                 // Kind never determined (network error, bad URL, early abort) —
                 // use the FAILED icon only for genuine infrastructure errors.
-                let (bytes, label): (&[u8], &str) =
-                    if self.status == CookStatus::Failed
-                        || self.out_placeholder.as_deref() == Some("error")
-                        || self.out_placeholder.as_deref() == Some("failed")
-                    {
-                        (crate::assets::placeholders::FAILED, "failed")
-                    } else {
-                        (crate::assets::placeholders::UNKNOWN, "unknown")
-                    };
-                self.out_thumbnail   = bytes.to_vec();
+                let (bytes, label): (&[u8], &str) = if self.status == CookStatus::Failed
+                    || self.out_placeholder.as_deref() == Some("error")
+                    || self.out_placeholder.as_deref() == Some("failed")
+                {
+                    (crate::assets::placeholders::FAILED, "failed")
+                } else {
+                    (crate::assets::placeholders::UNKNOWN, "unknown")
+                };
+                self.out_thumbnail = bytes.to_vec();
                 self.out_placeholder = Some(label.to_string());
             }
         }
 
         let result = self.to_result();
-        let trace  = self.to_trace();
+        let trace = self.to_trace();
         self.runtime.trace.record(trace.clone(), &mut after);
         (result, trace, after)
     }
@@ -1292,16 +1349,16 @@ impl<S: HttpStream> ThumbCook<S> {
 fn kind_slug(kind: crate::media::FileKind) -> &'static str {
     use crate::media::FileKind::*;
     match kind {
-        Image    => "image",
-        Video    => "video",
-        Audio    => "audio",
-        Vector   => "vector",
+        Image => "image",
+        Video => "video",
+        Audio => "audio",
+        Vector => "vector",
         Document => "document",
         Geometry => "geometry",
-        Archive  => "archive",
-        Text     => "text",
-        Binary   => "binary",
-        Unknown  => "unknown",
+        Archive => "archive",
+        Text => "text",
+        Binary => "binary",
+        Unknown => "unknown",
     }
 }
 

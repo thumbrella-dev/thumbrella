@@ -88,11 +88,7 @@ impl ScratchArena {
     /// collisions.
     ///
     /// Returns an error if the download would exceed `max_bytes`.
-    pub async fn stage_url(
-        &self,
-        url: &str,
-        client: &reqwest::Client,
-    ) -> Result<PathBuf, ArenaError> {
+    pub async fn stage_url(&self, url: &str, client: &reqwest::Client) -> Result<PathBuf, ArenaError> {
         let response = client.get(url).send().await.map_err(ArenaError::Fetch)?;
 
         let content_length = response.content_length();
@@ -112,14 +108,19 @@ impl ScratchArena {
         }
 
         // Build a collision-free file name.
-        let stem = url.rsplit('/')
+        let stem = url
+            .rsplit('/')
             .next()
             .unwrap_or("download")
             .split('?')
             .next()
             .unwrap_or("download");
         let suffix: String = std::iter::repeat_with(fast_random_char).take(8).collect();
-        let file_name = if stem.is_empty() { format!("dl_{suffix}") } else { format!("{stem}_{suffix}") };
+        let file_name = if stem.is_empty() {
+            format!("dl_{suffix}")
+        } else {
+            format!("{stem}_{suffix}")
+        };
         let dest = self.dir.path().join(&file_name);
 
         // Stream to disk.
@@ -262,11 +263,7 @@ pub enum ArenaError {
     /// HTTP fetch error.
     Fetch(reqwest::Error),
     /// Disk usage limit would be exceeded.
-    LimitExceeded {
-        current: u64,
-        needed: u64,
-        max: u64,
-    },
+    LimitExceeded { current: u64, needed: u64, max: u64 },
 }
 
 impl std::fmt::Display for ArenaError {
@@ -292,7 +289,9 @@ impl std::error::Error for ArenaError {
 }
 
 impl From<io::Error> for ArenaError {
-    fn from(e: io::Error) -> Self { Self::Io(e) }
+    fn from(e: io::Error) -> Self {
+        Self::Io(e)
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -309,11 +308,7 @@ fn fast_random_char() -> char {
     STATE.store(x, Ordering::Relaxed);
     // Map to [a-z0-9].
     let idx = (x % 36) as u8;
-    if idx < 10 {
-        (b'0' + idx) as char
-    } else {
-        (b'a' + (idx - 10)) as char
-    }
+    if idx < 10 { (b'0' + idx) as char } else { (b'a' + (idx - 10)) as char }
 }
 
 #[cfg(test)]
@@ -356,7 +351,11 @@ mod tests {
         let result = arena.stage_bytes(b"too big", "test");
         assert!(result.is_err());
         match result.unwrap_err() {
-            ArenaError::LimitExceeded { current: 0, needed: 7, max: 5 } => {},
+            ArenaError::LimitExceeded {
+                current: 0,
+                needed: 7,
+                max: 5,
+            } => {}
             other => panic!("unexpected error: {other}"),
         }
     }

@@ -71,7 +71,10 @@ impl SqliteCacheBackend {
         let conn = Connection::open(path)?;
         apply_pragmas(&conn)?;
         migrate(&conn)?;
-        Ok(Self { conn: Arc::new(Mutex::new(conn)), max_bytes })
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+            max_bytes,
+        })
     }
 
     /// Diagnostic check for a configured SQLite cache path.
@@ -87,11 +90,13 @@ impl SqliteCacheBackend {
 }
 
 impl CacheBackend for SqliteCacheBackend {
-    fn name(&self) -> &'static str { "sqlite" }
+    fn name(&self) -> &'static str {
+        "sqlite"
+    }
 
     fn get<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = Option<String>> + Send + 'a>> {
         let conn = Arc::clone(&self.conn);
-        let key  = key.to_string();
+        let key = key.to_string();
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
                 let conn = conn.lock().unwrap();
@@ -104,7 +109,8 @@ impl CacheBackend for SqliteCacheBackend {
                   RETURNING value",
                     [&key],
                     |row| row.get::<_, String>(0),
-                ).ok()
+                )
+                .ok()
             })
             .await
             .ok()
@@ -202,15 +208,13 @@ fn check_schema(path: &str) -> crate::check::Validation {
         path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     ) {
-        Ok(c)  => c,
+        Ok(c) => c,
         Err(e) => return crate::check::Validation::error(format!("cannot open: {e}")),
     };
 
     // Quick integrity check — catches truncated / non-SQLite files.
-    let integrity: String = match conn.query_row(
-        "PRAGMA integrity_check(1);", [], |r| r.get(0),
-    ) {
-        Ok(s)  => s,
+    let integrity: String = match conn.query_row("PRAGMA integrity_check(1);", [], |r| r.get(0)) {
+        Ok(s) => s,
         Err(e) => return crate::check::Validation::error(format!("integrity_check failed: {e}")),
     };
     if integrity != "ok" {
@@ -219,25 +223,28 @@ fn check_schema(path: &str) -> crate::check::Validation {
 
     // Confirm the thumbrella table exists with all expected columns.
     let mut stmt = match conn.prepare("PRAGMA table_info(thumbrella);") {
-        Ok(s)  => s,
+        Ok(s) => s,
         Err(e) => return crate::check::Validation::error(format!("PRAGMA table_info failed: {e}")),
     };
     let cols: Vec<String> = match stmt.query_map([], |r| r.get::<_, String>(1)) {
         Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
-        Err(e)   => return crate::check::Validation::error(format!("reading columns failed: {e}")),
+        Err(e) => return crate::check::Validation::error(format!("reading columns failed: {e}")),
     };
 
     if cols.is_empty() {
-        return crate::check::Validation::error(
-            "table 'thumbrella' not found — may be a different database"
-        );
+        return crate::check::Validation::error("table 'thumbrella' not found — may be a different database");
     }
 
-    let required = ["cache_key", "value", "size_bytes", "last_accessed_at", "access_count", "render_cost", "expires_at"];
-    let missing: Vec<&str> = required.iter()
-        .copied()
-        .filter(|c| !cols.iter().any(|col| col == c))
-        .collect();
+    let required = [
+        "cache_key",
+        "value",
+        "size_bytes",
+        "last_accessed_at",
+        "access_count",
+        "render_cost",
+        "expires_at",
+    ];
+    let missing: Vec<&str> = required.iter().copied().filter(|c| !cols.iter().any(|col| col == c)).collect();
 
     if !missing.is_empty() {
         return crate::check::Validation::error(format!(
@@ -256,7 +263,8 @@ fn apply_pragmas(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch("
+    conn.execute_batch(
+        "
         CREATE TABLE IF NOT EXISTS thumbrella (
             cache_key        TEXT    NOT NULL PRIMARY KEY,
             value            TEXT    NOT NULL,
@@ -288,10 +296,12 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             description  TEXT NOT NULL,
             sql_template TEXT NOT NULL
         );
-    ")?;
+    ",
+    )?;
 
     // Upsert maintenance recipes so they stay current across schema bumps.
-    conn.execute_batch("
+    conn.execute_batch(
+        "
         INSERT OR REPLACE INTO readme VALUES (
             'drop_entries_by_days',
             'Delete entries whose last_accessed_at is older than ?1 days.',
@@ -318,7 +328,8 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             'Reclaim disk space after large deletions.',
             'VACUUM;'
         );
-    ")?;
+    ",
+    )?;
 
     Ok(())
 }
