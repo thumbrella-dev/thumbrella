@@ -63,7 +63,7 @@ pub async fn inspect<S: HttpStream>(cook: &mut ThumbCook<S>) {
     let _route = dispatch::route(kind, cook.media.extension.as_deref());
 }
 
-// ── Sniffing ──────────────────────────────────────────────────────────────────
+//  Sniffing 
 
 /// Identify the (kind, mime, extension) triple for a byte prefix.
 ///
@@ -135,7 +135,7 @@ fn sniff(bytes: &[u8], url: &str, content_type: Option<&str>) -> (FileKind, Stri
     (FileKind::Unknown, "application/octet-stream".to_string(), "bin".to_string())
 }
 
-// ── Image property inspection ─────────────────────────────────────────────────
+//  Image property inspection
 
 /// Extract pixel dimensions from an image byte prefix without a full decode.
 ///
@@ -299,7 +299,7 @@ pub(super) fn find_sof_in_bytes(bytes: &[u8]) -> Option<(u32, u32, u32)> {
     None
 }
 
-// ── Extension helpers ─────────────────────────────────────────────────────────
+//  Extension helpers
 
 /// Return `true` if `bytes` contain an `<svg` opening tag (case-insensitive),
 /// indicating the content is an SVG document regardless of the MIME label.
@@ -390,7 +390,7 @@ fn url_extension(url: &str) -> Option<String> {
     Some(canonical_extension(&raw.to_ascii_lowercase()))
 }
 
-// ── Kind / MIME tables ────────────────────────────────────────────────────────
+//  Kind / MIME tables 
 
 /// Map an `infer` `MatcherType` directly to a `FileKind`.
 ///

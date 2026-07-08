@@ -18,7 +18,7 @@ use crate::after::DeferredFuture;
 use crate::result::ThumbTrace;
 use crate::tracelog::TraceBackend;
 
-// ── Backend ───────────────────────────────────────────────────────────────────
+//  Backend
 
 /// Append-only NDJSON file backend.  Thread-safe via an internal mutex.
 pub struct NdjsonTraceBackend {

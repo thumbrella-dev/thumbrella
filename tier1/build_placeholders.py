@@ -25,11 +25,11 @@ import sys
 import cairosvg
 from PIL import Image, ImageFilter
 
-# ── Canvas ──────────────────────────────────────────────────────────────────
+#  Canvas 
 W, H = 250, 200
 DEFAULT_QUALITY = 62
 
-# ── Per-kind spec ────────────────────────────────────────────────────────────
+#  Per-kind spec 
 # color    – background hex; all media kinds desaturated ~50% via HSL
 #            (keeps colour family legible without competing with the icon).
 #            "failed" retains its richer hue — it signals a process error,
@@ -206,7 +206,7 @@ SPECS = [
     ),
 ]
 
-# ── SVG template ─────────────────────────────────────────────────────────────
+#  SVG template
 # Icon group: 24×24 → 108×108 (scale=4.5), centered horizontally at x=125.
 # Icon vertical center at y=84 → translate(71, 30).
 # Stroke-width compensated for scale: 1.0 × 4.5 = 4.5 px rendered
@@ -274,13 +274,13 @@ def inject_exif_comment(jpeg: bytes, description: str) -> bytes:
     """
     sw = b"thumbrella.dev\x00"
 
-    # ── TIFF header (big-endian) ───────────────────────────────────────────
+    #  TIFF header (big-endian)
     tiff = bytearray()
     tiff += b"MM"
     tiff += struct.pack(">H", 0x002A)  # magic
     tiff += struct.pack(">I", 8)       # offset to 0th IFD
 
-    # ── IFD0: 4 entries ───────────────────────────────────────────────────
+    #  IFD0: 4 entries
     tiff += struct.pack(">H", 4)
 
     # Offsets for value data living past the IFD table
@@ -302,19 +302,19 @@ def inject_exif_comment(jpeg: bytes, description: str) -> bytes:
     # Next IFD
     tiff += struct.pack(">I", 0)
 
-    # ── Value data ─────────────────────────────────────────────────────────
+    #  Value data
     tiff += sw
     tiff += struct.pack(">II", 72, 1)  # XResolution 72/1
     tiff += struct.pack(">II", 72, 1)  # YResolution 72/1
 
-    # ── APP1 wrapper ───────────────────────────────────────────────────────
+    #  APP1 wrapper
     payload = 6 + len(tiff)
     app1 = b"\xff\xe1"
     app1 += struct.pack(">H", payload)
     app1 += b"Exif\x00\x00"
     app1 += bytes(tiff)
 
-    # ── Splice ─────────────────────────────────────────────────────────────
+    #  Splice
     if len(jpeg) < 2 or jpeg[:2] != b"\xff\xd8":
         return jpeg
     return jpeg[:2] + app1 + jpeg[2:]

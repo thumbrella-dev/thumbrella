@@ -28,7 +28,7 @@ pub mod memory;
 #[cfg(feature = "native")]
 pub mod cloud;
 
-// ── Backend trait ─────────────────────────────────────────────────────────────
+//  Backend trait
 
 /// A single cache storage backend.
 #[cfg(feature = "native")]
@@ -61,7 +61,7 @@ pub trait CacheBackend {
     fn put(&self, key: String, value: String, cost: u8, expires_at: u64) -> DeferredFuture;
 }
 
-// ── Cache frontend (sticky + inflight) ───────────────────────────────────────
+//  Cache frontend (sticky + inflight)
 
 /// Short-term sticky cache + request-coalescing frontend.
 ///
@@ -141,7 +141,7 @@ mod frontend {
     }
 }
 
-// ── CacheStore ────────────────────────────────────────────────────────────────
+//  CacheStore 
 
 /// Holds a single durable cache backend with an optional sticky+coalescing
 /// frontend.
@@ -184,14 +184,14 @@ impl CacheStore {
 
     /// Check the cache for `key` — frontend first, then durable backend.
     pub async fn check(&self, key: &str) -> Option<(ThumbResult, &'static str)> {
-        // ── 1. Sticky cache (native only) ─────────────────────────────────
+        //  1. Sticky cache (native only)
         #[cfg(feature = "native")]
         if let Some(ref fe) = self.frontend
             && let Some(result) = fe.sticky_check(key) {
                 return Some((result, "sticky"));
             }
 
-        // ── 2. Inflight coalescing (native only) ──────────────────────────
+        //  2. Inflight coalescing (native only) 
         #[cfg(feature = "native")]
         let mut is_leader = false;
         #[cfg(feature = "native")]
@@ -217,7 +217,7 @@ impl CacheStore {
             }
         }
 
-        // ── 3. Check durable backend ──────────────────────────────────────
+        //  3. Check durable backend 
         if let Some(ref backend) = self.backend
             && let Some(json) = backend.get(key).await
                 && let Ok(result) = serde_json::from_str(&json) {
@@ -250,14 +250,14 @@ impl CacheStore {
         expires_at: u64,
         after: &mut AfterResponse,
     ) {
-        // ── Sticky cache + inflight fan-out (always, for request dedup) ───
+        //  Sticky cache + inflight fan-out (always, for request dedup)
         #[cfg(feature = "native")]
         if let Some(ref fe) = self.frontend {
             fe.sticky_store(key, result);
             fe.complete(key, Arc::new(result.clone()));
         }
 
-        // ── Durable backend ───────────────────────────────────────────────
+        //  Durable backend
         // Skip durable storage when the cache string is empty (uncacheable).
         let uncacheable = result.media.as_ref().is_none_or(|m| m.cache.is_empty());
         if uncacheable {
@@ -277,7 +277,7 @@ impl CacheStore {
     }
 }
 
-// ── Cost helper ───────────────────────────────────────────────────────────────
+//  Cost helper
 
 /// Normalize total render-step duration to a cache cost (0–100).
 pub fn render_cost_from_secs(render_secs: f64) -> u8 {
@@ -285,7 +285,7 @@ pub fn render_cost_from_secs(render_secs: f64) -> u8 {
     (render_ms.min(1000) / 10) as u8
 }
 
-// ── DSN parser ────────────────────────────────────────────────────────────────
+//  DSN parser 
 
 /// Build a single cache backend from a DSN string.
 ///

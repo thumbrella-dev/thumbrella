@@ -13,11 +13,11 @@ use image;
 /// Call once from `main`, after the logger is initialised but before the
 /// axum listener is bound.
 pub async fn startup(cfg: &AppConfig) -> Arc<Runtime> {
-    // ── 1. HTTP client warmup ─────────────────────────────────────────────────
+    //  1. HTTP client warmup
     tracing::debug!("startup: initialising HTTP client");
     crate::http_buf::init_http_client();
 
-    // ── 2. Cache backend ──────────────────────────────────────────────────────
+    //  2. Cache backend 
     // Sticky-cache TTL (seconds).  Every successful result is held in a
     // short-term in-memory cache for this duration regardless of upstream
     // Cache-Control.  Prevents duplicate fetches for near-simultaneous
@@ -41,7 +41,7 @@ pub async fn startup(cfg: &AppConfig) -> Arc<Runtime> {
         CacheStore::new(backend, STICKY_TTL_SECS)
     };
 
-    // ── 3. Trace backend ──────────────────────────────────────────────────────
+    //  3. Trace backend 
     let trace = if let Some(ref dsn) = cfg.trace_url {
         match tracelog::open_from_dsn(dsn) {
             Ok(backends) => {
@@ -59,13 +59,13 @@ pub async fn startup(cfg: &AppConfig) -> Arc<Runtime> {
         TraceStore::none()
     };
 
-    // ── 4. Tier-2/3 reachability ──────────────────────────────────────────────
+    //  4. Tier-2/3 reachability 
     // TODO: send a HEAD or /health request to cfg.tier2.url / cfg.tier3.url
     // and log a warning if the response is not 200.
 
     tracing::debug!("startup: complete");
 
-    // ── 5. Background image ───────────────────────────────────────────────────
+    //  5. Background image
     let background_image = image::load_from_memory(crate::assets::BACKGROUND_PNG)
         .ok()
         .map(|img| img.into_rgb8());

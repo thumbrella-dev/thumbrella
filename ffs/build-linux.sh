@@ -24,13 +24,13 @@ if [[ "${1:-}" == "--prefix" ]]; then
     PREFIX="${2:?missing --prefix argument}"
 fi
 
-# ── FFmpeg ──────────────────────────────────────────────────────────────────
+#  FFmpeg 
 FFMPEG_VERSION=8.1.2
 FFMPEG_TARBALL=ffmpeg-${FFMPEG_VERSION}.tar.gz
 FFMPEG_SRC_URL="https://ffmpeg.org/releases/${FFMPEG_TARBALL}"
 FFMPEG_BUILD_DIR="${PROJECT_ROOT}/target/ffmpeg-build"
 
-# ── Download ──────────────────────────────────────────────────────────────────
+#  Download 
 echo "[ffmpeg-static] Downloading FFmpeg ${FFMPEG_VERSION}..."
 mkdir -p "${FFMPEG_BUILD_DIR}"
 if [[ ! -f "${FFMPEG_BUILD_DIR}/${FFMPEG_TARBALL}" ]]; then
@@ -42,7 +42,7 @@ tar -xf "${FFMPEG_BUILD_DIR}/${FFMPEG_TARBALL}" -C "${FFMPEG_BUILD_DIR}" --strip
 
 cd "${FFMPEG_BUILD_DIR}"
 
-# ── Configure ─────────────────────────────────────────────────────────────────
+#  Configure
 echo "[ffmpeg-static] Configuring..."
 ./configure \
     --prefix="${PREFIX}" \
@@ -96,7 +96,7 @@ aac,flac,opus,vorbis,png,gif \
     --extra-cxxflags="-O3 -fPIC" \
     2>&1
 
-# ── Build ─────────────────────────────────────────────────────────────────────
+#  Build
 JOBS=$(nproc)
 echo "[ffmpeg-static] Building with ${JOBS} jobs..."
 make -j"${JOBS}" 2>&1
@@ -104,7 +104,7 @@ make -j"${JOBS}" 2>&1
 echo "[ffmpeg-static] Installing to ${PREFIX}..."
 make install 2>&1
 
-# ── Verify ────────────────────────────────────────────────────────────────────
+#  Verify 
 echo "[ffmpeg-static] Installed files:"
 ls -lh "${PREFIX}/lib/"*.a
 

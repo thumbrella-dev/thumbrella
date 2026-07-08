@@ -13,7 +13,7 @@ use crate::cook::{CookStatus, ThumbCook};
 use crate::http_buf::HttpStream;
 use crate::spec::ThumbnailConfig;
 
-// ── Pipeline entry point ──────────────────────────────────────────────────────
+//  Pipeline entry point 
 
 /// Encode `cook.render_image` into the final thumbnail JPEG.
 ///
@@ -84,7 +84,7 @@ pub async fn deliver<S: HttpStream>(cook: &mut ThumbCook<S>) {
     cook.status = CookStatus::Complete;
 }
 
-// ── Process buffer ────────────────────────────────────────────────────────────
+//  Process buffer 
 //
 // Normalise to RGB or RGBA once, then work in-place through resize, crop,
 // composite, and vignette.  No intermediate DynamicImage conversions.
@@ -353,7 +353,7 @@ fn premultiply_rgba(img: &mut image::RgbaImage) {
     }
 }
 
-// ── EXIF comment injection ────────────────────────────────────────────────────
+//  EXIF comment injection 
 
 /// Splice an EXIF APP1 segment containing metadata (`Software`,
 /// resolution, orientation) into the JPEG stream immediately after the
@@ -366,7 +366,7 @@ pub fn inject_exif_comment(jpeg: &[u8]) -> Vec<u8> {
     use exif::experimental::Writer;
     use exif::{Field, In, Rational, Tag, Value};
 
-    // ── Build EXIF TIFF blob ──────────────────────────────────────────────
+    //  Build EXIF TIFF blob 
     let fields = [
         Field {
             tag: Tag::Software,
@@ -399,7 +399,7 @@ pub fn inject_exif_comment(jpeg: &[u8]) -> Vec<u8> {
     }
     let tiff = tiff.into_inner();
 
-    // ── Prepend APP1 wrapper ──────────────────────────────────────────────
+    //  Prepend APP1 wrapper 
     // APP1 structure:  FF E1  len16  "Exif\0\0"  [TIFF]
     // len includes itself (2) + "Exif\0\0" (6) + TIFF bytes.
     let app1_len = 2u16 + 6 + tiff.len() as u16;
@@ -410,7 +410,7 @@ pub fn inject_exif_comment(jpeg: &[u8]) -> Vec<u8> {
     app1.extend_from_slice(b"Exif\x00\x00");
     app1.extend_from_slice(&tiff);
 
-    // ── Splice after SOI ──────────────────────────────────────────────────
+    //  Splice after SOI 
     if jpeg.len() < 2 || jpeg[0] != 0xFF || jpeg[1] != 0xD8 {
         return jpeg.to_vec();
     }

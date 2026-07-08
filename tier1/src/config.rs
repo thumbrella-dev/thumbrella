@@ -35,7 +35,7 @@
 //! - Backward-compat `#` fragment: `http://tier2:8000#secret`
 //!   (The fragment is treated as an `x-tbr-handshake` header value.)
 
-// ── AppConfig ─────────────────────────────────────────────────────────────────
+//  AppConfig
 
 use crate::connect::{ConnectTarget, parse_connect_target};
 
@@ -45,7 +45,7 @@ use crate::connect::{ConnectTarget, parse_connect_target};
 /// handlers, the diagnostic collector, and any background workers.
 #[derive(Debug, Clone)]
 pub struct AppConfig {
-    // ── Server identity ───────────────────────────────────────────────────────
+    //  Server identity
     /// HTTP listener port.
     pub port: u16,
     /// Short server identifier included in trace records.
@@ -64,7 +64,7 @@ pub struct AppConfig {
     /// staging.  Defaults to `$TMPDIR/thumbrella` (or `/tmp/thumbrella`).
     pub scratch_dir: String,
 
-    // ── Handoff tiers ─────────────────────────────────────────────────────────
+    //  Handoff tiers
     /// Tier-2 connect target parsed from `TBR_TIER2`.
     pub tier2: ConnectTarget,
     /// Tier-3 connect target parsed from `TBR_TIER3`.
@@ -73,7 +73,7 @@ pub struct AppConfig {
     /// If `None`, the server is publicly accessible.
     pub handshake: Option<String>,
 
-    // ── Cache ────────────────────────────────────────────────────────────────
+    //  Cache 
     /// Cache backend DSN (`TBR_CACHE`).  Scheme determines backend type:
     /// `mem:`, `sqlite:`, `none:`.
     pub cache_url: Option<String>,
@@ -84,12 +84,12 @@ pub struct AppConfig {
     /// Default: 1 hour (3600).
     pub cache_default_ttl_secs: u64,
 
-    // ── Trace sink ────────────────────────────────────────────────────────────
+    //  Trace sink 
     /// Trace sink DSN (`TBR_TRACE`).  Scheme determines backend type:
     /// `ndjson:<path>`, etc.  `None` disables trace logging.
     pub trace_url: Option<String>,
 
-    // ── Fetch protection (hardcoded defaults — not exposed as env vars) ────────
+    //  Fetch protection (hardcoded defaults — not exposed as env vars) 
     /// URL failure debounce window in seconds.
     pub failure_ttl: u32,
     /// Default origin back-off TTL when no `Retry-After` header is present.
@@ -144,7 +144,7 @@ impl AppConfig {
     }
 }
 
-// ── Env helpers ───────────────────────────────────────────────────────────────
+//  Env helpers
 
 fn env_u16(name: &str, default: u16) -> u16 {
     match std::env::var(name) {

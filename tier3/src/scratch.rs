@@ -33,7 +33,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-// ── ScratchArena ──────────────────────────────────────────────────────────────
+//  ScratchArena 
 
 /// A managed temporary directory for subprocess rendering I/O.
 ///
@@ -79,7 +79,7 @@ impl ScratchArena {
         self.max_bytes
     }
 
-    // ── Staging ───────────────────────────────────────────────────────────────
+    //  Staging
 
     /// Download `url` into a file in the arena and return its path.
     ///
@@ -204,7 +204,7 @@ impl ScratchArena {
         self.stage_bytes(&buf, hint_name)
     }
 
-    // ── Output paths ──────────────────────────────────────────────────────────
+    //  Output paths 
 
     /// Allocate a unique output file path in the arena.
     ///
@@ -252,7 +252,7 @@ fn raw_logs_enabled() -> bool {
     matches!(std::env::var("TBR_LOG").as_deref(), Ok("full"))
 }
 
-// ── ArenaError ────────────────────────────────────────────────────────────────
+//  ArenaError 
 
 /// Errors from scratch arena operations.
 #[derive(Debug)]
@@ -293,7 +293,7 @@ impl From<io::Error> for ArenaError {
     }
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+//  Helpers
 
 /// Fast non-cryptographic random ASCII char for collision-free file names.
 fn fast_random_char() -> char {

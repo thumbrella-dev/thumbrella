@@ -21,7 +21,7 @@ use crate::media::FileKind;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-// ── Render handler ────────────────────────────────────────────────────────────
+//  Render handler 
 
 /// Which renderer handled (or attempted to handle) this item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -35,7 +35,7 @@ pub enum RenderHandler {
     Punt,
 }
 
-// ── Job status ────────────────────────────────────────────────────────────────
+//  Job status 
 
 /// High-level outcome of processing a single item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -49,7 +49,7 @@ pub enum ResultStatus {
     Intermediate,
 }
 
-// ── Source ────────────────────────────────────────────────────────────────────
+//  Source 
 
 /// How the thumbnail was produced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,7 +72,7 @@ pub enum ResultSource {
     Client,
 }
 
-// ── Call record ───────────────────────────────────────────────────────────────
+//  Call record
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallRecord {
@@ -86,7 +86,7 @@ pub struct CallRecord {
     pub duration_secs: Option<f64>,
 }
 
-// ── ThumbMedia ────────────────────────────────────────────────────────────────
+//  ThumbMedia 
 
 /// The stable, cacheable unit of a thumbnail response.
 ///
@@ -134,7 +134,7 @@ impl Default for ThumbMedia {
     }
 }
 
-// ── ThumbResult ───────────────────────────────────────────────────────────────
+//  ThumbResult
 
 /// Per-request result: the public API response for one URL.
 ///
@@ -179,7 +179,7 @@ impl Default for ThumbResult {
     }
 }
 
-// ── ThumbTrace ────────────────────────────────────────────────────────────────
+//  ThumbTrace 
 
 /// Internal per-item telemetry — the server's private record of work done.
 ///
@@ -188,7 +188,7 @@ impl Default for ThumbResult {
 /// to clients.  Written to the configured log sink.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ThumbTrace {
-    // ── Request identity ──────────────────────────────────────────────────────
+    //  Request identity 
     /// RFC 3339 timestamp of when the trace was materialised.
     pub timestamp: String,
     /// Outcome of the job, mirroring [`ThumbResult::status`].
@@ -198,37 +198,37 @@ pub struct ThumbTrace {
     /// File extension detected (mirrors [`ThumbMedia::extension`]).
     pub extension: Option<String>,
 
-    // ── Source identity ───────────────────────────────────────────────────────
+    //  Source identity
     pub canonical_url: Option<String>,
     pub cache_key: Option<String>,
     pub cache_key_source: Option<String>,
     pub source_etag: Option<String>,
-    // ── Download metrics ──────────────────────────────────────────────────────
+    //  Download metrics 
     pub download_bytes: u64,
     pub download_tail_bytes: u64,
     /// All time awaiting fetch (connect + transfer).
     pub io_secs: f64,
 
-    // ── Step timing ───────────────────────────────────────────────────────────
+    //  Step timing
     /// Inspect phase, plus shortcut phase if it failed.
     pub inspect_secs: f64,
     /// Decode/render phase, or the shortcut phase when shortcut succeeded.
     pub render_secs: f64,
     pub deliver_secs: f64,
 
-    // ── Render details ────────────────────────────────────────────────────────
+    //  Render details 
     pub thumbnail_bytes: Option<u64>,
 
-    // ── Job provenance ────────────────────────────────────────────────────────
+    //  Job provenance 
     pub job_tier: u8,
     pub job_renderer: Option<String>,
 
-    // ── Failure detail ────────────────────────────────────────────────────────
+    //  Failure detail 
     /// Human-readable error description; `None` on success.  Mirrors
     /// [`ThumbResult::message`] so the trace contains the full failure reason.
     pub message: Option<String>,
 
-    // ── Attribution ───────────────────────────────────────────────────────────
+    //  Attribution
     pub session_id: Option<String>,
     pub customer_id: Option<String>,
     /// Name of the cache backend that produced the hit (e.g. `"sqlite"`, `"redis"`); `None` on miss.
@@ -240,7 +240,7 @@ pub struct ThumbTrace {
     pub version: String,
 }
 
-// ── Call response ─────────────────────────────────────────────────────────────
+//  Call response
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallResponse {
@@ -248,7 +248,7 @@ pub struct CallResponse {
     pub items: Vec<ThumbResult>,
 }
 
-// ── base64 serde helper ───────────────────────────────────────────────────────
+//  base64 serde helper
 
 mod base64_bytes {
     use base64::Engine;

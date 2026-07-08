@@ -20,7 +20,7 @@
 //! - `Call*` — outer HTTP envelope types (`CallRequest`, `CallResponse`, …)
 //! - `Thumb*` — per-item types (`ThumbInput`, `ThumbResult`, `ThumbTrace`, `ThumbCook`, `ThumbHandoff`, …)
 
-// ── Core modules (always compiled) ───────────────────────────────────────────
+//  Core modules (always compiled)
 pub mod after;
 pub mod assets;
 pub mod cache;
@@ -39,7 +39,7 @@ pub mod spec;
 pub mod tracelog;
 pub mod url_safety;
 
-// ── Native-only modules ───────────────────────────────────────────────────────
+//  Native-only modules
 
 #[cfg(feature = "native")]
 pub mod ux;
@@ -62,7 +62,7 @@ pub mod cli;
 #[cfg(feature = "native")]
 pub mod renderer;
 
-// ── Convenience re-exports ────────────────────────────────────────────────────
+//  Convenience re-exports 
 
 pub use cook::{
     CallerContext, CookStatus, InputSpec, MediaInfo, Runtime, SourceIdentity, ThumbCook as ThumbCookGeneric,
@@ -101,7 +101,7 @@ pub use http_buf::{ReadSeek, StreamBound};
 #[cfg(feature = "native")]
 pub use http_buf::SyncHttpReader;
 
-// ── Crate-level constants ─────────────────────────────────────────────────────
+//  Crate-level constants
 
 /// Semantic version of this crate.
 pub const TBR_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -114,7 +114,7 @@ pub const TBR_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// any schema migration or explicit flush.
 pub const TBR_CACHE_VERSION: u32 = 4;
 
-// ── Runtime builder helpers ───────────────────────────────────────────────────
+//  Runtime builder helpers
 
 /// Replace the [`ShortcutLimits`] on an existing [`Runtime`].
 ///

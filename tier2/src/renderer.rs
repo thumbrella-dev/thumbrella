@@ -38,7 +38,7 @@ macro_rules! tbr_debug {
     };
 }
 
-// ── Renderer ──────────────────────────────────────────────────────────────────
+//  Renderer 
 
 pub struct Tier2Renderer;
 
@@ -91,7 +91,7 @@ impl InProcessRenderer for Tier2Renderer {
     }
 }
 
-// ── Image decode ──────────────────────────────────────────────────────────────
+//  Image decode 
 
 fn is_image_crate_format(ext: &str) -> bool {
     matches!(ext, "png")
@@ -238,7 +238,7 @@ fn detect_arithmetic_jpeg(reader: &mut dyn ReadSeek) -> bool {
     false
 }
 
-// ── JPEG XL decode ────────────────────────────────────────────────────────────
+//  JPEG XL decode 
 
 /// Decode a JPEG XL image via the `jxl-oxide` crate.
 ///
@@ -290,7 +290,7 @@ fn decode_jxl(reader: &mut dyn ReadSeek) -> Option<RenderOutput> {
     })
 }
 
-// ── SVG render ────────────────────────────────────────────────────────────────
+//  SVG render 
 
 /// Render an SVG to a raster image via the `resvg` crate.
 ///
@@ -332,7 +332,7 @@ fn render_svg(reader: &mut dyn ReadSeek) -> Option<RenderOutput> {
     })
 }
 
-// ── Raw TIFF preview extraction ───────────────────────────────────────────────
+//  Raw TIFF preview extraction
 //
 // TIFF-based raw formats (DNG, CR2, NEF, …) embed a JPEG preview inside a
 // SubIFD (tag 0x014A).  The SubIFD offset array lives in IFD0 (in the first
@@ -935,7 +935,7 @@ pub async fn fetch_url(url: &str) -> Option<Vec<u8>> {
     reqwest::get(url).await.ok()?.bytes().await.ok().map(|b| b.to_vec())
 }
 
-// ── EXIF orientation ──────────────────────────────────────────────────────────
+//  EXIF orientation 
 
 /// Extract the EXIF Orientation tag (0x0112) from a JPEG or TIFF byte slice.
 /// Returns the raw tag value (1–8), or 1 (normal) if absent or unreadable.
@@ -1026,7 +1026,7 @@ fn read_u16_le_be(data: &[u8], off: usize, little: bool) -> Option<u16> {
     })
 }
 
-// ── Linear → sRGB gamma correction ───────────────────────────────────────────
+//  Linear → sRGB gamma correction
 
 /// Scene-linear formats (EXR, HDR, Radiance RGBe, …) store light values
 /// proportionally.  Without tone-mapping they render dark and crushed on an
@@ -1110,7 +1110,7 @@ fn apply_exif_orientation(img: DynamicImage, orientation: u8) -> DynamicImage {
     }
 }
 
-// ── ISOBMFF / HEIC container rotation ────────────────────────────────────────────────────
+//  ISOBMFF / HEIC container rotation 
 
 /// Read the ISOBMFF `irot` box from a seekable reader and return the
 /// equivalent clockwise rotation in degrees (0 / 90 / 180 / 270).

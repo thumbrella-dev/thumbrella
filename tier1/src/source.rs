@@ -12,7 +12,7 @@ use web_time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-// ── Source reference ──────────────────────────────────────────────────────────
+//  Source reference 
 
 /// A pointer to an input source.
 ///
@@ -39,7 +39,7 @@ impl SourceRef {
     }
 }
 
-// ── Canonical URL ─────────────────────────────────────────────────────────────
+//  Canonical URL
 
 /// Normalise a URL into a stable form suitable for use as a cache key.
 ///
@@ -69,7 +69,7 @@ pub fn canonical_url(raw: &str) -> Option<String> {
     Some(format!("{scheme}://{}{path}", host.to_ascii_lowercase()))
 }
 
-// ── Etag helpers ─────────────────────────────────────────────────────────────
+//  Etag helpers
 /// Extract a server-provided content hash from HTTP response headers.
 ///
 /// Many storage services advertise a stable content hash that is a better
@@ -175,7 +175,7 @@ pub fn conditional_headers(etag: &str) -> Option<(&'static str, &str)> {
     }
 }
 
-// ── CacheHints ────────────────────────────────────────────────────────────────
+//  CacheHints 
 
 /// Structured cache freshness hints derived from upstream HTTP response headers.
 ///
@@ -248,7 +248,7 @@ impl CacheHints {
         let mut hints = Self::default();
         let mut any = false;
 
-        // ── Cache-Control ─────────────────────────────────────────────────────
+        //  Cache-Control
         if let Some(cc) = headers.get("cache-control") {
             let mut max_age: Option<u64> = None;
             for directive in cc.split(',').map(str::trim) {
@@ -299,7 +299,7 @@ impl CacheHints {
             }
         }
 
-        // ── ETag / Last-Modified ──────────────────────────────────────────────
+        //  ETag / Last-Modified 
         // ETag is the authoritative validator (RFC 7232 §6 — servers must give
         // it precedence over If-Modified-Since).  Only fall back to Last-Modified
         // when no ETag is available; storing both would be redundant dead weight.
@@ -378,7 +378,7 @@ fn unix_now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-// ── Wire format: <hex_epoch>:<base64_blob> ────────────────────────────────────
+//  Wire format: <hex_epoch>:<base64_blob> 
 
 impl CacheHints {
     /// Encode to the opaque wire string for `ThumbResult.cache`.

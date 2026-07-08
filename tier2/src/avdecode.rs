@@ -47,7 +47,7 @@ unsafe extern "C" {
     static ff_ico_demuxer: u8;
 }
 
-// ── ReaderState — type-erased I/O state for AVIO callbacks ───────────────────
+//  ReaderState — type-erased I/O state for AVIO callbacks
 
 /// Holds the reader and its optional total length.
 ///
@@ -86,7 +86,7 @@ macro_rules! tbr_debug {
     };
 }
 
-// ── Orientation helpers ───────────────────────────────────────────────────────
+//  Orientation helpers
 
 /// Rotate a `DynamicImage` by a clockwise angle (0 / 90 / 180 / 270 degrees).
 /// Angles that are not a multiple of 90 are treated as 0 (no rotation).
@@ -141,7 +141,7 @@ unsafe fn tile_grid_dimensions(fmt_ctx: *mut AVFormatContext) -> Option<(i32, i3
     best
 }
 
-// ── Seek whence constants (POSIX) ─────────────────────────────────────────────
+//  Seek whence constants (POSIX)
 
 const SEEK_SET: c_int = 0;
 const SEEK_CUR: c_int = 1;
@@ -149,7 +149,7 @@ const SEEK_END: c_int = 2;
 /// libav-specific: return the total stream size (no actual seek).
 const AVSEEK_SIZE: c_int = 0x10000;
 
-// ── AVIOContext callbacks ─────────────────────────────────────────────────────
+//  AVIOContext callbacks
 
 /// Read `buf_size` bytes from the reader into `buf`.
 ///
@@ -216,7 +216,7 @@ unsafe extern "C" fn avio_seek_cb(opaque: *mut c_void, offset: i64, whence: c_in
     }
 }
 
-// ── Resource cleanup helpers ──────────────────────────────────────────────────
+//  Resource cleanup helpers 
 
 /// Free an `AVIOContext` that was created with `avio_alloc_context`.
 ///
@@ -235,7 +235,7 @@ unsafe fn free_avio_ctx(ctx: &mut *mut AVIOContext) {
     avio_context_free(ctx);
 }
 
-// ── Public entry point ────────────────────────────────────────────────────────
+//  Public entry point 
 
 /// Map a canonical file extension to the libav input format name to use as a
 /// probe hint when `avformat_open_input` cannot identify the format from the
@@ -419,7 +419,7 @@ pub fn decode_with_libav(
     (result, avio_bytes)
 }
 
-// ── Inner decode — returns early on any failure ───────────────────────────────
+//  Inner decode — returns early on any failure
 
 #[allow(clippy::too_many_arguments)]
 unsafe fn decode_inner(
@@ -440,7 +440,7 @@ unsafe fn decode_inner(
 ) -> Option<RenderOutput> {
     const AVIO_BUF: usize = 65536;
 
-    // ── AVIO buffer + context ─────────────────────────────────────────────────
+    //  AVIO buffer + context
     let avio_buf = av_malloc(AVIO_BUF) as *mut u8;
     if avio_buf.is_null() {
         tbr_debug!("[avdecode] FAIL: av_malloc returned null");
@@ -461,7 +461,7 @@ unsafe fn decode_inner(
         return None;
     }
 
-    // ── AVFormatContext ───────────────────────────────────────────────────────
+    //  AVFormatContext
     *fmt_ctx = avformat_alloc_context();
     if (*fmt_ctx).is_null() {
         tbr_debug!("[avdecode] FAIL: avformat_alloc_context returned null");
@@ -498,7 +498,7 @@ unsafe fn decode_inner(
         return None;
     }
 
-    // ── Find video / image stream ─────────────────────────────────────────────
+    //  Find video / image stream
     // Pick the best stream using a two-level heuristic:
     //
     // 1. **Standalone vs. grid tile** — HEIC/HEIF grid images expose each tile
@@ -580,7 +580,7 @@ unsafe fn decode_inner(
         if desc.is_null() { 0 } else { av_get_bits_per_pixel(desc) }
     };
 
-    // ── Decoder ───────────────────────────────────────────────────────────────
+    //  Decoder
     let dec = avcodec_find_decoder(codec_id);
     if dec.is_null() {
         tbr_debug!("[avdecode] FAIL: no decoder for codec_id {codec_id:?}");
@@ -625,7 +625,7 @@ unsafe fn decode_inner(
         }
     }
 
-    // ── Decode first frame ────────────────────────────────────────────────────
+    //  Decode first frame 
     *packet = av_packet_alloc();
     *frame = av_frame_alloc();
     if (*packet).is_null() || (*frame).is_null() {
@@ -702,7 +702,7 @@ unsafe fn decode_inner(
     };
     tbr_debug!("[avdecode] decoded frame {frame_w}x{frame_h}  rotation={rotation_degrees}°");
 
-    // ── Scale to cover the canonical thumbnail size (RGB24) ─────────────────
+    //  Scale to cover the canonical thumbnail size (RGB24)
     // Scale so that both dimensions are ≥ the canonical target while
     // preserving aspect ratio.  deliver's fill_crop() handles the final
     // center-crop; scaling to exactly 250×200 here would squish the image.
@@ -760,7 +760,7 @@ unsafe fn decode_inner(
         dst_linesize.as_ptr() as *const c_int,
     );
 
-    // ── Build RenderOutput ────────────────────────────────────────────────────
+    //  Build RenderOutput 
     let img: DynamicImage = if has_alpha {
         match RgbaImage::from_raw(out_w as u32, out_h as u32, buf) {
             Some(i) => DynamicImage::ImageRgba8(i),

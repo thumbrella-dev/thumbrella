@@ -18,7 +18,7 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 
 use crate::cook::Runtime;
 
-// ── CLI schema ────────────────────────────────────────────────────────────────
+//  CLI schema 
 
 #[derive(Parser)]
 #[command(about = "Thumbrella — thumbnail and describe service")]
@@ -96,7 +96,7 @@ enum Command {
     License,
 }
 
-// ── Entry point ───────────────────────────────────────────────────────────────
+//  Entry point
 
 /// Initialise logging, parse arguments, and run the selected command.
 ///
@@ -169,7 +169,7 @@ where
     }
 }
 
-// ── serve ─────────────────────────────────────────────────────────────────────
+//  serve
 
 async fn run_server(runtime: Arc<Runtime>) {
     use crate::{config::AppConfig, routes};
@@ -321,7 +321,7 @@ async fn shutdown_signal() {
     }
 }
 
-// ── thumb (CLI) ───────────────────────────────────────────────────────────────
+//  thumb (CLI)
 
 /// Promote a bare filesystem path to a `file://` URL.
 ///
@@ -403,7 +403,7 @@ async fn run_thumb(
     }
 }
 
-// ── thumb pretty printer ──────────────────────────────────────────────────────
+//  thumb pretty printer 
 
 pub fn print_thumb_items(results: &[crate::ThumbResult]) {
     for result in results {
@@ -477,7 +477,7 @@ pub fn print_thumb_items(results: &[crate::ThumbResult]) {
     }
 }
 
-// ── check ─────────────────────────────────────────────────────────────────────
+//  check
 
 async fn run_check(json: bool, tier: u8) {
     use crate::{check, config::AppConfig};
@@ -514,7 +514,7 @@ async fn run_check(json: bool, tier: u8) {
     }
 }
 
-// ── formats ───────────────────────────────────────────────────────────────────
+//  formats
 
 /// Run the `formats` CLI command: print every known format grouped by media kind.
 fn run_formats(json: bool) {
@@ -700,19 +700,19 @@ fn run_formats(json: bool) {
     }
 }
 
-// ── version ───────────────────────────────────────────────────────────────────
+//  version
 
 fn run_version(tier: u8) {
     println!("thumbrella {}  (tier {tier})", crate::TBR_VERSION);
 }
 
-// ── license ───────────────────────────────────────────────────────────────────
+//  license
 
 fn run_license() {
     print!("{}", include_str!("license.txt"));
 }
 
-// ── helpers ───────────────────────────────────────────────────────────────────
+//  helpers
 
 pub fn fmt_bytes(n: u64) -> String {
     if n >= 1_048_576 {

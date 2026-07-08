@@ -45,7 +45,7 @@ use crate::cook::Runtime;
 use crate::http_buf::ReadSeek;
 use crate::media::FileKind;
 
-// ── RenderCook — type-erased view of ThumbCook for renderer impls ─────────────
+//  RenderCook — type-erased view of ThumbCook for renderer impls
 
 /// Trait-object interface passed to [`InProcessRenderer::render`].
 ///
@@ -118,7 +118,7 @@ pub trait RenderCook: Send {
 
 // RenderCook is implemented for ThumbCook in cook.rs (needs private field access).
 
-// ── RenderOutput — convenience struct for internal decode pipelines ───────────
+//  RenderOutput — convenience struct for internal decode pipelines
 
 /// Intermediate result from a decode function (image crate, libav, etc.).
 ///
@@ -149,7 +149,7 @@ pub fn apply_render_output(cook: &mut dyn RenderCook, out: RenderOutput) {
     }
 }
 
-// ── InProcessRenderer ─────────────────────────────────────────────────────────
+//  InProcessRenderer
 
 /// In-process render extension installed at startup by a higher tier.
 ///
@@ -163,12 +163,12 @@ pub trait InProcessRenderer: Send + Sync + 'static {
     fn render<'a>(&'a self, cook: &'a mut dyn RenderCook) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
 }
 
-// ── Type alias ────────────────────────────────────────────────────────────────
+//  Type alias 
 
 /// Shared handle to an in-process renderer installed at startup.
 pub type SharedRenderer = Arc<dyn InProcessRenderer>;
 
-// ── Runtime builder ───────────────────────────────────────────────────────────
+//  Runtime builder
 
 /// Attach an in-process renderer to an existing [`Runtime`].
 pub fn with_renderer(runtime: Arc<Runtime>, renderer: SharedRenderer) -> Arc<Runtime> {

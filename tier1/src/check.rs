@@ -21,7 +21,7 @@
 
 use serde::{Deserialize, Serialize};
 
-// ── Runtime mode ──────────────────────────────────────────────────────────────
+//  Runtime mode 
 
 /// The execution environment this binary is running in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,7 +37,7 @@ pub enum RuntimeMode {
     Library,
 }
 
-// ── Tier status ───────────────────────────────────────────────────────────────
+//  Tier status
 
 /// Availability / configuration state of a processing tier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,7 +54,7 @@ pub enum TierStatus {
     Error,
 }
 
-// ── Validation outcome ────────────────────────────────────────────────────────
+//  Validation outcome 
 
 /// Result of validating a configurable external dependency.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,7 +114,7 @@ impl Validation {
     }
 }
 
-// ── File-backed backend check ────────────────────────────────────────────────
+//  File-backed backend check 
 
 /// Write-access and disk-space snapshot for a file-backed backend path.
 ///
@@ -140,7 +140,7 @@ pub struct FileCheck {
     pub sqlite_validation: Option<Validation>,
 }
 
-// ── CheckReport ────────────────────────────────────────────────────────────────
+//  CheckReport 
 
 /// A diagnostic section contributed by a higher tier.
 ///
@@ -186,7 +186,7 @@ pub fn collect_sections() -> Vec<CheckSection> {
 /// Never sent over HTTP; printed by the `tier1 check` CLI subcommand.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckReport {
-    // ── Identity ──────────────────────────────────────────────────────────────
+    //  Identity 
     /// How this build is running.
     pub runtime: RuntimeMode,
     /// Crate version from `Cargo.toml`.
@@ -198,7 +198,7 @@ pub struct CheckReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_timestamp: Option<String>,
 
-    // ── Server config ─────────────────────────────────────────────────────────
+    //  Server config
     /// HTTP port the server binds on.
     pub server_port: u16,
     /// Whether the configured port is available and bindable by this process.
@@ -224,10 +224,10 @@ pub struct CheckReport {
     /// token (starts with `tbr_[a-z]_`), which would indicate a misconfiguration.
     pub handshake_validation: Validation,
 
-    // ── Tier 1 ────────────────────────────────────────────────────────────────
+    //  Tier 1 
     /// Tier 1 is always builtin — this field is informational only.
     pub tier1: TierStatus,
-    // ── Tier 2 ────────────────────────────────────────────────────────────────
+    //  Tier 2 
     pub tier2: TierStatus,
     /// Handoff URL or DSN, if configured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -235,7 +235,7 @@ pub struct CheckReport {
     /// Validation result for the tier 2 handoff target.
     pub tier2_validation: Validation,
 
-    // ── Tier 3 ────────────────────────────────────────────────────────────────
+    //  Tier 3 
     pub tier3: TierStatus,
     /// Handoff URL or DSN, if configured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -243,7 +243,7 @@ pub struct CheckReport {
     /// Validation result for the tier 3 handoff target.
     pub tier3_validation: Validation,
 
-    // ── Cache ─────────────────────────────────────────────────────────────────
+    //  Cache
     /// Human-readable summary of the cache configuration (backends, TTLs, …).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_config: Option<String>,
@@ -254,24 +254,24 @@ pub struct CheckReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_file_check: Option<FileCheck>,
 
-    // ── Overall ───────────────────────────────────────────────────────────────
+    //  Overall
     /// `true` if every required component passed validation.
     /// Optional/unconfigured components do not affect this flag.
     pub healthy: bool,
 
-    // ── Runtime environment ───────────────────────────────────────────────────
+    //  Runtime environment
     /// Docker image or container runtime name, if the process appears to be
     /// running inside a container.  `None` when no container heuristics match.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container_image: Option<String>,
 
-    // ── Build info ────────────────────────────────────────────────────────────
+    //  Build info 
     /// Which tier binary this is (1, 2, or 3).  `None` when unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_tier: Option<u8>,
 }
 
-// ── Collector ────────────────────────────────────────────────────────────────
+//  Collector 
 
 /// Whether tier 2 is compiled into this binary (set at startup by tier2/tier3).
 pub static TIER2_BUILTIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -377,8 +377,7 @@ pub fn collect(cfg: &crate::config::AppConfig) -> CheckReport {
         }
         None => {
             let default_line = format!(
-                "mem: (default, {} MB, max TTL {}s, default TTL {}s)",
-                100, cfg.cache_max_ttl_secs, cfg.cache_default_ttl_secs,
+                "mem: (default, {} MB)", 100,
             );
             (Some(default_line), Validation::ok(), None)
         }
@@ -645,7 +644,7 @@ fn detect_container_image() -> Option<String> {
     Some(runtime.to_string())
 }
 
-// ── Pretty printer ────────────────────────────────────────────────────────────
+//  Pretty printer 
 
 impl CheckReport {
     /// Print a human-readable diagnostic report to stdout.
@@ -698,7 +697,7 @@ impl CheckReport {
         // TBR_TIER3
         print_tier_var("TBR_TIER3", &self.tier3, self.tier3_handoff.as_deref(), &self.tier3_validation);
 
-        // ── Status ────────────────────────────────────────────────────────
+        //  Status 
         println!();
         let status = if self.healthy { ux.green("ready") } else { ux.red("error") };
         println!("status: {status}");

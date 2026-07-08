@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::RwLock;
 
-// ── Handler registry ──────────────────────────────────────────────────────────
+//  Handler registry 
 
 /// A registered subprocess handler that tier 3 may invoke for specific
 /// file extensions.
@@ -65,7 +65,7 @@ pub fn registered_handlers() -> Vec<HandlerDecl> {
     HANDLER_REGISTRY.read().unwrap().clone()
 }
 
-// ── Backend descriptor ────────────────────────────────────────────────────────
+//  Backend descriptor 
 
 /// A single renderer backend that tier 3 may use.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,7 +100,7 @@ pub enum ProbeMethod {
     RuntimeService { description: String },
 }
 
-// ── Environment report ────────────────────────────────────────────────────────
+//  Environment report 
 
 /// Full environment capability report produced at startup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,7 +114,7 @@ pub struct EnvReport {
 /// Global cache of environment probe results.
 static ENV_REPORT: RwLock<Option<EnvReport>> = RwLock::new(None);
 
-// ── Probe runner ──────────────────────────────────────────────────────────────
+//  Probe runner 
 
 /// Run all environment probes and return a report.
 ///
@@ -131,25 +131,25 @@ pub fn probe_environment() -> EnvReport {
         summary: String::new(),
     };
 
-    // ── Builtin backends (always available) ───────────────────────────────────
+    //  Builtin backends (always available)
     probe_builtins(&mut report);
 
-    // ── Shared library backends ──────────────────────────────────────────────
+    //  Shared library backends 
     probe_shared_libraries(&mut report);
 
-    // ── Executable backends ──────────────────────────────────────────────────
+    //  Executable backends 
     probe_executables(&mut report);
 
-    // ── F3D (geometry renderer with X11 dependency) ─────────────────────────
+    //  F3D (geometry renderer with X11 dependency)
     probe_f3d(&mut report);
 
-    // ── Python + usd-core (USDZ geometry pipeline) ──────────────────────────
+    //  Python + usd-core (USDZ geometry pipeline) 
     probe_python_usd(&mut report);
 
-    // ── Runtime service backends ─────────────────────────────────────────────
+    //  Runtime service backends
     probe_runtime_services(&mut report);
 
-    // ── Build summary ─────────────────────────────────────────────────────────
+    //  Build summary
     let available: Vec<&str> = report
         .backends
         .values()
@@ -182,7 +182,7 @@ pub fn cached_report() -> Option<EnvReport> {
     ENV_REPORT.read().unwrap().clone()
 }
 
-// ── Individual probe helpers ──────────────────────────────────────────────────
+//  Individual probe helpers 
 
 fn probe_builtins(report: &mut EnvReport) {
     // These are compiled into tier3 and always available.
@@ -336,7 +336,7 @@ fn probe_runtime_services(report: &mut EnvReport) {
     );
 }
 
-// ── F3D probe ─────────────────────────────────────────────────────────────────
+//  F3D probe
 
 /// Probe for the F3D 3D geometry renderer.
 ///
@@ -412,7 +412,7 @@ fn probe_f3d(report: &mut EnvReport) {
     );
 }
 
-// ── Python + usd-core probe ───────────────────────────────────────────────────
+//  Python + usd-core probe
 
 /// Probe for Python 3 with the `usd-core` package (USDZ/USD geometry extraction).
 ///
@@ -494,7 +494,7 @@ fn probe_python_usd(report: &mut EnvReport) {
     );
 }
 
-// ── Low-level probe helpers ───────────────────────────────────────────────────
+//  Low-level probe helpers
 
 /// Try to open a shared library via dlopen.
 ///

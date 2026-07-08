@@ -46,7 +46,7 @@ const STREAM_SKIP_THRESHOLD: u64 = 500 * 1024;
 /// Bytes to retrieve in a tail Range request (page-aligned).
 const TAIL_FETCH_SIZE: u64 = 60 * 1024;
 
-// ── Options ───────────────────────────────────────────────────────────────────
+//  Options
 
 /// Options forwarded to the HTTP backend when opening a connection.
 #[derive(Default)]
@@ -55,7 +55,7 @@ pub struct ConnectOptions {
     pub headers: Vec<(String, String)>,
 }
 
-// ── Error ─────────────────────────────────────────────────────────────────────
+//  Error
 
 #[derive(Debug)]
 pub enum HttpError {
@@ -76,7 +76,7 @@ impl std::fmt::Display for HttpError {
 
 impl std::error::Error for HttpError {}
 
-// ── HttpStream trait ──────────────────────────────────────────────────────────
+//  HttpStream trait 
 
 /// Minimal interface required from an HTTP backend.
 ///
@@ -131,7 +131,7 @@ pub trait HttpStream: Sized {
     async fn close(&mut self) {}
 }
 
-// ── StreamBound — platform-sensitive trait bound ──────────────────────────────
+//  StreamBound — platform-sensitive trait bound 
 
 /// Sealed bound used by [`crate::ThumbCookGeneric::run`].
 ///
@@ -151,7 +151,7 @@ pub trait StreamBound: HttpStream {}
 #[cfg(not(feature = "native"))]
 impl<S: HttpStream> StreamBound for S {}
 
-// ── HttpBuffer ────────────────────────────────────────────────────────────────
+//  HttpBuffer 
 
 /// Async random-access buffer over an HTTP resource.
 ///
@@ -199,7 +199,7 @@ pub struct HttpBuffer<S: HttpStream> {
 }
 
 impl<S: HttpStream> HttpBuffer<S> {
-    // ── Construction ──────────────────────────────────────────────────────────
+    //  Construction 
 
     /// Open an HTTP GET to `url` and return a buffer ready for reads.
     /// Zero bytes are pulled from the body at this point.
@@ -236,7 +236,7 @@ impl<S: HttpStream> HttpBuffer<S> {
         })
     }
 
-    // ── Cursor ────────────────────────────────────────────────────────────────
+    //  Cursor 
 
     /// Set the cursor to `offset`.  No I/O.
     pub fn seek(&mut self, offset: u64) {
@@ -267,7 +267,7 @@ impl<S: HttpStream> HttpBuffer<S> {
         self.eof_override.or(self.content_length)
     }
 
-    // ── Artificial EOF ────────────────────────────────────────────────────────
+    //  Artificial EOF 
 
     /// Make reads at or past `len` return `Ok(0)`.  Does not evict pages.
     pub fn set_eof(&mut self, len: u64) {
@@ -278,7 +278,7 @@ impl<S: HttpStream> HttpBuffer<S> {
         self.eof_override = None;
     }
 
-    // ── Streaming mode ────────────────────────────────────────────────────────
+    //  Streaming mode 
 
     /// Enter streaming mode (one-way).  New chunks bypass the page cache.
     pub fn enter_streaming_mode(&mut self) {
@@ -289,7 +289,7 @@ impl<S: HttpStream> HttpBuffer<S> {
         self.streaming_mode
     }
 
-    // ── Lifecycle ─────────────────────────────────────────────────────────────
+    //  Lifecycle
 
     /// Release the underlying connection before the body is fully consumed.
     ///
@@ -312,7 +312,7 @@ impl<S: HttpStream> HttpBuffer<S> {
         self.pages.get(&0).cloned()
     }
 
-    // ── Accounting ────────────────────────────────────────────────────────────
+    //  Accounting 
 
     /// Total bytes received from the network so far.
     pub fn bytes_fetched(&self) -> u64 {
@@ -324,7 +324,7 @@ impl<S: HttpStream> HttpBuffer<S> {
         self.io_secs_count
     }
 
-    // ── Reads ─────────────────────────────────────────────────────────────────
+    //  Reads
 
     /// Read up to `buf.len()` bytes from the cursor into `buf`.
     ///
@@ -364,7 +364,7 @@ impl<S: HttpStream> HttpBuffer<S> {
         Ok(out)
     }
 
-    // ── Cached-mode read ──────────────────────────────────────────────────────
+    //  Cached-mode read 
 
     async fn read_cached(&mut self, buf: &mut [u8]) -> Result<usize, HttpError> {
         let page_index = self.cursor / PAGE_SIZE as u64;
@@ -432,7 +432,7 @@ impl<S: HttpStream> HttpBuffer<S> {
         self.stream_forward_to_page(page_index).await
     }
 
-    // ── Streaming-mode read ───────────────────────────────────────────────────
+    //  Streaming-mode read
 
     async fn read_streaming(&mut self, buf: &mut [u8]) -> Result<usize, HttpError> {
         // Tail-fetch shortcut: when the cursor lands in the tail of a
@@ -514,7 +514,7 @@ impl<S: HttpStream> HttpBuffer<S> {
         }
     }
 
-    // ── Page cache population ─────────────────────────────────────────────────
+    //  Page cache population
 
     async fn stream_forward_to_page(&mut self, target_page: u64) -> Result<(), HttpError> {
         let page_start = target_page * PAGE_SIZE as u64;
@@ -628,7 +628,7 @@ impl<S: HttpStream> HttpBuffer<S> {
     }
 }
 
-// ── ReqwestStream — native backend ───────────────────────────────────────────
+//  ReqwestStream — native backend
 
 /// reqwest-backed [`HttpStream`] implementation for the native server.
 ///
@@ -665,7 +665,7 @@ enum ReqwestStreamInner {
 #[cfg(feature = "native")]
 impl HttpStream for ReqwestStream {
     async fn connect(url: &str, options: &ConnectOptions) -> Result<Self, HttpError> {
-        // ── file:// — stream from disk ────────────────────────────────────────
+        //  file:// — stream from disk 
         if let Some(path) = url.strip_prefix("file://") {
             // Get file length without reading any content.
             let file_len = match std::fs::metadata(path) {
@@ -716,7 +716,7 @@ impl HttpStream for ReqwestStream {
             });
         }
 
-        // ── http:// / https:// — reqwest ──────────────────────────────────────
+        //  http:// / https:// — reqwest 
         let client = http_client();
 
         let mut req = client.get(url);
@@ -838,7 +838,7 @@ fn build_http_client() -> reqwest::Client {
         .expect("failed to build reqwest client")
 }
 
-// ── Platform stream alias ─────────────────────────────────────────────────────
+//  Platform stream alias
 
 /// The HTTP backend used by native server builds.
 ///
@@ -848,7 +848,7 @@ fn build_http_client() -> reqwest::Client {
 #[cfg(feature = "native")]
 pub type PlatformStream = ReqwestStream;
 
-// ── ReadSeek supertrait ───────────────────────────────────────────────────────
+//  ReadSeek supertrait
 
 /// Combined `Read + Seek` supertrait, object-safe when used as
 /// `Box<dyn ReadSeek + Send>`.
@@ -863,7 +863,7 @@ pub type PlatformStream = ReqwestStream;
 pub trait ReadSeek: std::io::Read + std::io::Seek {}
 impl<T: std::io::Read + std::io::Seek> ReadSeek for T {}
 
-// ── SyncHttpReader ────────────────────────────────────────────────────────────
+//  SyncHttpReader 
 
 /// Synchronous `std::io::Read + Seek` adapter over an [`HttpBuffer`].
 ///

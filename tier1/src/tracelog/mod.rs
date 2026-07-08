@@ -24,7 +24,7 @@ use crate::result::ThumbTrace;
 #[cfg(feature = "native")]
 pub mod ndjson;
 
-// ── Backend trait ─────────────────────────────────────────────────────────────
+//  Backend trait
 
 /// A single trace/log storage backend.  Implementations must be `Send + Sync`.
 pub trait TraceBackend: Send + Sync {
@@ -38,7 +38,7 @@ pub trait TraceBackend: Send + Sync {
     fn record_task(&self, trace: Arc<ThumbTrace>) -> DeferredFuture;
 }
 
-// ── TraceStore ────────────────────────────────────────────────────────────────
+//  TraceStore 
 
 /// Holds the active trace backends for the process.
 ///
@@ -76,7 +76,7 @@ impl TraceStore {
     }
 }
 
-// ── DSN parser ────────────────────────────────────────────────────────────────
+//  DSN parser 
 
 /// Build a backend list from a `TBR_TRACE` DSN string.
 ///

@@ -23,24 +23,24 @@
 //! ## Architecture
 //!
 //! ```text
-//! ┌─────────────────────────────────────────────┐
+//! ┌─┐
 //! │                   tier3                     │
-//! │  ┌───────────────────────────────────────┐  │
+//! │  ┌─┐  │
 //! │  │              tier2                    │  │
-//! │  │  ┌─────────────────────────────────┐  │  │
+//! │  │  ┌─┐  │  │
 //! │  │  │            tier1                │  │  │
 //! │  │  │  • Request/response types       │  │  │
 //! │  │  │  • Pipeline orchestration       │  │  │
 //! │  │  │  • Caching, dispatch, routing   │  │  │
 //! │  │  │  • Compiles to native & WASM    │  │  │
-//! │  │  └─────────────────────────────────┘  │  │
+//! │  │  └─┘  │  │
 //! │  │  • FFmpeg decode (video, HEIC, EXR)   │  │
 //! │  │  • Image codecs (JPEG-XL, WebP, SVG)  │  │
-//! │  └───────────────────────────────────────┘  │
+//! │  └─┘  │
 //! │  • Sandbox + env checks                      │
 //! │  • dlopen subprocess backends                │
 //! │  • The `thumbrella` binary entrypoint        │
-//! └─────────────────────────────────────────────┘
+//! └─┘
 //! ```
 //!
 //! | Crate | Role | Key modules |

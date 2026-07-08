@@ -20,7 +20,7 @@ use std::io::{self, Write};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-// ── Once-only warnings ────────────────────────────────────────────────────────
+//  Once-only warnings 
 
 /// Flags that fire exactly once per process lifetime.
 static WARNED_FILE_URL: AtomicBool = AtomicBool::new(false);
@@ -48,7 +48,7 @@ pub fn warn_localhost_denied() {
     }
 }
 
-// ── OutputStyle ───────────────────────────────────────────────────────────────
+//  OutputStyle
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputStyle {
@@ -80,7 +80,7 @@ impl OutputStyle {
     }
 }
 
-// ── Colour helpers ────────────────────────────────────────────────────────────
+//  Colour helpers 
 
 fn use_colour() -> bool {
     !matches!(
@@ -121,7 +121,7 @@ impl Colour {
     }
 }
 
-// ── Global UX instance ────────────────────────────────────────────────────────
+//  Global UX instance 
 
 static UX: OnceLock<Ux> = OnceLock::new();
 
@@ -154,7 +154,7 @@ pub struct Ux {
 }
 
 impl Ux {
-    // ── Public colour helpers (for CLI output) ────────────────────────────────
+    //  Public colour helpers (for CLI output) 
 
     pub fn green(&self, s: &str) -> String {
         Colour::green(s)
@@ -198,7 +198,7 @@ impl Ux {
         colorize_json_str(json)
     }
 
-    // ── Startup banner ────────────────────────────────────────────────────────
+    //  Startup banner 
 
     /// Print the startup block — banner, hints, and connection info.
     /// Called once from `run_server`.
@@ -216,14 +216,14 @@ impl Ux {
 
         let mut lines: Vec<String> = Vec::new();
 
-        // ── Identity ──────────────────────────────────────────────────────
+        //  Identity 
         lines.push(format!(
             "  #  {} {} - online thumbnail server",
             Colour::bold("☂  Thumbrella"),
             Colour::dim(version),
         ));
 
-        // ── Release info (docker image tag, etc.) ─────────────────────────
+        //  Release info (docker image tag, etc.)
         if let Ok(release) = std::fs::read_to_string("/etc/thumbrella-release") {
             let line = release.lines().next().unwrap_or("").trim();
             if !line.is_empty() {
@@ -231,10 +231,10 @@ impl Ux {
             }
         }
 
-        // ── Docs ──────────────────────────────────────────────────────────
+        //  Docs 
         lines.push("  # docs: https://thumbrella.dev/docs/".to_string());
 
-        // ── Hints ─────────────────────────────────────────────────────────
+        //  Hints
         if self.style.show_hints()
             && !tier2_configured && !tier3_configured && !crate::check::has_builtin_renderer() {
                 lines.push(format!(
@@ -245,14 +245,14 @@ impl Ux {
                 ));
             }
 
-        // ── Container hint ───────────────────────────────────────────────
+        //  Container hint
         if in_container() {
             lines.push(format!(
                 "  # hint: running in a container — map with -p HOST:{port} to access from the host",
             ));
         }
 
-        // ── Connection ────────────────────────────────────────────────────
+        //  Connection 
         let connect = if let Some(hs) = handshake {
             let masked = Self::mask_handshake(hs);
             Colour::dim(&format!("TBR_CONNECT=http://localhost:{port},{masked} (use secret handshake)"))
@@ -261,7 +261,7 @@ impl Ux {
         };
         lines.push(format!("  # clients:  {connect}",));
 
-        // ── Listening (always last) ───────────────────────────────────────
+        //  Listening (always last)
         let listen_addr = if in_container() {
             let host = std::fs::read_to_string("/proc/sys/kernel/hostname")
                 .ok()
@@ -281,7 +281,7 @@ impl Ux {
         let _ = io::stdout().write_all(b"\n");
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    //  Helpers
 
     /// Mask a handshake value for display in the startup banner.
     ///
@@ -306,7 +306,7 @@ impl Ux {
         format!("{prefix}{stars}")
     }
 
-    // ── Request logging ───────────────────────────────────────────────────────
+    //  Request logging
 
     /// Log the start of a batch request.  Returns a token for per-item logging.
     pub fn log_batch_start(&self, method: &str, path: &str, count: usize, client_ip: Option<&str>) {
@@ -390,7 +390,7 @@ impl Ux {
         self.log_thumb_result(url, status, duration_ms, kind, extension, source, message);
     }
 
-    // ── Error messages ────────────────────────────────────────────────────────
+    //  Error messages 
 
     /// Print a fatal startup error with a suggested fix.
     pub fn fatal(&self, problem: &str, suggestion: &str) -> ! {
@@ -424,7 +424,7 @@ impl Ux {
     }
 }
 
-// ── JSON colouriser ───────────────────────────────────────────────────────────
+//  JSON colouriser
 
 /// Colour a pretty-printed JSON string for terminal display.
 ///

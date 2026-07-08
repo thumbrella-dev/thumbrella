@@ -75,7 +75,7 @@ use crate::source::CacheHints;
 use crate::spec::ShortcutLimits;
 use crate::tracelog::TraceStore;
 
-// ── CookStatus ────────────────────────────────────────────────────────────────
+//  CookStatus 
 
 /// Internal pipeline gate.  Steps check `cook.status == CookStatus::Processing`
 /// to decide whether to continue.  Any step that hits a terminal condition sets
@@ -106,7 +106,7 @@ impl CookStatus {
     }
 }
 
-// ── CallerContext ─────────────────────────────────────────────────────────────
+//  CallerContext
 
 /// How this cook was invoked — written to [`ThumbTrace`], never sent to clients.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -120,7 +120,7 @@ pub enum CallerContext {
     Library,
 }
 
-// ── Runtime ───────────────────────────────────────────────────────────────────
+//  Runtime
 
 /// Shared server-wide configuration.  One instance per process, referenced by
 /// every concurrent cook via `Arc<Runtime>`.
@@ -225,7 +225,7 @@ impl Runtime {
     }
 }
 
-// ── Portable handoff sub-structs ──────────────────────────────────────────────
+//  Portable handoff sub-structs 
 //
 // These three structs are the only parts of ThumbCook that cross tier
 // boundaries.  ThumbHandoff (in handoff.rs) is composed entirely of them, so
@@ -281,7 +281,7 @@ pub struct SourceIdentity {
     pub cache_key_source: Option<String>,
 }
 
-// ── ThumbCook ─────────────────────────────────────────────────────────────────
+//  ThumbCook
 
 /// Flat processing buffer for one thumbnail.
 ///
@@ -293,15 +293,15 @@ pub struct SourceIdentity {
 /// Cloudflare Workers (workers-rs fetch).  Use the `ThumbCook` type alias
 /// defined in `lib.rs` for native-only code.
 pub struct ThumbCook<S: HttpStream> {
-    // ── Pipeline gate ─────────────────────────────────────────────────────────
+    //  Pipeline gate
     /// Current pipeline state.  Steps check `status.is_processing()` before
     /// doing work.  Set to a terminal variant to stop the pipeline.
     pub status: CookStatus,
 
-    // ── Shared runtime ────────────────────────────────────────────────────────
+    //  Shared runtime 
     pub runtime: Arc<Runtime>,
 
-    // ── Handoff-portable groups ───────────────────────────────────────────────
+    //  Handoff-portable groups
     /// Caller-supplied inputs.  Never mutated after construction.
     pub input: InputSpec,
     /// Sniffed type information populated during `inspect`.
@@ -309,7 +309,7 @@ pub struct ThumbCook<S: HttpStream> {
     /// Source identity and cache key populated during `connect`.
     pub src: SourceIdentity,
 
-    // ── HTTP connection metadata ──────────────────────────────────────────────
+    //  HTTP connection metadata 
     /// Response headers captured on `connect`.
     pub http_headers: HashMap<String, String>,
     /// HTTP status code of the response.
@@ -319,7 +319,7 @@ pub struct ThumbCook<S: HttpStream> {
     // Live connection — access via the http_* methods below.
     http_buf: Option<HttpBuffer<S>>,
 
-    // ── Render state ──────────────────────────────────────────────────────────
+    //  Render state 
     /// Decoded pixel buffer.  Populated by shortcut or render; consumed and
     /// cleared to `None` by `deliver`.
     pub render_image: Option<DynamicImage>,
@@ -338,7 +338,7 @@ pub struct ThumbCook<S: HttpStream> {
     /// is an artifact of partial decoding, not genuine small-image content.
     pub render_is_progressive_partial: bool,
 
-    // ── Output fields — written as steps complete ────────────────────────────
+    //  Output fields — written as steps complete 
     /// The encoded JPEG thumbnail bytes.
     pub out_thumbnail: Vec<u8>,
     /// Human-readable error/status message; empty on success.
@@ -357,7 +357,7 @@ pub struct ThumbCook<S: HttpStream> {
     /// When Some, this overrides the file_size fallback in the download counter.
     render_bytes_consumed: Option<u64>,
 
-    // ── Telemetry — per-step timing ───────────────────────────────────────────
+    //  Telemetry — per-step timing
     pub tel_connect_secs: f64,
     pub tel_inspect_secs: f64,
     pub tel_shortcut_secs: f64,
@@ -373,7 +373,7 @@ pub struct ThumbCook<S: HttpStream> {
     /// Override trace version when the resolver tier is a handoff target.
     pub tel_version_override: Option<String>,
 
-    // ── Attribution / context ─────────────────────────────────────────────────
+    //  Attribution / context
     /// How this cook was invoked.
     pub ctx_caller: Option<CallerContext>,
     /// Groups multiple trace records from the same inbound batch call.
@@ -391,7 +391,7 @@ pub struct ThumbCook<S: HttpStream> {
 }
 
 impl<S: HttpStream> ThumbCook<S> {
-    // ── Construction ──────────────────────────────────────────────────────────
+    //  Construction 
 
     /// Create a new cook for a URL with a shared runtime.
     pub fn new(url: impl Into<String>, runtime: Arc<Runtime>) -> Self {
@@ -453,7 +453,7 @@ impl<S: HttpStream> ThumbCook<S> {
         cook
     }
 
-    // ── Pipeline gate ─────────────────────────────────────────────────────────
+    //  Pipeline gate
 
     /// Mark the cook as failed with a message and stop the pipeline.
     pub fn fail(&mut self, message: impl Into<String>) {
@@ -471,7 +471,7 @@ impl<S: HttpStream> ThumbCook<S> {
         self.cancel.store(true, Ordering::Relaxed);
     }
 
-    // ── HTTP buffer delegates ─────────────────────────────────────────────────
+    //  HTTP buffer delegates
     //
     // HttpBuffer's internal page cache, cursor, and stream machinery stay
     // encapsulated.  These are the only ways pipeline steps touch the live
@@ -600,7 +600,7 @@ impl<S: HttpStream> ThumbCook<S> {
         first_page
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    //  Helpers
 
     /// Snapshot `http_bytes_fetched()` into `out_download_bytes` unless a step
     /// has already set a more precise value.
@@ -612,7 +612,7 @@ impl<S: HttpStream> ThumbCook<S> {
         self.tel_io_secs = self.http_io_secs();
     }
 
-    // ── Output views ──────────────────────────────────────────────────────────
+    //  Output views 
 
     /// Materialise the client-facing [`ThumbResult`].  Called once at end of `run()`.
     pub fn to_result(&self) -> ThumbResult {
@@ -788,7 +788,7 @@ impl<S: HttpStream> ThumbCook<S> {
         }
     }
 
-    // ── Handoff application ───────────────────────────────────────────────────
+    //  Handoff application
 
     /// Apply the result of a tier handoff to this cook.
     ///
@@ -834,7 +834,7 @@ impl<S: HttpStream> ThumbCook<S> {
         self.render_renderer = Some(format!("handoff/tier{target_tier}"));
     }
 
-    // ── Pipeline entry ────────────────────────────────────────────────────────
+    //  Pipeline entry 
 
     /// Run the full pipeline and return `(result, trace, after)`.
     ///
@@ -860,7 +860,7 @@ impl<S: HttpStream> ThumbCook<S> {
         let mut after = AfterResponse::new();
         let t0 = web_time::Instant::now();
 
-        // ── Client-side freshness fast path ───────────────────────────────────
+        //  Client-side freshness fast path
         // If the caller's cache hints say the resource is still fresh, skip
         // the upstream fetch entirely.  The client sent cache hints — it
         // declares it has the cached data and only wants a freshness check.
@@ -870,7 +870,7 @@ impl<S: HttpStream> ThumbCook<S> {
             return self.finish(after);
         }
 
-        // ── Pre-connect cache check ───────────────────────────────────────────
+        //  Pre-connect cache check
         // Only run when the caller did NOT provide hints.  When the caller
         // provides hints they already have a cached copy — they just want
         // a freshness check via conditional headers, not our KV data.
@@ -934,7 +934,7 @@ impl<S: HttpStream> ThumbCook<S> {
             }
         }
 
-        // ── connect ───────────────────────────────────────────────────────────
+        //  connect
         let t_step = web_time::Instant::now();
         pipeline::connect(&mut self).await;
         self.tel_connect_secs = t_step.elapsed().as_secs_f64();
@@ -973,7 +973,7 @@ impl<S: HttpStream> ThumbCook<S> {
             return self.finish(after);
         }
 
-        // ── cache key derivation ──────────────────────────────────────────────
+        //  cache key derivation 
         {
             use crate::source::content_hash_from_headers;
             use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -1004,7 +1004,7 @@ impl<S: HttpStream> ThumbCook<S> {
             self.src.cache_key_source = Some(source);
         }
 
-        // ── cache check ───────────────────────────────────────────────────────
+        //  cache check
         if !self.ctx_handoff
             && let Some(ref key) = self.src.cache_key.clone()
                 && let Some((cached, backend_name)) = self.runtime.cache.check(key).await {
@@ -1035,7 +1035,7 @@ impl<S: HttpStream> ThumbCook<S> {
                 }
 
         if !self.ctx_handoff {
-            // ── inspect ───────────────────────────────────────────────────────
+            //  inspect
             let t_step = web_time::Instant::now();
             pipeline::inspect(&mut self).await;
             self.tel_inspect_secs = t_step.elapsed().as_secs_f64();
@@ -1046,7 +1046,7 @@ impl<S: HttpStream> ThumbCook<S> {
             }
         }
 
-        // ── shortcut ──────────────────────────────────────────────────────────
+        //  shortcut 
         // Runs in both direct and handoff modes.  On a handoff, media
         // kind/extension are already set from the tier-1 inspect, so the
         // shortcut has all the context it needs.  Tier-2's higher
@@ -1075,7 +1075,7 @@ impl<S: HttpStream> ThumbCook<S> {
             // — success or placeholder — so an intermediate just adds noise.
         }
 
-        // ── deliver (when shortcut decoded an image) ──────────────────────────
+        //  deliver (when shortcut decoded an image) 
         if self.render_image.is_some() {
             let t_step = web_time::Instant::now();
             pipeline::deliver(&mut self).await;
@@ -1091,7 +1091,7 @@ impl<S: HttpStream> ThumbCook<S> {
             return self.finish(after);
         }
 
-        // ── handoff to higher tier ────────────────────────────────────────────
+        //  handoff to higher tier 
         // Check for a registered in-process renderer *before* closing the
         // connection so the renderer can stream from the live HttpBuffer.
         #[cfg(feature = "native")]
@@ -1140,7 +1140,7 @@ impl<S: HttpStream> ThumbCook<S> {
             self.placeholder_source = Some(ResultSource::Fallback);
         }
 
-        // ── handoff fallback chain ────────────────────────────────────────────
+        //  handoff fallback chain 
         // Build the handoff payload once (closes the HTTP connection), then
         // try tiers in ascending order: start with the routing recommendation
         // and escalate upward on failure.  Tier 2 never falls back on its own;
@@ -1195,7 +1195,7 @@ impl<S: HttpStream> ThumbCook<S> {
 
                 let outcome: Result<HandoffResponse, String> = if first_attempt {
                     first_attempt = false;
-                    // ── Single-flight dedup (first attempt only) ─────────────
+                    //  Single-flight dedup (first attempt only)
                     let hkey = self
                         .src
                         .cache_key
@@ -1225,7 +1225,7 @@ impl<S: HttpStream> ThumbCook<S> {
                         }
                     }
                 } else {
-                    // ── Fallback attempt (no dedup) ──────────────────────────
+                    //  Fallback attempt (no dedup) 
                     crate::handoff::post_handoff(url, &target.headers, &payload).await
                 };
 
@@ -1366,7 +1366,7 @@ fn cook_status_from_job(status: ResultStatus) -> CookStatus {
     }
 }
 
-// ── RenderCook impl ───────────────────────────────────────────────────────────
+//  RenderCook impl
 //
 // Lives in cook.rs (not renderer.rs) so it can access private fields.
 // `S: Send + 'static` is required for `&mut ThumbCook<S>` to coerce to

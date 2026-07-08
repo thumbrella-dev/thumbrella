@@ -31,7 +31,7 @@ use std::process::Command;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::unix::process::CommandExt;
 
-// ── SandboxConfig ─────────────────────────────────────────────────────────────
+//  SandboxConfig
 
 /// Limits applied to a subprocess before `exec`.
 ///
@@ -71,7 +71,7 @@ pub fn default_strict() -> SandboxConfig {
     SandboxConfig::default()
 }
 
-// ── bwrap wrapper (Linux, preferred) ─────────────────────────────────────────
+//  bwrap wrapper (Linux, preferred)
 
 /// Wrap a command in bubblewrap for filesystem and namespace isolation.
 ///
@@ -83,7 +83,7 @@ pub fn default_strict() -> SandboxConfig {
 pub fn bwrap_command(scratch_dir: &Path, program: &str, args: &[&str], config: &SandboxConfig) -> Command {
     let mut cmd = Command::new("bwrap");
 
-    // ── Namespace isolation ──────────────────────────────────────────────
+    //  Namespace isolation 
     cmd.arg("--unshare-all");
     if config.needs_networking {
         cmd.arg("--share-net");
@@ -91,29 +91,29 @@ pub fn bwrap_command(scratch_dir: &Path, program: &str, args: &[&str], config: &
     cmd.arg("--die-with-parent");
     cmd.arg("--new-session");
 
-    // ── Read-only system mounts ──────────────────────────────────────────
+    //  Read-only system mounts 
     for dir in &["/usr", "/lib", "/lib64", "/bin", "/etc", "/opt"] {
         if Path::new(dir).exists() {
             cmd.arg("--ro-bind").arg(dir).arg(dir);
         }
     }
 
-    // ── Writable scratch directory ───────────────────────────────────────
+    //  Writable scratch directory
     cmd.arg("--bind").arg(scratch_dir).arg(scratch_dir);
 
-    // ── Minimal /dev ─────────────────────────────────────────────────────
+    //  Minimal /dev
     cmd.arg("--dev").arg("/dev");
 
-    // ── /proc for self-inspection ────────────────────────────────────────
+    //  /proc for self-inspection 
     cmd.arg("--proc").arg("/proc");
 
-    // ── Private /tmp ─────────────────────────────────────────────────────
+    //  Private /tmp
     cmd.arg("--tmpfs").arg("/tmp");
 
-    // ── No setuid, lock ASLR ─────────────────────────────────────────────
+    //  No setuid, lock ASLR
     cmd.arg("--no-new-session");
 
-    // ── Separator + target command ───────────────────────────────────────
+    //  Separator + target command
     cmd.arg("--");
     cmd.arg(program);
     for a in args {
@@ -153,7 +153,7 @@ pub fn sandboxed_command(scratch_dir: &Path, program: &str, args: &[&str]) -> Co
     }
 }
 
-// ── pre_exec fallback (Linux / macOS, no bwrap) ──────────────────────────────
+//  pre_exec fallback (Linux / macOS, no bwrap) 
 
 /// Apply sandbox restrictions via `pre_exec` (rlimits, capabilities).
 /// Used as fallback when bubblewrap is not available.
@@ -177,7 +177,7 @@ pub fn apply(_cmd: &mut Command, _config: &SandboxConfig) {
     // Windows: pre_exec and rlimits are not available.  No-op.
 }
 
-// ── Linux implementation ──────────────────────────────────────────────────────
+//  Linux implementation 
 
 #[cfg(target_os = "linux")]
 fn sandbox_linux(config: &SandboxConfig) -> std::io::Result<()> {
@@ -238,7 +238,7 @@ fn cap_last_cap() -> u32 {
         .unwrap_or(40)
 }
 
-// ── macOS implementation ──────────────────────────────────────────────────────
+//  macOS implementation 
 
 #[cfg(target_os = "macos")]
 fn sandbox_macos(config: &SandboxConfig) -> std::io::Result<()> {
@@ -254,7 +254,7 @@ fn sandbox_macos(config: &SandboxConfig) -> std::io::Result<()> {
     Ok(())
 }
 
-// ── rlimit helper ─────────────────────────────────────────────────────────────
+//  rlimit helper
 
 #[cfg(unix)]
 fn set_rlimit(resource: u32, soft: u64, hard: u64) -> std::io::Result<()> {

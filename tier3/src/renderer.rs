@@ -39,7 +39,7 @@ use std::sync::Arc;
 use tier1::InProcessRenderer;
 use tier1::RenderCook;
 
-// ── Embedded Python scripts ──────────────────────────────────────────────────
+//  Embedded Python scripts 
 
 /// Embedded `usd_extract.py` — extracts triangulated mesh from USD/USDZ → OBJ.
 const USD_EXTRACT_PY: &str = include_str!("usd_extract.py");
@@ -246,7 +246,7 @@ fn run_magick_image_decode(bytes: &[u8], ext: &str) -> Result<RenderOutput, Stri
         .stage_bytes(bytes, &format!("input.{ext}"))
         .map_err(|e| format!("stage input: {e}"))?;
 
-    // ── identify: get source dimensions ───────────────────────────────────
+    //  identify: get source dimensions
     let (src_w, src_h) = {
         let output = Command::new("gm")
             .arg("identify")
@@ -270,7 +270,7 @@ fn run_magick_image_decode(bytes: &[u8], ext: &str) -> Result<RenderOutput, Stri
         (w, h)
     };
 
-    // ── compute power-of-2 downscale ───────────────────────────────────────
+    //  compute power-of-2 downscale
     // Only scale down.  Keep at least 256 px on the short side for quality.
     // Scale factors are powers of 2 (2, 4, 8, …) for fast DCT-level resize
     // in the deliver step.
@@ -287,7 +287,7 @@ fn run_magick_image_decode(bytes: &[u8], ext: &str) -> Result<RenderOutput, Stri
     let resize_w = src_w / scale;
     let resize_h = src_h / scale;
 
-    // ── convert: decode + resize → PNG ─────────────────────────────────────
+    //  convert: decode + resize → PNG
     let output_path = arena.output_path("png");
 
     let mut cmd = Command::new("gm");
@@ -366,7 +366,7 @@ fn run_ffmpeg_decode(bytes: &[u8], ext: &str, is_video: bool) -> Result<RenderOu
         .stage_bytes(bytes, &format!("input.{ext}"))
         .map_err(|e| format!("stage input: {e}"))?;
 
-    // ── ffprobe: get dimensions, colour depth, duration, audio channels ──
+    //  ffprobe: get dimensions, colour depth, duration, audio channels 
     let (src_w, src_h, bits_per_pixel, duration_secs, channel_count) = {
         let output = Command::new("ffprobe")
             .arg("-v")
@@ -383,7 +383,7 @@ fn run_ffmpeg_decode(bytes: &[u8], ext: &str, is_video: bool) -> Result<RenderOu
             serde_json::from_slice(&output.stdout).map_err(|e| format!("ffprobe json: {e}"))?;
         let streams = json["streams"].as_array().ok_or_else(|| "ffprobe: no streams".to_string())?;
 
-        // ── video stream ──────────────────────────────────────────────────
+        //  video stream 
         let vs = streams.iter().find(|s| s["codec_type"] == "video");
         let (w, h, bpp) = if let Some(s) = vs {
             let w = s["width"].as_u64().unwrap_or(0) as u32;
@@ -397,20 +397,20 @@ fn run_ffmpeg_decode(bytes: &[u8], ext: &str, is_video: bool) -> Result<RenderOu
             return Err("ffprobe: no video stream".into());
         };
 
-        // ── audio streams ─────────────────────────────────────────────────
+        //  audio streams
         let chan = streams
             .iter()
             .filter(|s| s["codec_type"] == "audio")
             .filter_map(|s| s["channels"].as_u64())
             .sum::<u64>() as u32;
 
-        // ── duration ──────────────────────────────────────────────────────
+        //  duration 
         let dur = json["format"]["duration"].as_str().and_then(|s| s.parse::<f64>().ok());
 
         (w, h, bpp, dur, chan)
     };
 
-    // ── power-of-2 downscale ──────────────────────────────────────────────
+    //  power-of-2 downscale 
     let max_dim = src_w.max(src_h);
     let scale: u32 = if max_dim > 512 {
         let mut s = 1u32;
@@ -424,7 +424,7 @@ fn run_ffmpeg_decode(bytes: &[u8], ext: &str, is_video: bool) -> Result<RenderOu
     let resize_w = src_w / scale;
     let resize_h = src_h / scale;
 
-    // ── ffmpeg: decode + resize → PNG ─────────────────────────────────────
+    //  ffmpeg: decode + resize → PNG
     let output_path = arena.output_path("png");
     let mut cmd = Command::new("ffmpeg");
     cmd.arg("-v").arg("error");
@@ -747,7 +747,7 @@ fn run_oiiotool_decode(bytes: &[u8], ext: &str) -> Result<RenderOutput, String> 
         .stage_bytes(bytes, &format!("input.{ext}"))
         .map_err(|e| format!("stage input: {e}"))?;
 
-    // ── oiiotool --info: get dimensions ────────────────────────────────────
+    //  oiiotool --info: get dimensions 
     let (src_w, src_h) = {
         let output = Command::new("oiiotool")
             .arg("--info")
@@ -780,7 +780,7 @@ fn run_oiiotool_decode(bytes: &[u8], ext: &str) -> Result<RenderOutput, String> 
         (w, h)
     };
 
-    // ── power-of-2 downscale ──────────────────────────────────────────────
+    //  power-of-2 downscale 
     let mut resize_w = src_w;
     let mut resize_h = src_h;
     let max_dim = src_w.max(src_h);
@@ -793,7 +793,7 @@ fn run_oiiotool_decode(bytes: &[u8], ext: &str) -> Result<RenderOutput, String> 
         resize_h = src_h / s;
     }
 
-    // ── oiiotool: decode + colorspace + resize → PNG ───────────────────────
+    //  oiiotool: decode + colorspace + resize → PNG
     let output_path = arena.output_path("png");
     let mut cmd = Command::new("oiiotool");
     cmd.arg(&input_path).arg("--colorconvert").arg("linear").arg("sRGB");
@@ -1312,7 +1312,7 @@ fn should_apply_geometry_tonemap(ext: &str) -> bool {
 }
 
 
-// ── Linear → sRGB helpers (shared by ffmpeg_cli and oiiotool paths) ──────────
+//  Linear → sRGB helpers (shared by ffmpeg_cli and oiiotool paths) 
 
 /// Returns `true` for extensions that are scene-linear (needs gamma correction).
 fn is_linear_format(ext: &str) -> bool {

@@ -69,7 +69,7 @@ const ZIP_THUMB_NAMES: &[&str] = &[
     "docProps/thumbnail.png",   // OOXML variant
 ];
 
-// ── Progressive JPEG shortcut ─────────────────────────────────────────────────
+//  Progressive JPEG shortcut
 
 // MAX_PROGRESSIVE_PIXELS is now runtime-configurable via
 // cook.runtime.shortcut_limits.max_progressive_pixels.
@@ -190,7 +190,7 @@ async fn try_progressive_jpeg_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     cook.render_image = Some(img);
 }
 
-// ── EXIF embedded thumbnail shortcut ────────────────────────────────────────
+//  EXIF embedded thumbnail shortcut 
 
 /// Attempt to serve a thumbnail from an embedded JPEG preview.
 ///
@@ -271,7 +271,7 @@ async fn try_exif_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     cook.render_image = Some(img);
 }
 
-// ── Camera-raw JPEG preview shortcut ─────────────────────────────────────────
+//  Camera-raw JPEG preview shortcut
 
 /// Bytes fetched for a fallback IFD1 range request when IFD1 lies beyond
 /// the initial `RAW_HEADER_SCAN` window (e.g. Sony/Adobe DNG with a large
@@ -418,7 +418,7 @@ async fn try_raw_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     cook.render_image = Some(img);
 }
 
-// ── ZIP container shortcut ────────────────────────────────────────────────────
+//  ZIP container shortcut 
 
 /// Attempt to extract and render a thumbnail from a ZIP-based container.
 ///
@@ -575,7 +575,7 @@ fn zip_extract_from_buffer(buf: &[u8], entry: &ZipEntry, buf_start: u64) -> Opti
     }
 }
 
-// ── ZIP helper types ──────────────────────────────────────────────────────────
+//  ZIP helper types 
 
 struct ZipEntry {
     local_offset: u64,
@@ -584,7 +584,7 @@ struct ZipEntry {
     method: u16,
 }
 
-// ── ZIP helper functions ──────────────────────────────────────────────────────
+//  ZIP helper functions 
 
 /// Find the End-of-Central-Directory record by scanning backwards.
 fn zip_find_eocd(buf: &[u8]) -> Option<usize> {
@@ -666,7 +666,7 @@ fn zip_u32(buf: &[u8], off: usize) -> u32 {
     u32::from_le_bytes(b)
 }
 
-// ── JPEG: EXIF IFD1 thumbnail ─────────────────────────────────────────────────
+//  JPEG: EXIF IFD1 thumbnail
 
 /// Location and metadata of an embedded JPEG thumbnail in an EXIF APP1 segment.
 struct JpegExifShortcutInfo {
@@ -856,7 +856,7 @@ fn tiff_scalar(bytes: &[u8], field_type: u16, offset: usize, little: bool) -> Op
     }
 }
 
-// ── PNG eXIf embedded thumbnail ───────────────────────────────────────────────
+//  PNG eXIf embedded thumbnail
 
 /// Scan a file prefix for a PNG `eXIf` chunk and extract its IFD1 thumbnail.
 ///
@@ -920,7 +920,7 @@ fn webp_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     }
 }
 
-// ── WebP: EXIF chunk (tail-read) ─────────────────────────────────────────────
+//  WebP: EXIF chunk (tail-read)
 
 /// WebP stores EXIF data in an `EXIF` chunk that follows the VP8/VP8L image
 /// data — it is NOT reachable from the standard 4 KiB header scan.  This
@@ -994,7 +994,7 @@ async fn try_webp_exif_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     }
 }
 
-// ── TIFF: embedded JPEG preview ───────────────────────────────────────────────
+//  TIFF: embedded JPEG preview
 
 /// Return the `(file_byte_offset, byte_length)` of the best embedded JPEG
 /// thumbnail found by traversing the TIFF IFD chain from the file prefix.
@@ -1262,7 +1262,7 @@ fn tiff_u32_values(bytes: &[u8], ft: u16, fc: usize, v: usize, little: bool, max
     }
 }
 
-// ── Power-of-two pre-scale ──────────────────────────────────────────────────
+//  Power-of-two pre-scale 
 
 /// Reduce a decoded image to near the thumbnail target using a two-phase
 /// strategy that balances speed and quality:
@@ -1422,7 +1422,7 @@ fn image_properties(src_w: u32, src_h: u32, color_type: image::ColorType) -> ser
     })
 }
 
-// ── Byte readers ─────────────────────────────────────────────────────────────
+//  Byte readers
 
 fn read_u16(buf: &[u8], off: usize, little: bool) -> Option<u16> {
     let b0 = *buf.get(off)?;
@@ -1442,7 +1442,7 @@ fn read_u32(buf: &[u8], off: usize, little: bool) -> Option<u32> {
     })
 }
 
-// ── Audio: ID3v2 APIC cover art shortcut ────────────────────────────────────
+//  Audio: ID3v2 APIC cover art shortcut 
 
 /// Attempt to extract embedded cover art from an audio file's ID3v2 tag.
 ///
@@ -1470,10 +1470,10 @@ async fn try_audio_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
         Err(_) => return,
     };
 
-    // ── Detect ID3v2 header (optional) ────────────────────────────────────
+    //  Detect ID3v2 header (optional) 
     let id3 = parse_id3_header(&tag_bytes);
 
-    // ── Locate the first MPEG audio frame ─────────────────────────────────
+    //  Locate the first MPEG audio frame
     // With ID3: starts 10 + tag_size bytes in.  Without: starts at byte 0.
     let audio_body_offset = id3.as_ref().map(|h| 10usize + h.tag_size).unwrap_or(0);
 
@@ -1502,7 +1502,7 @@ async fn try_audio_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
         props["duration_seconds"] = serde_json::json!(d);
     }
 
-    // ── Scan ID3v2 frames for APIC cover art ──────────────────────────────
+    //  Scan ID3v2 frames for APIC cover art 
     let image_bytes = id3.and_then(|h| find_id3_apic(&tag_bytes, h.version_major));
 
     let Some(image_bytes) = image_bytes else {
@@ -1760,7 +1760,7 @@ fn extract_apic_image(apic_data: &[u8]) -> Option<Vec<u8>> {
     Some(apic_data[image_start..].to_vec())
 }
 
-// ── Public pipeline step (merged) ────────────────────────────────────────────
+//  Public pipeline step (merged) 
 
 // SMALL_FILE_THRESHOLD is now runtime-configurable via
 // cook.runtime.shortcut_limits.small_file_threshold.
@@ -1789,7 +1789,7 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     let ext_owned = cook.media.extension.clone().unwrap_or_default();
     let ext = ext_owned.as_str();
 
-    // ── EXIF embedded thumbnail (JPEG EXIF IFD1 / TIFF IFD chain) ────────
+    //  EXIF embedded thumbnail (JPEG EXIF IFD1 / TIFF IFD chain) 
     //
     // Attempt this BEFORE the small-image full-download path so that JPEG/TIFF
     // files with an embedded thumbnail are served from the thumbnail bytes only
@@ -1810,7 +1810,7 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
         }
     }
 
-    // ── Small image: known `image`-crate formats, ≤ SMALL_FILE_THRESHOLD ──
+    //  Small image: known `image`-crate formats, ≤ SMALL_FILE_THRESHOLD 
     //
     // `inspect` has already classified the file; trust its verdict.
     //
@@ -1861,7 +1861,7 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
             // Fall through so tier2 can handle the format via libav.
     }
 
-    // ── Progressive JPEG (falls through from EXIF and small-image checks) ─
+    //  Progressive JPEG (falls through from EXIF and small-image checks)
     if is_jpeg {
         try_progressive_jpeg_shortcut(cook).await;
         if !cook.http_is_open() {
@@ -1869,7 +1869,7 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
         }
     }
 
-    // ── Camera-raw embedded JPEG preview ─────────────────────────────────
+    //  Camera-raw embedded JPEG preview
     let is_raw = cook.media.kind == Some(FileKind::Image)
         && matches!(
             cook.media.extension.as_deref(),
@@ -1882,7 +1882,7 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
         }
     }
 
-    // ── ZIP containers (ODT, DOCX, …) ────────────────────────────────────
+    //  ZIP containers (ODT, DOCX, …) 
     let is_zip_doc = cook.media.kind == Some(FileKind::Document)
         && matches!(
             cook.media.extension.as_deref(),
@@ -1892,7 +1892,7 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
         try_zip_shortcut(cook).await;
     }
 
-    // ── Audio: ID3v2 APIC cover art ─────────────────────────────────────
+    //  Audio: ID3v2 APIC cover art
     let is_audio =
         cook.media.kind == Some(FileKind::Audio) && matches!(cook.media.extension.as_deref(), Some("mp3"));
     if is_audio {
@@ -1900,7 +1900,7 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     }
 }
 
-// ── MP3 frame header parser ──────────────────────────────────────────────────
+//  MP3 frame header parser 
 
 /// Parsed first MPEG audio frame header (4 bytes after sync).
 #[derive(Debug)]

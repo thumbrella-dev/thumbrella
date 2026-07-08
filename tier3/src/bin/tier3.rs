@@ -5,12 +5,12 @@
 
 #[tokio::main]
 async fn main() {
-    // ── Mark tiers as builtin ────────────────────────────────────────────────
+    //  Mark tiers as builtin 
     // Tier 3 includes tier 2 functionality, so both are builtin.
     tier1::check::mark_tier2_builtin();
     tier1::check::mark_tier3_builtin();
 
-    // ── Register subprocess handlers ─────────────────────────────────────────
+    //  Register subprocess handlers
     // These are probed at startup.  Only handlers whose command exists and is
     // executable are marked available in the env report.
 
@@ -39,10 +39,10 @@ async fn main() {
         description: "USDZ/USD geometry (usd-core extract → F3D render)",
     });
 
-    // ── Probe the environment ────────────────────────────────────────────────
+    //  Probe the environment 
     let env_report = tier3::env_check::probe_environment();
 
-    // ── Populate tier 1's tier-3 format-availability registry ────────────────
+    //  Populate tier 1's tier-3 format-availability registry 
     // Collect all extensions from handlers whose backend executable was found
     // at startup.  The fallback dispatch chain in tier 1 uses this to decide
     // whether it should try tier 3 for a given format.
@@ -81,7 +81,7 @@ async fn main() {
         eprintln!("[tier3] {}", env_report.summary);
     }
 
-    // ── Register check sections ───────────────────────────────────────────────
+    //  Register check sections
     register_tier3_check(&env_report);
 
     tier1::cli::run_with_hook(3, |rt| async move {

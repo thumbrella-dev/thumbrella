@@ -57,7 +57,7 @@
 
 use crate::media::FileKind;
 
-// ── ThumbRoute ────────────────────────────────────────────────────────────────
+//  ThumbRoute 
 
 /// Dispatch result for one item.
 ///
@@ -78,7 +78,7 @@ pub struct ThumbRoute {
     pub tier: u8,
 }
 
-// ── Routing table ─────────────────────────────────────────────────────────────
+//  Routing table
 
 /// Route a (kind, extension) pair to the appropriate processing tier.
 ///
@@ -123,7 +123,7 @@ pub fn route(kind: FileKind, extension: Option<&str>) -> ThumbRoute {
     ThumbRoute { tier }
 }
 
-// ── Format manifest ───────────────────────────────────────────────────────────
+//  Format manifest
 
 /// A single format entry in the static dispatch manifest.
 ///
@@ -159,7 +159,7 @@ pub struct FormatEntry {
 /// This is the single source of truth for both [`route`] and CLI diagnostics.
 pub fn format_manifest() -> &'static [FormatEntry] {
     &[
-        // ── Tier 1 — pure Rust (image crate) ─────────────────────────────────
+        //  Tier 1 — pure Rust (image crate)
         FormatEntry {
             extension: "png",
             label: "PNG",
@@ -208,7 +208,7 @@ pub fn format_manifest() -> &'static [FormatEntry] {
             renderer: "image_crate",
             shortcut: true,
         },
-        // ── Tier 2 — JPEG (baseline/progressive) via libav ───────────────────
+        //  Tier 2 — JPEG (baseline/progressive) via libav
         FormatEntry {
             extension: "jpeg",
             label: "JPEG",
@@ -217,7 +217,7 @@ pub fn format_manifest() -> &'static [FormatEntry] {
             renderer: "libav",
             shortcut: true,
         },
-        // ── Tier 2 — libav / resvg / jxl-oxide ───────────────────────────────
+        //  Tier 2 — libav / resvg / jxl-oxide
         FormatEntry {
             extension: "svg",
             label: "Scalable Vector",
@@ -410,7 +410,7 @@ pub fn format_manifest() -> &'static [FormatEntry] {
             renderer: "libav",
             shortcut: false,
         },
-        // ── Tier 2 — video (libav / ffmpeg) ───────────────────────────
+        //  Tier 2 — video (libav / ffmpeg)
         FormatEntry {
             extension: "mp4",
             label: "MPEG-4",
@@ -523,7 +523,7 @@ pub fn format_manifest() -> &'static [FormatEntry] {
             renderer: "libav",
             shortcut: false,
         },
-        // ── Tier 2 — audio (libav / ffmpeg) ───────────────────────────
+        //  Tier 2 — audio (libav / ffmpeg)
         FormatEntry {
             extension: "mp3",
             label: "MPEG",
@@ -596,7 +596,7 @@ pub fn format_manifest() -> &'static [FormatEntry] {
             renderer: "libav",
             shortcut: false,
         },
-        // ── Tier 2 — documents (thumbnail extraction from ZIP) ────────
+        //  Tier 2 — documents (thumbnail extraction from ZIP) 
         FormatEntry {
             extension: "odt",
             label: "OpenOffice Document",
@@ -645,7 +645,7 @@ pub fn format_manifest() -> &'static [FormatEntry] {
             renderer: "builtin",
             shortcut: true,
         },
-        // ── Tier 3 — ffmpeg CLI: arithmetic JPEG + all image formats ──────────
+        //  Tier 3 — ffmpeg CLI: arithmetic JPEG + all image formats 
         FormatEntry {
             extension: "jpeg",
             label: "JPEG (arithmetic)",
@@ -790,7 +790,7 @@ pub fn format_manifest() -> &'static [FormatEntry] {
             renderer: "ffmpeg_cli",
             shortcut: false,
         },
-        // ── Tier 3 — oiiotool: studio image formats ──────────────────────────
+        //  Tier 3 — oiiotool: studio image formats 
         FormatEntry {
             extension: "exr",
             label: "OpenEXR",
@@ -887,7 +887,7 @@ pub fn format_manifest() -> &'static [FormatEntry] {
             renderer: "oiiotool",
             shortcut: false,
         },
-        // ── Tier 3 — subprocess: 3D geometry ──────────────────────────────────
+        //  Tier 3 — subprocess: 3D geometry 
         FormatEntry {
             extension: "glb",
             label: "Khronos Binary",
@@ -1112,7 +1112,7 @@ pub fn bypass() -> ThumbRoute {
     ThumbRoute { tier: 2 }
 }
 
-// ── Tier 3 format-availability registry ───────────────────────────────────────
+//  Tier 3 format-availability registry
 
 /// Which extensions tier 3 can handle *in the current process*.
 ///

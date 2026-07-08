@@ -13,7 +13,7 @@
 use std::sync::Arc;
 use web_time::{Duration, Instant};
 
-// ── UrlFailureCache ───────────────────────────────────────────────────────────
+//  UrlFailureCache
 
 /// Short-lived debounce cache for URLs that recently returned 4xx / 5xx.
 ///
@@ -75,7 +75,7 @@ impl UrlFailureCache {
     }
 }
 
-// ── OriginBackoffCache ────────────────────────────────────────────────────────
+//  OriginBackoffCache 
 
 /// Rate-control cache for origins that returned 429 / 503.
 ///

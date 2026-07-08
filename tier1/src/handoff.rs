@@ -66,7 +66,7 @@ pub struct HandoffResponse {
     pub trace: ThumbTrace,
 }
 
-// ── Injection hook ────────────────────────────────────────────────────────────
+//  Injection hook 
 
 /// Boxed future returned by an injected handoff function.
 ///
@@ -96,7 +96,7 @@ pub fn register_handoff_fn(f: Box<HandoffFn>) {
     let _ = HANDOFF_IMPL.set(f);
 }
 
-// ── post_handoff ──────────────────────────────────────────────────────────────
+//  post_handoff 
 
 /// Send a handoff payload to another tier and return both result + trace.
 ///
@@ -164,7 +164,7 @@ async fn native_post_handoff(
         .to_string())
 }
 
-// ── HandoffInflight ───────────────────────────────────────────────────────────
+//  HandoffInflight
 
 struct InflightSlot {
     waiters: Vec<oneshot::Sender<Arc<Result<HandoffResponse, String>>>>,

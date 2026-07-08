@@ -41,7 +41,7 @@
 
 use serde::{Deserialize, Serialize};
 
-// ── File kind ─────────────────────────────────────────────────────────────────
+//  File kind
 
 /// Coarse category of a media source.
 ///

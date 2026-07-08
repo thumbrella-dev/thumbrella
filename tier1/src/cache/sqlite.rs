@@ -47,7 +47,7 @@ use rusqlite::{Connection, params};
 use crate::after::DeferredFuture;
 use crate::cache::CacheBackend;
 
-// ── Backend ───────────────────────────────────────────────────────────────────
+//  Backend
 
 /// SQLite-backed cache.  Thread-safe via an internal `Mutex<Connection>`.
 pub struct SqliteCacheBackend {
@@ -157,7 +157,7 @@ impl CacheBackend for SqliteCacheBackend {
     }
 }
 
-// ── Eviction ──────────────────────────────────────────────────────────────────
+//  Eviction 
 
 /// Delete oldest entries until total stored bytes fits within `max_bytes`.
 ///
@@ -192,7 +192,7 @@ fn evict_oldest(conn: &Connection, max_bytes: u64) {
     .ok();
 }
 
-// ── Schema migrations ─────────────────────────────────────────────────────────
+//  Schema migrations
 
 /// Read-only schema validation — called from [`SqliteCacheBackend::check`].
 ///

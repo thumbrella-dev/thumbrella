@@ -41,7 +41,7 @@ use crate::result::ResultSource;
 use crate::tracelog::TraceStore;
 use crate::ux;
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+//  Helpers
 
 /// Extract a client IP from request headers or connection info.
 fn client_ip(headers: &HeaderMap, connect_info: Option<&SocketAddr>) -> Option<String> {
@@ -105,7 +105,7 @@ fn log_result(result: &crate::ThumbResult, duration_ms: u64) {
     );
 }
 
-// ── GET /health ───────────────────────────────────────────────────────────────
+//  GET /health
 
 /// Liveness probe.  Returns server metadata:
 ///
@@ -139,7 +139,7 @@ pub async fn health(headers: HeaderMap, connect_info: ConnectInfo<SocketAddr>) -
     Json(json!({ "status": "ok", "thumbrella": major }))
 }
 
-// ── Landing page ─────────────────────────────────────────────────────────────
+//  Landing page
 
 /// Returns a landing page at `/` with embedded logo and favicon.
 ///
@@ -175,7 +175,7 @@ pub async fn landing(State(runtime): State<Arc<Runtime>>) -> Response {
         .unwrap()
 }
 
-// ── Fallback — 404 for unknown routes ─────────────────────────────────────────
+//  Fallback — 404 for unknown routes
 
 /// Catch-all for unmatched routes.  Logs the request and returns 404.
 pub async fn not_found(
@@ -213,7 +213,7 @@ mod colour {
     }
 }
 
-// ── GET /placeholder/:kind.jpeg ───────────────────────────────────────────────
+//  GET /placeholder/:kind.jpeg
 
 /// Serve the static placeholder thumbnail for a given file kind.
 ///
@@ -260,7 +260,7 @@ pub async fn placeholder(axum::extract::Path(kind): axum::extract::Path<String>)
         .into_response()
 }
 
-// ── GET /thumb ────────────────────────────────────────────────────────────────
+//  GET /thumb 
 
 /// Single-URL thumbnail endpoint.
 ///
@@ -361,7 +361,7 @@ pub async fn thumb(
         .into_response()
 }
 
-// ── POST /batch ───────────────────────────────────────────────────────────────
+//  POST /batch
 
 /// Batch thumbnail / describe endpoint.
 ///
@@ -546,7 +546,7 @@ fn as_ndjson_line(value: Value) -> Bytes {
     Bytes::from(buf)
 }
 
-// ── POST /handoff ────────────────────────────────────────────────────────────
+//  POST /handoff 
 
 /// Trusted tier-to-tier handoff endpoint.
 ///
@@ -603,7 +603,7 @@ pub async fn handoff(
     (StatusCode::OK, Json(body)).into_response()
 }
 
-// ── Server-token middleware ───────────────────────────────────────────────────
+//  Server-token middleware
 
 /// Axum middleware that enforces `TBR_HANDSHAKE` on every endpoint.
 ///
