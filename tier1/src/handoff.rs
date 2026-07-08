@@ -1,10 +1,10 @@
 //! Higher-tier handoff — the data bundle forwarded to tier-2/3 renderers.
 //!
 //! [`ThumbHandoff`] is the serialisable projection of the three portable
-//! sub-structs on [`ThumbCook`] that travel between tiers.  It is built by
-//! [`ThumbCook::to_handoff`] on the sending side and consumed by
-//! `ThumbCook::from_handoff` on the receiving tier to reconstruct the cook
-//! state at the render entry point.
+//! sub-structs on [`crate::cook::ThumbCook`] that travel between tiers.  It is
+//! built by [`crate::cook::ThumbCook::take_handoff`] on the sending side and
+//! consumed by [`crate::cook::ThumbCook::from_handoff`] on the receiving tier
+//! to reconstruct the cook state at the render entry point.
 //!
 //! What travels and why:
 //! - [`InputSpec`]      — original caller inputs; receiver needs url/etag.
@@ -14,8 +14,9 @@
 //!
 //! What does NOT travel:
 //! - `runtime`       — each tier constructs its own.
-//! - `http_buf`      — live resource; moved via [`ThumbCook::http_take_reader`]
-//!                     on the in-process path, reconnected fresh on the
+//! - `http_buf`      — live resource; moved via
+//!                     [`crate::cook::ThumbCook::http_take_reader`] on the
+//!                     in-process path, reconnected fresh on the
 //!                     out-of-process (serialised) path.
 //! - `render_image`  — not yet populated at handoff time.
 //! - `tel_*`         — per-tier; each tier tracks its own timing.
@@ -23,7 +24,8 @@
 //!
 //! # Custom handoff implementations
 //!
-//! [`post_handoff`] checks [`HANDOFF_IMPL`] first.  Host crates (e.g. a
+//! [`post_handoff`] checks the internal `HANDOFF_IMPL` hook first.  Host
+//! crates (e.g. a
 //! Cloudflare Workers crate) call [`register_handoff_fn`] at startup to inject
 //! a transport that fits their runtime (service bindings, `wasm_bindgen::Fetch`,
 //! etc.).  If nothing is registered the function falls back to the native
@@ -103,7 +105,7 @@ pub fn register_handoff_fn(f: Box<HandoffFn>) {
 /// (e.g. `x-tbr-handshake`, `Authorization`, custom auth keys).
 ///
 /// Dispatch priority:
-/// 1. [`HANDOFF_IMPL`] — injected fn registered at startup (e.g. Workers).
+/// 1. `HANDOFF_IMPL` — injected fn registered at startup (e.g. Workers).
 /// 2. `native_post_handoff` — reqwest implementation for `feature = "native"`.
 /// 3. Error — non-native build with no registered implementation.
 pub async fn post_handoff(

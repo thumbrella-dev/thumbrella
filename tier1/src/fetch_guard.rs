@@ -82,7 +82,7 @@ impl UrlFailureCache {
 ///
 /// Keyed by `scheme://host[:port]`. TTL is variable — taken from the upstream
 /// `Retry-After` header (integer seconds), falling back to
-/// [`ORIGIN_BACKOFF_DEFAULT_SECS`]. Value: the HTTP status code that triggered
+/// `Runtime::backoff_default`. Value: the HTTP status code that triggered
 /// the back-off.
 #[cfg(feature = "native")]
 #[derive(Clone)]
@@ -131,7 +131,7 @@ impl OriginBackoffCache {
     /// Record an origin back-off.
     ///
     /// `ttl_secs` comes from the upstream `Retry-After` header; pass
-    /// [`ORIGIN_BACKOFF_DEFAULT_SECS`] when the header is absent.
+    /// `runtime.backoff_default` when the header is absent.
     pub async fn record(&self, origin: String, status: u16, ttl_secs: u64) {
         let exp = Instant::now() + Duration::from_secs(ttl_secs);
         #[cfg(feature = "native")]

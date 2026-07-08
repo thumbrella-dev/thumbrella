@@ -602,7 +602,7 @@ pub async fn handoff(
 /// `x-tbr-handshake` header or receive a 401 response.
 ///
 /// Apply as a layer in `run_server`:
-/// ```ignore
+/// ```text
 /// let app = Router::new()
 ///     .route(…)
 ///     .layer(axum::middleware::from_fn_with_state(

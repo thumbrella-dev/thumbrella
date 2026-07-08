@@ -192,7 +192,8 @@ impl ScratchArena {
     /// Drain a reader to a file in the arena and return its path.
     ///
     /// Reads the entire reader into a buffer first (to check size against the
-    /// limit), then writes to disk.  For large files, prefer [`stage_url`].
+    /// limit), then writes to disk.  For large files, prefer
+    /// [`ScratchArena::stage_url`].
     pub fn stage_reader(
         &self,
         reader: &mut dyn std::io::Read,

@@ -3,8 +3,8 @@
 //! # Design
 //!
 //! libav performs all I/O through a caller-supplied [`AVIOContext`].  The
-//! two C callbacks (`avio_read_cb`, `avio_seek_cb`) delegate to a
-//! [`ReaderState`] that holds a type-erased `Box<dyn Read + Seek + Send>`.
+//! two C callbacks (`avio_read_cb`, `avio_seek_cb`) delegate to a private
+//! `ReaderState` that holds a type-erased `Box<dyn Read + Seek + Send>`.
 //!
 //! Callers can supply:
 //!

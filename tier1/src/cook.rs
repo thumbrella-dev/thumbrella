@@ -34,9 +34,10 @@
 //!
 //! # Tier handoff
 //!
-//! [`ThumbCook::to_handoff`] projects the three portable sub-structs
-//! ([`InputSpec`], [`MediaInfo`], [`SourceIdentity`]) into a [`ThumbHandoff`]
-//! for serialisation and forwarding to a higher-tier renderer.
+//! [`ThumbCook::take_handoff`](crate::cook::ThumbCook::take_handoff) projects
+//! the three portable sub-structs ([`InputSpec`], [`MediaInfo`],
+//! [`SourceIdentity`]) into a [`crate::handoff::ThumbHandoff`] for
+//! serialisation and forwarding to a higher-tier renderer.
 //! [`ThumbCook::from_handoff`] reconstructs the cook on the receiving tier,
 //! populating those same fields and setting `status = Processing` so the
 //! pipeline enters at the render step.
@@ -157,7 +158,8 @@ pub struct Runtime {
     pub handshake: Option<String>,
     /// Allow `file://` URLs and bare absolute paths in HTTP endpoint requests.
     ///
-    /// Set from [`AppConfig::allow_local`] (`TBR_ALLOW_LOCAL`).  Propagated
+    /// Set from [`crate::config::AppConfig::allow_local`] (`TBR_ALLOW_LOCAL`).
+    /// Propagated
     /// to each [`InputSpec`] by the route handlers.  The second-line guard
     /// in `pipeline::connect` also checks `InputSpec::allow_local` directly.
     pub allow_local: bool,
@@ -715,7 +717,8 @@ impl<S: HttpStream> ThumbCook<S> {
         }
     }
 
-    /// Close the HTTP connection and project into a [`ThumbHandoff`] for
+    /// Close the HTTP connection and project into a
+    /// [`crate::handoff::ThumbHandoff`] for
     /// forwarding to a higher-tier renderer over an external transport.
     ///
     /// Closing and serialising are combined into a single step so it is

@@ -2,7 +2,7 @@
 //!
 //! Each step receives `&mut ThumbCook<S>` and mutates `cook.response` and
 //! `cook.trace` in place.  Steps are called in sequence from
-//! [`ThumbCook::cook`](crate::cook::ThumbCook::cook).
+//! [`crate::cook::ThumbCook::run`].
 //!
 //! # Processing steps
 //!
