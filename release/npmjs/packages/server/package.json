@@ -1,0 +1,34 @@
+{
+  "name": "@thumbrella/server",
+  "version": "0.5.1-prerelease.2",
+  "description": "Thumbrella server launcher package that installs a platform-specific binary.",
+  "license": "Apache-2.0",
+  "homepage": "https://thumbrella.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thumbrella-dev/thumbrella.git"
+  },
+  "bugs": {
+    "url": "https://github.com/thumbrella-dev/thumbrella/issues"
+  },
+  "bin": {
+    "thumbrella": "./bin/thumbrella.js"
+  },
+  "files": [
+    "bin",
+    "README.md"
+  ],
+  "keywords": [
+    "thumbnail",
+    "media",
+    "server",
+    "thumbrella"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "@thumbrella/server-linux-x64-gnu": "0.5.1-prerelease.2",
+    "@thumbrella/server-win32-x64-msvc": "0.5.1-prerelease.2"
+  }
+}

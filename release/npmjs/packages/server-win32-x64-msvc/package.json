@@ -1,0 +1,24 @@
+{
+  "name": "@thumbrella/server-win32-x64-msvc",
+  "version": "0.5.1-prerelease.2",
+  "description": "Thumbrella server binary for win32-x64-msvc.",
+  "license": "Apache-2.0",
+  "homepage": "https://thumbrella.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thumbrella-dev/thumbrella.git"
+  },
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/thumbrella.exe",
+    "README.md"
+  ],
+  "bin": {
+    "thumbrella": "./bin/thumbrella.exe"
+  }
+}

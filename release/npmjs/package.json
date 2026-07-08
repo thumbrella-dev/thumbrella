@@ -1,0 +1,15 @@
+{
+  "name": "thumbrella-npm-release-workspace",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Local workspace for building and validating Thumbrella npm release packages.",
+  "scripts": {
+    "readme:sync": "bash ./scripts/sync-readme.sh",
+    "stage:from-local": "bash ./scripts/stage-binaries.sh",
+    "stage:from-release": "bash ./scripts/stage-from-release.sh",
+    "pack:server": "cd ./packages/server && npm pack --dry-run",
+    "pack:linux": "cd ./packages/server-linux-x64-gnu && npm pack --dry-run",
+    "pack:windows": "cd ./packages/server-win32-x64-msvc && npm pack --dry-run",
+    "pack:all": "npm run pack:linux && npm run pack:windows && npm run pack:server"
+  }
+}
