@@ -1151,6 +1151,7 @@ fn run_f3d_geometry_handler(reader: &mut dyn tier1::ReadSeek, ext: &str) -> Resu
         c
     } else {
         let mut c = Command::new("xvfb-run");
+        #[allow(clippy::suspicious_command_arg_space)]
         c.arg("-a")
             .arg("-s")
             .arg("-screen 0 1600x1200x24")
@@ -1310,17 +1311,6 @@ fn should_apply_geometry_tonemap(ext: &str) -> bool {
     matches!(ext, "stl" | "obj")
 }
 
-/// Strip problematic content from a GLB file's JSON chunk.
-///
-/// VTK 9.1's GLTF importer crashes on `KHR_texture_transform` and
-/// fails to load models with embedded texture images (tries to read
-/// them as HDR).  We strip images, textures, materials, samplers and
-/// Crop transparent rows and columns from the edges of an RGBA image,
-/// leaving a small transparent border for visual breathing room.
-///
-/// F3D renders with `--no-background` produce a transparent surround.
-/// Cropping it away gives the downstream deliver step a tight bounding
-/// box before it resizes to the canonical thumbnail dimensions.
 
 // ── Linear → sRGB helpers (shared by ffmpeg_cli and oiiotool paths) ──────────
 

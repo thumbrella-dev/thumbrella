@@ -88,7 +88,7 @@ fn log_result(result: &crate::ThumbResult, duration_ms: u64) {
     let media = result.media.as_ref();
     // Use the remote HTTP status when available (reflects what the source
     // server returned), falling back to our result-status mapping.
-    let status_code = result.http_status.unwrap_or_else(|| match result.status {
+    let status_code = result.http_status.unwrap_or(match result.status {
         crate::result::ResultStatus::Success => 200,
         crate::result::ResultStatus::Failed => 500,
         crate::result::ResultStatus::Overloaded => 503,
@@ -337,15 +337,15 @@ pub async fn thumb(
         &url,
         200,
         duration_ms,
-        media.and_then(|m| Some(kind_str(m.kind))),
-        media.and_then(|m| Some(m.extension.as_str())),
+        media.map(|m| kind_str(m.kind)),
+        media.map(|m| m.extension.as_str()),
         result.source.as_ref().map(source_label),
         result.message.as_deref(),
         ip.as_deref(),
     );
 
     let thumb = result.media.as_ref().map(|m| &m.thumbnail);
-    if thumb.map_or(true, |t| t.is_empty()) {
+    if thumb.is_none_or(|t| t.is_empty()) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": result.message.unwrap_or_default() })),
@@ -494,14 +494,12 @@ fn normalize_url(url: String, allow_local: bool) -> Result<String, &'static str>
         }
 
         // Check for localhost / private-network hosts.
-        if !allow_local {
-            if let Ok(parsed) = url::Url::parse(&url) {
-                if is_private_host(parsed.host_str()) {
+        if !allow_local
+            && let Ok(parsed) = url::Url::parse(&url)
+                && is_private_host(parsed.host_str()) {
                     ux::warn_localhost_denied();
                     return Err("localhost and private-network URLs are not permitted");
                 }
-            }
-        }
 
         Ok(url)
     } else if allow_local {
@@ -588,19 +586,18 @@ pub async fn handoff(
         &url,
         if result.status == crate::result::ResultStatus::Success { 200 } else { 500 },
         duration_ms,
-        media.and_then(|m| Some(kind_str(m.kind))),
-        media.and_then(|m| Some(m.extension.as_str())),
+        media.map(|m| kind_str(m.kind)),
+        media.map(|m| m.extension.as_str()),
         result.source.as_ref().map(source_label),
         result.message.as_deref(),
         ip.as_deref(),
     );
 
     // Save bandwidth on tier-to-tier responses: send placeholder token only.
-    if result.media.as_ref().map_or(false, |m| !m.placeholder.is_empty()) {
-        if let Some(ref mut media) = result.media {
+    if result.media.as_ref().is_some_and(|m| !m.placeholder.is_empty())
+        && let Some(ref mut media) = result.media {
             media.thumbnail.clear();
         }
-    }
 
     let body = HandoffResponse { result, trace };
     (StatusCode::OK, Json(body)).into_response()

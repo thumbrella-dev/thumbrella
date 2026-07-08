@@ -339,7 +339,7 @@ impl CacheHints {
     /// Freshness is determined solely from `expires_at`.  When `expires_at` is
     /// `None` the resource has no explicit freshness window and is always stale.
     pub fn is_fresh(&self) -> bool {
-        self.expires_at.map_or(false, |exp| unix_now_secs() < exp)
+        self.expires_at.is_some_and(|exp| unix_now_secs() < exp)
     }
 
     /// Returns `true` if this resource must NOT be stored in any cache.
@@ -364,7 +364,7 @@ impl CacheHints {
     /// unchanged if it is already further out.
     pub fn with_min_expiry(mut self, secs: u64) -> Self {
         let floor = unix_now_secs() + secs;
-        if self.expires_at.map_or(true, |e| e < floor) {
+        if self.expires_at.is_none_or(|e| e < floor) {
             self.expires_at = Some(floor);
         }
         self

@@ -26,7 +26,7 @@ pub struct MemoryCacheBackend {
 impl MemoryCacheBackend {
     pub fn with_max_bytes(max_bytes: u64) -> Self {
         let max_bytes = max_bytes.max(1024 * 1024);
-        let cap_hint = (max_bytes / 512).min(100_000) as u64;
+        let cap_hint = (max_bytes / 512).min(100_000);
         let cache = moka::sync::Cache::builder()
             .max_capacity(cap_hint.max(1))
             .weigher(|_key: &String, value: &String| -> u32 {

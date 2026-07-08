@@ -394,7 +394,7 @@ fn extract_raw_preview(reader: Box<dyn ReadSeek + Send>) -> Result<RenderOutput,
         let Some((jpeg_off, jpeg_len)) = raw_ifd_jpeg_span(&sub_buf[..n], little) else {
             continue;
         };
-        if jpeg_len < 4 || jpeg_len > 10_000_000 {
+        if !(4..=10_000_000).contains(&jpeg_len) {
             continue;
         }
         if best.is_none_or(|(_, bl)| jpeg_len > bl) {
@@ -495,11 +495,10 @@ fn raw_subifd_offsets(bytes: &[u8], little: bool) -> Vec<u64> {
             }
         } else {
             for j in 0..fc.min(32) {
-                if let Some(off) = raw_u32(bytes, v + j * 4, little) {
-                    if off as usize > bytes.len() {
+                if let Some(off) = raw_u32(bytes, v + j * 4, little)
+                    && off as usize > bytes.len() {
                         result.push(off as u64);
                     }
-                }
             }
         }
     }
@@ -959,21 +958,19 @@ fn exif_orientation(bytes: &[u8]) -> u8 {
             let seg_end = (pos + 2 + seg_len).min(bytes.len());
             if marker == 0xE1 {
                 let payload = &bytes[(pos + 4).min(seg_end)..seg_end];
-                if payload.len() >= 6 && &payload[..6] == b"Exif\x00\x00" {
-                    if let Some(v) = read_tiff_orientation(&payload[6..]) {
+                if payload.len() >= 6 && &payload[..6] == b"Exif\x00\x00"
+                    && let Some(v) = read_tiff_orientation(&payload[6..]) {
                         return v;
                     }
-                }
             }
             pos = pos + 2 + seg_len;
         }
     }
     // TIFF: orientation is directly in IFD0.
-    if bytes.len() >= 8 && (bytes.starts_with(b"II") || bytes.starts_with(b"MM")) {
-        if let Some(v) = read_tiff_orientation(bytes) {
+    if bytes.len() >= 8 && (bytes.starts_with(b"II") || bytes.starts_with(b"MM"))
+        && let Some(v) = read_tiff_orientation(bytes) {
             return v;
         }
-    }
     1
 }
 

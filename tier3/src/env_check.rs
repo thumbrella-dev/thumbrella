@@ -448,13 +448,13 @@ fn probe_python_usd(report: &mut EnvReport) {
         .stderr(std::process::Stdio::piped())
         .output()
         .ok()
-        .and_then(|o| {
+        .map(|o| {
             let s = String::from_utf8_lossy(&o.stdout);
             let s = s.trim();
             if s.is_empty() {
-                Some(String::from_utf8_lossy(&o.stderr).trim().to_string())
+                String::from_utf8_lossy(&o.stderr).trim().to_string()
             } else {
-                Some(s.to_string())
+                s.to_string()
             }
         })
         .unwrap_or_else(|| "unknown version".into());

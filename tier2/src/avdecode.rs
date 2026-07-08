@@ -468,10 +468,10 @@ unsafe fn decode_inner(
         return None;
     }
     (**fmt_ctx).pb = *avio_ctx;
-    (**fmt_ctx).flags |= AVFMT_FLAG_CUSTOM_IO as i32;
+    (**fmt_ctx).flags |= AVFMT_FLAG_CUSTOM_IO;
     // Prevent MKV/WebM from reading the end-of-file Cues index.
     // We only need the first keyframe near the seek point.
-    (**fmt_ctx).flags |= AVFMT_FLAG_NOFILLIN as i32;
+    (**fmt_ctx).flags |= AVFMT_FLAG_NOFILLIN;
 
     // avformat_open_input frees *fmt_ctx on failure; null it to avoid
     // a double-free in the caller's cleanup.
@@ -644,27 +644,24 @@ unsafe fn decode_inner(
         }
 
         while av_read_frame(*fmt_ctx, *packet) >= 0 {
-            if (**packet).stream_index == stream_idx {
-                if avcodec_send_packet(*codec_ctx, *packet) >= 0
+            if (**packet).stream_index == stream_idx
+                && avcodec_send_packet(*codec_ctx, *packet) >= 0
                     && avcodec_receive_frame(*codec_ctx, *frame) >= 0
                 {
                     decoded = true;
                     av_packet_unref(*packet);
                     break;
                 }
-            }
             av_packet_unref(*packet);
         }
 
         // Flush the decoder - some codecs buffer the frame and only emit it
         // when EOF is signalled by a NULL packet.
-        if !decoded {
-            if avcodec_send_packet(*codec_ctx, ptr::null_mut()) >= 0 {
-                if avcodec_receive_frame(*codec_ctx, *frame) >= 0 {
+        if !decoded
+            && avcodec_send_packet(*codec_ctx, ptr::null_mut()) >= 0
+                && avcodec_receive_frame(*codec_ctx, *frame) >= 0 {
                     decoded = true;
                 }
-            }
-        }
 
         if decoded {
             break;
@@ -759,7 +756,7 @@ unsafe fn decode_inner(
         (**frame).linesize.as_ptr(),
         0,
         frame_h,
-        dst_data.as_ptr() as *const *mut u8,
+        dst_data.as_ptr() /*as *const *mut u8*/,
         dst_linesize.as_ptr() as *const c_int,
     );
 

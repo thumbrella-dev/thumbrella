@@ -50,10 +50,7 @@ const HEADER_SCAN: usize = 4 * 1024;
 ///
 /// Tier 1 default is 128 KiB; tier 2 uses 2 MiB to cover larger documents.
 /// The actual value at runtime comes from `cook.runtime.shortcut_limits.zip_tail_size`.
-// ZIP_TAIL_SIZE is now runtime-configurable via
-// cook.runtime.shortcut_limits.zip_tail_size.
-// See spec::ShortcutLimits for tier-specific values.
-
+///
 /// Header bytes for the camera-raw shortcut.
 ///
 /// TIFF-based raw formats (DNG, CR2, NEF, …) embed a full JPEG preview inside
@@ -340,11 +337,10 @@ async fn try_raw_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
                     let Some((_, _, jpeg_off, jpeg_len)) = parse_tiff_ifd(&sub_data, 0, little) else {
                         continue;
                     };
-                    if let (Some(o), Some(l)) = (jpeg_off, jpeg_len) {
-                        if l >= 4 && best.is_none_or(|(_, bl)| l > bl) {
+                    if let (Some(o), Some(l)) = (jpeg_off, jpeg_len)
+                        && l >= 4 && best.is_none_or(|(_, bl)| l > bl) {
                             best = Some((o as u64, l));
                         }
-                    }
                 }
                 best
             } else {
@@ -792,9 +788,9 @@ fn parse_tiff_exif_thumbnail(tiff: &[u8], tiff_file_offset: u64) -> Option<JpegE
     // authoritative JPEG pixel counts, excluding MCU alignment padding.
     let mut px_width: Option<u32> = None;
     let mut px_height: Option<u32> = None;
-    if let Some(exif_off) = exif_ifd_off {
-        if exif_off + 2 <= tiff.len() {
-            if let Some(n) = read_u16(tiff, exif_off, little) {
+    if let Some(exif_off) = exif_ifd_off
+        && exif_off + 2 <= tiff.len()
+            && let Some(n) = read_u16(tiff, exif_off, little) {
                 for i in 0..n as usize {
                     let entry = exif_off + 2 + i * 12;
                     if entry + 12 > tiff.len() {
@@ -809,8 +805,6 @@ fn parse_tiff_exif_thumbnail(tiff: &[u8], tiff_file_offset: u64) -> Option<JpegE
                     }
                 }
             }
-        }
-    }
 
     let source_dims = match (px_width.or(ifd0_width), px_height.or(ifd0_height)) {
         (Some(w), Some(h)) if w > 0 && h > 0 => Some((w, h)),
@@ -1136,15 +1130,15 @@ fn find_tiff_embedded_jpeg_span(bytes: &[u8]) -> Option<(usize, usize)> {
             }
         }
 
-        if let (Some(o), Some(l)) = (joff, jlen) {
-            if l >= 4 && best.is_none_or(|(_, bl)| l > bl) {
+        if let (Some(o), Some(l)) = (joff, jlen)
+            && l >= 4 && best.is_none_or(|(_, bl)| l > bl) {
                 best = Some((o, l));
             }
-        }
     }
     best
 }
 
+#[allow(clippy::type_complexity)]
 fn parse_tiff_ifd(
     bytes: &[u8],
     ifd_off: usize,
@@ -1213,8 +1207,8 @@ fn parse_tiff_ifd(
     }
 
     // JPEG-compressed IFDs may use strip/tile layout instead of JPEGInterchangeFormat.
-    if jpeg_off.is_none() || jpeg_len.is_none() {
-        if matches!(compression, Some(6 | 7)) {
+    if (jpeg_off.is_none() || jpeg_len.is_none())
+        && matches!(compression, Some(6 | 7)) {
             if let (Some(o), Some(l)) = (strip_off, strip_cnt) {
                 jpeg_off = Some(o);
                 jpeg_len = Some(l);
@@ -1223,7 +1217,6 @@ fn parse_tiff_ifd(
                 jpeg_len = Some(l);
             }
         }
-    }
 
     let next_ifd = read_u32(bytes, next_ptr_off, little)? as usize;
     Some((next_ifd, sub_ifds, jpeg_off, jpeg_len))
@@ -1510,11 +1503,7 @@ async fn try_audio_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     }
 
     // ── Scan ID3v2 frames for APIC cover art ──────────────────────────────
-    let image_bytes = id3.and_then(|h| {
-        let result = find_id3_apic(&tag_bytes, h.version_major);
-        if result.is_none() {}
-        result
-    });
+    let image_bytes = id3.and_then(|h| find_id3_apic(&tag_bytes, h.version_major));
 
     let Some(image_bytes) = image_bytes else {
         // No cover art, but we still have audio metadata.
@@ -1589,7 +1578,7 @@ fn parse_id3_header(bytes: &[u8]) -> Option<Id3Header> {
 
 /// Decode a 4-byte synchsafe integer (each byte uses only 7 bits, MSB is 0).
 fn synchsafe_u32(bytes: &[u8]) -> u32 {
-    let b0 = bytes.get(0).copied().unwrap_or(0) & 0x7F;
+    let b0 = bytes.first().copied().unwrap_or(0) & 0x7F;
     let b1 = bytes.get(1).copied().unwrap_or(0) & 0x7F;
     let b2 = bytes.get(2).copied().unwrap_or(0) & 0x7F;
     let b3 = bytes.get(3).copied().unwrap_or(0) & 0x7F;
@@ -1598,7 +1587,7 @@ fn synchsafe_u32(bytes: &[u8]) -> u32 {
 
 /// Decode a regular big-endian u32 from 4 bytes.
 fn be_u32(bytes: &[u8]) -> u32 {
-    let b0 = bytes.get(0).copied().unwrap_or(0) as u32;
+    let b0 = bytes.first().copied().unwrap_or(0) as u32;
     let b1 = bytes.get(1).copied().unwrap_or(0) as u32;
     let b2 = bytes.get(2).copied().unwrap_or(0) as u32;
     let b3 = bytes.get(3).copied().unwrap_or(0) as u32;
@@ -1662,9 +1651,7 @@ fn find_id3_apic(bytes: &[u8], version_major: u8) -> Option<Vec<u8>> {
         if frame_id == b"APIC" {
             let data_end = data_start.checked_add(frame_size)?.min(bytes.len());
             let apic_data = &bytes[data_start..data_end];
-            let result = extract_apic_image(apic_data);
-            if result.is_none() {}
-            return result;
+            return extract_apic_image(apic_data);
         }
 
         // Advance to next frame.
@@ -1850,8 +1837,8 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
         // buffer is left intact at cursor 0 so tier2 can call take_reader().
         let data = cook.http_read_at(0, file_size as usize).await.unwrap_or_default();
 
-        if !data.is_empty() {
-            if let Ok(img) = image::load_from_memory(&data) {
+        if !data.is_empty()
+            && let Ok(img) = image::load_from_memory(&data) {
                 let (src_w, src_h) = (img.width(), img.height());
                 let color_type = img.color();
                 let dl_bytes = cook.http_bytes_fetched();
@@ -1872,7 +1859,6 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
             // load_from_memory failed — buffer is still intact (read_at
             // restored the cursor; streaming mode was never entered).
             // Fall through so tier2 can handle the format via libav.
-        }
     }
 
     // ── Progressive JPEG (falls through from EXIF and small-image checks) ─
@@ -1946,11 +1932,10 @@ fn parse_first_mp3_frame(bytes: &[u8]) -> Option<Mp3FrameInfo> {
     // Search for a sync word within the first 2 KiB.
     let limit = bytes.len().min(2048);
     for i in 0..limit.saturating_sub(1) {
-        if bytes[i] == 0xFF && (bytes[i + 1] & 0xE0) == 0xE0 {
-            if let Some(info) = parse_mp3_frame_header(&bytes[i..]) {
+        if bytes[i] == 0xFF && (bytes[i + 1] & 0xE0) == 0xE0
+            && let Some(info) = parse_mp3_frame_header(&bytes[i..]) {
                 return Some(info);
             }
-        }
     }
     None
 }

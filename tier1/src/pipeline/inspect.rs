@@ -51,13 +51,12 @@ pub async fn inspect<S: HttpStream>(cook: &mut ThumbCook<S>) {
     }
 
     // Audio lossless: inferred from extension.
-    if kind == FileKind::Audio {
-        if let Some(props) = cook.media.properties.as_mut() {
+    if kind == FileKind::Audio
+        && let Some(props) = cook.media.properties.as_mut() {
             let obj = props.as_object_mut().expect("properties is always a JSON object");
             let ext = cook.media.extension.as_deref().unwrap_or("");
             obj.insert("lossless".into(), (is_lossless_audio_ext(ext) as i32).into());
         }
-    }
 
     // Route determines which tier should process this — informational only at
     // this point; the cook will escalate if needed during shortcut/render.
@@ -87,35 +86,31 @@ fn sniff(bytes: &[u8], url: &str, content_type: Option<&str>) -> (FileKind, Stri
 
         // infer classifies SVG as text/xml (MatcherType::Text); sniff the
         // byte prefix for an <svg root element, falling back to URL extension.
-        if infer_kind == FileKind::Text {
-            if sniff_svg(bytes) || url_ext.as_deref() == Some("svg") {
+        if infer_kind == FileKind::Text
+            && (sniff_svg(bytes) || url_ext.as_deref() == Some("svg")) {
                 return (FileKind::Vector, "image/svg+xml".to_string(), "svg".to_string());
             }
-        }
 
         // When magic bytes identify a generic container, prefer a more
         // specific kind from the URL extension (e.g. USDZ, DOCX are ZIP).
-        if matches!(infer_kind, FileKind::Archive | FileKind::Binary | FileKind::Unknown) {
-            if let Some(ext) = &url_ext {
+        if matches!(infer_kind, FileKind::Archive | FileKind::Binary | FileKind::Unknown)
+            && let Some(ext) = &url_ext {
                 let url_kind = ext_to_kind(ext);
                 if !matches!(url_kind, FileKind::Archive | FileKind::Binary | FileKind::Unknown) {
                     let mime = ext_to_mime(ext).to_string();
                     return (url_kind, mime, ext.clone());
                 }
             }
-        }
 
         // When magic bytes identify plain TIFF but the URL names a known
         // camera-raw format, prefer the raw extension.  This lets the
         // shortcut step choose the wider RAW_HEADER_SCAN and report the
         // correct format in traces ("shortcut/raw" vs "shortcut/exif").
-        if infer_ext == "tiff" {
-            if let Some(ext) = &url_ext {
-                if is_raw_tiff_extension(ext) {
+        if infer_ext == "tiff"
+            && let Some(ext) = &url_ext
+                && is_raw_tiff_extension(ext) {
                     return (FileKind::Image, ext_to_mime(ext).to_string(), ext.clone());
                 }
-            }
-        }
 
         return (infer_kind, t.mime_type().to_string(), infer_ext);
     }
@@ -153,8 +148,8 @@ fn sniff(bytes: &[u8], url: &str, content_type: Option<&str>) -> (FileKind, Stri
 /// untouched if it cannot determine a value.  Prefer no entry over a wrong one.
 pub(super) fn inspect_image_properties(bytes: &[u8], props: &mut serde_json::Value) {
     // JPEG: parse marker structure ourselves so we skip large APP segments.
-    if bytes.len() >= 4 && bytes[0] == 0xFF && bytes[1] == 0xD8 {
-        if let Some((w, h, bpp)) = jpeg_sof_dimensions(bytes) {
+    if bytes.len() >= 4 && bytes[0] == 0xFF && bytes[1] == 0xD8
+        && let Some((w, h, bpp)) = jpeg_sof_dimensions(bytes) {
             let obj = props.as_object_mut().expect("properties is always a JSON object");
             obj.insert("width".into(), w.into());
             obj.insert("height".into(), h.into());
@@ -164,7 +159,6 @@ pub(super) fn inspect_image_properties(bytes: &[u8], props: &mut serde_json::Val
             return;
         }
         // SOF unreachable — fall through to image crate as a fallback.
-    }
 
     let cursor = Cursor::new(bytes);
     let Ok(reader) = ImageReader::new(cursor).with_guessed_format() else {
@@ -314,9 +308,9 @@ fn sniff_svg(bytes: &[u8]) -> bool {
     // on longer element names like `<svgfoo`.
     bytes.windows(5).any(|w| {
         w[0] == b'<'
-            && w[1].to_ascii_lowercase() == b's'
-            && w[2].to_ascii_lowercase() == b'v'
-            && w[3].to_ascii_lowercase() == b'g'
+            && w[1].eq_ignore_ascii_case(&b's')
+            && w[2].eq_ignore_ascii_case(&b'v')
+            && w[3].eq_ignore_ascii_case(&b'g')
             && matches!(w[4], b' ' | b'\t' | b'\n' | b'\r' | b'>' | b'/')
     })
 }

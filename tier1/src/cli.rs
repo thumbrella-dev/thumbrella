@@ -141,8 +141,8 @@ where
         let cfg = crate::config::AppConfig::from_env();
 
         // Fail fast on handshake values that look like auth tokens.
-        if let Some(ref hs) = cfg.handshake {
-            if crate::connect::looks_like_auth_token(hs) {
+        if let Some(ref hs) = cfg.handshake
+            && crate::connect::looks_like_auth_token(hs) {
                 ux.fatal(
                     "TBR_HANDSHAKE looks like an auth token — this is almost certainly a mistake",
                     "Auth tokens start with 'tbr_' and belong in the connect string or \
@@ -150,7 +150,6 @@ where
                      simple shared secret instead.",
                 );
             }
-        }
 
         let rt = crate::startup::startup(&cfg).await;
         Some(hook(rt).await)
@@ -257,11 +256,10 @@ async fn run_server(runtime: Arc<Runtime>) {
         if matches!(report.handshake_validation.status, crate::check::ValidationStatus::Error) {
             issues.push("handshake value looks like an auth token".into());
         }
-        if let Some(ref fc) = report.cache_file_check {
-            if !fc.writable {
+        if let Some(ref fc) = report.cache_file_check
+            && !fc.writable {
                 issues.push(format!("cache file path is not writable: {}", fc.path));
             }
-        }
 
         for issue in &issues {
             ux.print_startup_issue(issue);
@@ -384,17 +382,15 @@ async fn run_thumb(
                 // Serialise to Value so we can swap the base64 thumbnail
                 // for a short placeholder string.  (Replacing the Vec<u8>
                 // would get re-encoded as base64, so we do it post-serialise.)
-                let mut value = serde_json::to_value(&result).unwrap();
-                if let Some(media) = value.get_mut("media") {
-                    if let Some(thumb) = media.get("thumbnail").and_then(|v| v.as_str()) {
-                        if thumb.len() > 200 {
+                let mut value = serde_json::to_value(result).unwrap();
+                if let Some(media) = value.get_mut("media")
+                    && let Some(thumb) = media.get("thumbnail").and_then(|v| v.as_str())
+                        && thumb.len() > 200 {
                             media["thumbnail"] = serde_json::Value::String(format!(
                                 "<base64 jpeg data: {} bytes>",
                                 thumb.len()
                             ));
                         }
-                    }
-                }
                 let pretty = serde_json::to_string_pretty(&value).unwrap();
                 let ux = crate::ux::get();
                 println!("{}", ux.colorize_json(&pretty));
@@ -493,8 +489,8 @@ async fn run_check(json: bool, tier: u8) {
     // For cloud: cache backends, perform the async health check that
     // validate_dsn skipped.  This sends a dummy /cache/lookup to verify
     // the auth token and cloud endpoint.
-    if let Some(ref dsn) = cfg.cache_url {
-        if dsn.starts_with("cloud:") {
+    if let Some(ref dsn) = cfg.cache_url
+        && dsn.starts_with("cloud:") {
             let token = dsn.strip_prefix("cloud:").unwrap_or("");
             match crate::cache::cloud::ping_cloud_token(token).await {
                 Ok(()) => {
@@ -506,7 +502,6 @@ async fn run_check(json: bool, tier: u8) {
                 }
             }
         }
-    }
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report).unwrap());

@@ -185,7 +185,7 @@ impl ProcessBuffer {
             let src_ar = src_w as f32 / src_h as f32;
             let fill_scale = (target_w as f32 / src_w as f32).max(target_h as f32 / src_h as f32);
             let max_scale = fit_scale / (1.0 - fill_budget).max(f32::EPSILON);
-            let blend = if src_ar >= 1.0 && src_ar <= 1.3 {
+            let blend = if (1.0..=1.3).contains(&src_ar) {
                 fill_scale // near-square (1:1 – ~4:3): snap directly to full fill
             } else {
                 fill_scale.min(max_scale)
@@ -426,7 +426,7 @@ pub fn inject_exif_comment(jpeg: &[u8]) -> Vec<u8> {
 fn unpremultiply_rgba(img: &mut image::RgbaImage) {
     for pixel in img.pixels_mut() {
         let a = pixel[3] as u32;
-        if a > 0 {
+        if let Some(a) = (a > 0).then_some(a) {
             pixel[0] = ((pixel[0] as u32 * 255 + a / 2) / a).min(255) as u8;
             pixel[1] = ((pixel[1] as u32 * 255 + a / 2) / a).min(255) as u8;
             pixel[2] = ((pixel[2] as u32 * 255 + a / 2) / a).min(255) as u8;

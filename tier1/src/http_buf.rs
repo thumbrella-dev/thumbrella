@@ -334,11 +334,10 @@ impl<S: HttpStream> HttpBuffer<S> {
         if buf.is_empty() {
             return Ok(0);
         }
-        if let Some(end) = self.eof_override.or(self.content_length) {
-            if self.cursor >= end {
+        if let Some(end) = self.eof_override.or(self.content_length)
+            && self.cursor >= end {
                 return Ok(0);
             }
-        }
         if self.streaming_mode {
             self.read_streaming(buf).await
         } else {
@@ -781,8 +780,8 @@ impl HttpStream for ReqwestStream {
 /// (end is exclusive).  Falls back to `(0, file_len)` when absent or invalid.
 #[cfg(feature = "native")]
 fn parse_file_range(headers: &[(String, String)], file_len: u64) -> (u64, u64) {
-    if let Some((_, v)) = headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("range")) {
-        if let Some(range) = v.strip_prefix("bytes=") {
+    if let Some((_, v)) = headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("range"))
+        && let Some(range) = v.strip_prefix("bytes=") {
             let mut parts = range.splitn(2, '-');
             let start = parts.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
             let end = parts
@@ -792,7 +791,6 @@ fn parse_file_range(headers: &[(String, String)], file_len: u64) -> (u64, u64) {
                 .unwrap_or(file_len);
             return (start.min(file_len), end.min(file_len));
         }
-    }
     (0, file_len)
 }
 

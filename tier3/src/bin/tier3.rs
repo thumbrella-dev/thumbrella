@@ -138,7 +138,7 @@ fn register_tier3_check(env: &tier3::env_check::EnvReport) {
                                 .map(|d| d.contains("usd-core available"))
                                 .unwrap_or(false);
                             if f3d_ok && py_ok && usd_ok {
-                                ("available".into(), format!("f3d + python3/usd-core"))
+                                ("available".into(), "f3d + python3/usd-core".to_string())
                             } else {
                                 let mut missing = Vec::new();
                                 if !f3d_ok {
@@ -154,7 +154,7 @@ fn register_tier3_check(env: &tier3::env_check::EnvReport) {
                         } else {
                             let available = env.backends.get(h.name).map(|b| b.available).unwrap_or(false);
                             if available {
-                                ("available".into(), format!("{}", h.command))
+                                ("available".into(), h.command.to_string())
                             } else {
                                 let reason = env
                                     .backends

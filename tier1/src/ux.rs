@@ -232,11 +232,11 @@ impl Ux {
         }
 
         // ── Docs ──────────────────────────────────────────────────────────
-        lines.push(format!("  # docs: https://thumbrella.dev/docs/",));
+        lines.push("  # docs: https://thumbrella.dev/docs/".to_string());
 
         // ── Hints ─────────────────────────────────────────────────────────
-        if self.style.show_hints() {
-            if !tier2_configured && !tier3_configured && !crate::check::has_builtin_renderer() {
+        if self.style.show_hints()
+            && !tier2_configured && !tier3_configured && !crate::check::has_builtin_renderer() {
                 lines.push(format!(
                     "  # hint: {} {} {}",
                     "No higher tiers configured - only basic formats will render.",
@@ -244,7 +244,6 @@ impl Ux {
                     Colour::bold("TBR_TIER2=http://tier2:8000"),
                 ));
             }
-        }
 
         // ── Container hint ───────────────────────────────────────────────
         if in_container() {
@@ -326,6 +325,7 @@ impl Ux {
     }
 
     /// Log a single thumbnail result.  Call for each item in a batch.
+    #[allow(clippy::too_many_arguments)]
     pub fn log_thumb_result(
         &self,
         url: &str,
@@ -336,9 +336,9 @@ impl Ux {
         _source: Option<&str>,
         message: Option<&str>,
     ) {
-        let status_str = if status >= 200 && status < 300 {
+        let status_str = if (200..300).contains(&status) {
             Colour::green(&format!("{}", status))
-        } else if status >= 400 && status < 500 {
+        } else if (400..500).contains(&status) {
             Colour::yellow(&format!("{}", status))
         } else {
             Colour::red(&format!("{}", status))
@@ -367,6 +367,7 @@ impl Ux {
     }
 
     /// Log a single-thumb request (GET /thumb).
+    #[allow(clippy::too_many_arguments)]
     pub fn log_single_thumb(
         &self,
         method: &str,

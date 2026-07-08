@@ -39,11 +39,10 @@ pub async fn connect<S: HttpStream>(cook: &mut ThumbCook<S>) {
         .push(("User-Agent".to_string(), cook.runtime.user_agent.clone()));
 
     // Apply conditional request headers from caller's prior cache hints.
-    if let Some(ref hints) = cook.input.cache {
-        if let Some((name, value)) = hints.to_conditional() {
+    if let Some(ref hints) = cook.input.cache
+        && let Some((name, value)) = hints.to_conditional() {
             options.headers.push((name.to_string(), value.to_string()));
         }
-    }
 
     // Enforce the file:// restriction — second line of defence after routes.rs.
     if cook.input.url.starts_with("file://") && !cook.input.allow_local {
@@ -125,12 +124,11 @@ pub async fn connect<S: HttpStream>(cook: &mut ThumbCook<S>) {
     // If the server returned a 2xx HTML page (common for CDN error pages on
     // missing files), treat it as "not found" rather than trying to thumbnail
     // what looks like valid content.
-    if let Some(ct) = buf.headers.get("content-type") {
-        if ct.starts_with("text/html") {
+    if let Some(ct) = buf.headers.get("content-type")
+        && ct.starts_with("text/html") {
             cook.fail("source returned HTML (likely an error page, not media)");
             return;
         }
-    }
 
     cook.http_install(buf);
 }

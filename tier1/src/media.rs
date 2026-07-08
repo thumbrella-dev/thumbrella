@@ -49,6 +49,7 @@ use serde::{Deserialize, Serialize};
 /// ones conservatively.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum FileKind {
     /// Raster still pixel data.
     Image,
@@ -69,11 +70,7 @@ pub enum FileKind {
     /// Executable, font, or other binary not in the above categories.
     Binary,
     /// Could not be determined.
+    #[default]
     Unknown,
 }
 
-impl Default for FileKind {
-    fn default() -> Self {
-        Self::Unknown
-    }
-}

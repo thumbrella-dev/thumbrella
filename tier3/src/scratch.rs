@@ -94,8 +94,8 @@ impl ScratchArena {
         let content_length = response.content_length();
 
         // Check limit before downloading.
-        if self.max_bytes > 0 {
-            if let Some(cl) = content_length {
+        if self.max_bytes > 0
+            && let Some(cl) = content_length {
                 let current = self.current_bytes.load(Ordering::Relaxed);
                 if current + cl > self.max_bytes {
                     return Err(ArenaError::LimitExceeded {
@@ -105,7 +105,6 @@ impl ScratchArena {
                     });
                 }
             }
-        }
 
         // Build a collision-free file name.
         let stem = url

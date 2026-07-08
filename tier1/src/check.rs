@@ -372,7 +372,7 @@ pub fn collect(cfg: &crate::config::AppConfig) -> CheckReport {
     let (cache_config, cache_validation, cache_file_check) = match cfg.cache_url.as_ref() {
         Some(dsn) => {
             let (validation, file_check) = crate::cache::validate_dsn(dsn);
-            let summary = build_cache_summary(dsn, &cfg);
+            let summary = build_cache_summary(dsn, cfg);
             (Some(summary), validation, file_check)
         }
         None => {
@@ -621,8 +621,8 @@ fn detect_container_image() -> Option<String> {
                 pretty_name = Some(val.trim_matches('"').trim().to_string());
             }
         }
-        if let Some(name) = pretty_name {
-            if !name.is_empty() {
+        if let Some(name) = pretty_name
+            && !name.is_empty() {
                 let runtime = if dockerenv {
                     "docker"
                 } else if containerenv {
@@ -632,7 +632,6 @@ fn detect_container_image() -> Option<String> {
                 };
                 return Some(format!("{runtime} ({name})"));
             }
-        }
     }
 
     // 5. Generic fallback: we know it's a container but not which image.
@@ -655,11 +654,10 @@ impl CheckReport {
 
         // Title line.  Hide tier when it's 3 (the common case).
         let mut title = format!("Thumbrella  {}", self.version);
-        if let Some(t) = self.build_tier {
-            if t != 3 {
+        if let Some(t) = self.build_tier
+            && t != 3 {
                 title.push_str(&format!("  (tier {t})"));
             }
-        }
         if let Some(ref ci) = self.container_image {
             title.push_str(&format!("  container: {ci}"));
         }
@@ -765,12 +763,11 @@ fn print_dsn_var(name: &str, dsn: &Option<String>, validation: &Validation, file
         if !fc.writable {
             println!("  {} file {}: not writable", ux.red("error"), fc.path);
         }
-        if let Some(ref sv) = fc.sqlite_validation {
-            if matches!(sv.status, ValidationStatus::Error) {
+        if let Some(ref sv) = fc.sqlite_validation
+            && matches!(sv.status, ValidationStatus::Error) {
                 let msg = sv.message.as_deref().unwrap_or("schema check failed");
                 println!("  {}: {msg}", ux.red("error"));
             }
-        }
     }
 }
 

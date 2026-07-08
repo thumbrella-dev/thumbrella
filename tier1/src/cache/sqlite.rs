@@ -187,7 +187,7 @@ fn evict_oldest(conn: &Connection, max_bytes: u64) {
             )
              WHERE running_total <= {excess}
         )",
-        excess = (total as i64).saturating_sub(max_bytes as i64),
+        excess = total.saturating_sub(max_bytes as i64),
     ))
     .ok();
 }

@@ -150,21 +150,13 @@ mod frontend {
 /// An empty store (`CacheStore::none()`) is used for handoff cooks and when
 /// no cache is configured.
 #[derive(Clone)]
+#[derive(Default)]
 pub struct CacheStore {
     backend: Option<Arc<dyn CacheBackend>>,
     #[cfg(feature = "native")]
     frontend: Option<Arc<frontend::CacheFrontend>>,
 }
 
-impl Default for CacheStore {
-    fn default() -> Self {
-        Self {
-            backend: None,
-            #[cfg(feature = "native")]
-            frontend: None,
-        }
-    }
-}
 
 impl CacheStore {
     /// Construct a store with a durable backend and sticky frontend.
@@ -194,11 +186,10 @@ impl CacheStore {
     pub async fn check(&self, key: &str) -> Option<(ThumbResult, &'static str)> {
         // ── 1. Sticky cache (native only) ─────────────────────────────────
         #[cfg(feature = "native")]
-        if let Some(ref fe) = self.frontend {
-            if let Some(result) = fe.sticky_check(key) {
+        if let Some(ref fe) = self.frontend
+            && let Some(result) = fe.sticky_check(key) {
                 return Some((result, "sticky"));
             }
-        }
 
         // ── 2. Inflight coalescing (native only) ──────────────────────────
         #[cfg(feature = "native")]
@@ -227,9 +218,9 @@ impl CacheStore {
         }
 
         // ── 3. Check durable backend ──────────────────────────────────────
-        if let Some(ref backend) = self.backend {
-            if let Some(json) = backend.get(key).await {
-                if let Some(result) = serde_json::from_str(&json).ok() {
+        if let Some(ref backend) = self.backend
+            && let Some(json) = backend.get(key).await
+                && let Ok(result) = serde_json::from_str(&json) {
                     #[cfg(feature = "native")]
                     if let Some(ref fe) = self.frontend {
                         fe.sticky_store(key, &result);
@@ -237,16 +228,13 @@ impl CacheStore {
                     }
                     return Some((result, backend.name()));
                 }
-            }
-        }
 
         // Miss — cancel the inflight slot so it doesn't leak.
         #[cfg(feature = "native")]
-        if is_leader {
-            if let Some(ref fe) = self.frontend {
+        if is_leader
+            && let Some(ref fe) = self.frontend {
                 fe.cancel(key);
             }
-        }
 
         None
     }
@@ -271,7 +259,7 @@ impl CacheStore {
 
         // ── Durable backend ───────────────────────────────────────────────
         // Skip durable storage when the cache string is empty (uncacheable).
-        let uncacheable = result.media.as_ref().map_or(true, |m| m.cache.is_empty());
+        let uncacheable = result.media.as_ref().is_none_or(|m| m.cache.is_empty());
         if uncacheable {
             return;
         }

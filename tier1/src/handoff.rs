@@ -15,9 +15,8 @@
 //! What does NOT travel:
 //! - `runtime`       — each tier constructs its own.
 //! - `http_buf`      — live resource; moved via
-//!                     [`crate::cook::ThumbCook::http_take_reader`] on the
-//!                     in-process path, reconnected fresh on the
-//!                     out-of-process (serialised) path.
+//!   [`crate::cook::ThumbCook::http_take_reader`] on the in-process path,
+//!   reconnected fresh on the out-of-process (serialised) path.
 //! - `render_image`  — not yet populated at handoff time.
 //! - `tel_*`         — per-tier; each tier tracks its own timing.
 //! - `out_*`         — receiver populates fresh.
@@ -184,6 +183,12 @@ struct InflightSlot {
 /// multi-threaded native tokio and single-threaded Cloudflare Workers.
 #[derive(Clone)]
 pub struct HandoffInflight(Arc<parking_lot::Mutex<HashMap<String, InflightSlot>>>);
+
+impl Default for HandoffInflight {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl HandoffInflight {
     pub fn new() -> Self {
