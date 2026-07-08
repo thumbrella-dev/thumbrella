@@ -21,11 +21,11 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 # libloading: dlopen-based detection and dispatch for optional shared libraries
 # (e.g. libpdfium, libblender, …).  Each renderer backend is probed at startup;
 # only available libraries are registered in the dispatch table.
-libloading = "0.8"
+libloading = "0.9"
 
 # which: locate external command-line tools on $PATH (e.g. ffmpeg, inkscape,
 # blender).  Used for subprocess-based renderers.
-which = "7"
+which = "8"
 
 # tempfile: scratch arena for subprocess renderers.  Creates temporary
 # directories that are cleaned up on drop.
@@ -44,4 +44,4 @@ serde_json = "1"
 futures = "0.3"
 
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }

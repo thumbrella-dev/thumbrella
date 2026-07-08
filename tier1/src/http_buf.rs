@@ -831,7 +831,6 @@ fn build_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .read_timeout(std::time::Duration::from_secs(30))
-        .http2_adaptive_window(true)
         .tcp_nodelay(true)
         .pool_max_idle_per_host(8)
         .build()

@@ -26,7 +26,6 @@ native = [
     "dep:rusqlite",
     "dep:tokio",
     "dep:axum",
-    "dep:axum-extra",
     "dep:tower-http",
     "dep:reqwest",
     "dep:tracing-subscriber",
@@ -42,8 +41,8 @@ serde_json  = { version = "1", features = ["preserve_order"] }
 tracing     = "0.1"
 futures     = { version = "0.3", default-features = false, features = ["alloc"] }
 base64      = "0.22"
-sha2        = "0.10"
-infer       = "0.16"
+sha2        = "0.11"
+infer       = "0.19"
 mozjpeg-rs  = "0.9"
 kamadak-exif = "0.6"
 
@@ -57,10 +56,8 @@ image = { version = "0.25", default-features = false, features = [
 # for DCT-level power-of-two downscaling in the progressive JPEG shortcut path.
 jpeg-decoder = { version = "0.3", default-features = false }
 
-# ZIP for container formats (DOCX, ODT, …). miniz_oxide backend is pure Rust.
-zip   = { version = "2", default-features = false, features = ["deflate"] }
-# flate2 is already a transitive dep (pulled in by zip); listed directly here
-# so we can use DeflateDecoder for raw ZIP method-8 decompression.
+# flate2 — DeflateDecoder for raw ZIP method-8 decompression used by the
+# hand-rolled ZIP parser in pipeline/shortcut.rs.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 # Bytes — zero-copy buffer primitive.  WASM-compatible; used by the native
@@ -71,12 +68,11 @@ web-time = "1"
 parking_lot = "0.12"
 
 #  Native-only
-rusqlite        = { version = "0.32", features = ["bundled"],                optional = true }
+rusqlite        = { version = "0.40", features = ["bundled"],                optional = true }
 tokio           = { version = "1", features = ["full"],                      optional = true }
 axum            = { version = "0.8",                                         optional = true }
-axum-extra      = { version = "0.10", features = ["query"],                  optional = true }
-tower-http      = { version = "0.6", features = ["trace", "cors"],           optional = true }
-reqwest         = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "http2", "json"], optional = true }
+tower-http      = { version = "0.7", features = ["trace", "cors"],           optional = true }
+reqwest         = { version = "0.13", default-features = false, features = ["rustls", "stream", "h2", "json"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"],          optional = true }
 time            = { version = "0.3", features = ["formatting"],              optional = true }
 clap            = { version = "4", features = ["derive"],                    optional = true }

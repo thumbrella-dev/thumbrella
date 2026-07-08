@@ -129,7 +129,6 @@ async fn native_post_handoff(
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .read_timeout(std::time::Duration::from_secs(30))
-        .http2_adaptive_window(true)
         .tcp_nodelay(true)
         .build()
         .map_err(|e| format!("handoff client init failed: {e}"))?;
