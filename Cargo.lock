@@ -701,7 +701,7 @@ dependencies = [
 
 [[package]]
 name = "ffs-build"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "ffmpeg-next",
  "ffs-check",
@@ -710,7 +710,7 @@ dependencies = [
 
 [[package]]
 name = "ffs-check"
-version = "0.5.1"
+version = "0.5.2"
 
 [[package]]
 name = "find-msvc-tools"
@@ -1048,6 +1048,7 @@ dependencies = [
  "bytes",
  "futures-channel",
  "futures-core",
+ "h2",
  "http",
  "http-body",
  "httparse",
@@ -2731,11 +2732,11 @@ dependencies = [
 
 [[package]]
 name = "thumbrella"
-version = "0.5.1"
+version = "0.5.2"
 
 [[package]]
 name = "tier1"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "axum",
  "base64",
@@ -2767,7 +2768,7 @@ dependencies = [
 
 [[package]]
 name = "tier2"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "ffmpeg-next",
  "ffmpeg-sys-next",
@@ -2784,7 +2785,7 @@ dependencies = [
 
 [[package]]
 name = "tier3"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "futures",
  "image",

@@ -173,20 +173,20 @@ impl ProcessBuffer {
         } else {
             // Normal fit-within range (not clamped by min_fill_ratio).
             //
-            // Sources with AR between 1:1 (1.0) and ~4:3 (1.3) snap directly to
+            // Sources with AR between 1:1 (1.0) and ~3:2 (1.5) snap directly to
             // full fill — they are cropped to the canvas AR with no letterbox.
-            // 4:3 already snapped via the fill_budget gap check; this extends that
-            // behaviour down to square sources.
+            // This keeps near-4:3 and slightly wider images from getting razor-thin
+            // top/bottom bands that look accidental.
             //
-            // Wider sources (AR > 1.3, e.g. 7:5, 3:2, 16:9) use the fill budget:
+            // Wider sources (AR > 1.5, e.g. 7:5, 3:2, 16:9) use the fill budget:
             // scale up by at most 1/(1-fill_budget) × fit_scale, capped at
             // fill_scale.  Near-fill sources whose gap < fill_budget also snap to
             // full fill automatically; larger mismatches get a proportional blend.
             let src_ar = src_w as f32 / src_h as f32;
             let fill_scale = (target_w as f32 / src_w as f32).max(target_h as f32 / src_h as f32);
             let max_scale = fit_scale / (1.0 - fill_budget).max(f32::EPSILON);
-            let blend = if (1.0..=1.3).contains(&src_ar) {
-                fill_scale // near-square (1:1 – ~4:3): snap directly to full fill
+            let blend = if (1.0..=1.5).contains(&src_ar) {
+                fill_scale // near-square (1:1 – ~3:2): snap directly to full fill
             } else {
                 fill_scale.min(max_scale)
             };
@@ -480,5 +480,21 @@ fn composite_rgba_onto(rgba: &image::RgbaImage, dst: &mut image::RgbImage, ox: u
             dst_raw[di * 3 + 2] =
                 ((src[si * 4 + 2] as u32 * a + dst_raw[di * 3 + 2] as u32 * ia + 127) / 255) as u8;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProcessBuffer;
+    use image::{DynamicImage, RgbImage};
+
+    #[test]
+    fn near_three_halves_sources_fill_the_thumbnail_canvas() {
+        let img = RgbImage::new(799, 546);
+        let mut buf = ProcessBuffer::from_dynamic(DynamicImage::ImageRgb8(img));
+
+        buf.fit_to_target(250, 200, 0.6, 0.10, false);
+
+        assert_eq!(buf.dimensions(), (250, 200));
     }
 }
