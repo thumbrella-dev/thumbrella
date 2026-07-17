@@ -1,6 +1,6 @@
 {
   "name": "@thumbrella/server-linux-x64-gnu",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "Thumbrella server binary for linux-x64-gnu.",
   "license": "Apache-2.0",
   "homepage": "https://thumbrella.dev",
@@ -22,6 +22,6 @@
     "README.md"
   ],
   "bin": {
-    "thumbrella": "./bin/thumbrella"
+    "thumbrella": "bin/thumbrella"
   }
 }

@@ -1,5 +1,10 @@
 update package versions in each packages/*/package.json
-npm run pack:all
+
+npm whoami
+npm login # if needed, use passkey on npmjs.com
+
+npm run stage:from-release
+npm run pack:all  # this just dryrun, but safety preflight step
 cd packages/*
 npm publish
 
