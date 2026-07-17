@@ -3,3 +3,5 @@ docker/thumbrella
 ffs/vcpkg/
 ffs/build/
 .cargo/ffs.toml
+release/npmjs/packages/server-linux-x64-gnu/bin/thumbrella
+release/npmjs/packages/server-win32-x64-msvc/bin/thumbrella.exe

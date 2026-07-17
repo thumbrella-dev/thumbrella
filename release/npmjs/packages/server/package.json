@@ -1,6 +1,6 @@
 {
   "name": "@thumbrella/server",
-  "version": "0.5.1-prerelease.2",
+  "version": "0.5.2",
   "description": "Thumbrella server launcher package that installs a platform-specific binary.",
   "license": "Apache-2.0",
   "homepage": "https://thumbrella.dev",
@@ -28,7 +28,7 @@
     "node": ">=18"
   },
   "optionalDependencies": {
-    "@thumbrella/server-linux-x64-gnu": "0.5.1-prerelease.2",
-    "@thumbrella/server-win32-x64-msvc": "0.5.1-prerelease.2"
+    "@thumbrella/server-linux-x64-gnu": "0.5.2",
+    "@thumbrella/server-win32-x64-msvc": "0.5.2"
   }
 }

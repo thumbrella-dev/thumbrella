@@ -1,0 +1,5 @@
+update package versions in each packages/*/package.json
+npm run pack:all
+cd packages/*
+npm publish
+
