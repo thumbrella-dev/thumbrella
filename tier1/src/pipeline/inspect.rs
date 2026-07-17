@@ -52,18 +52,19 @@ pub async fn inspect<S: HttpStream>(cook: &mut ThumbCook<S>) {
 
     // Audio lossless: inferred from extension.
     if kind == FileKind::Audio
-        && let Some(props) = cook.media.properties.as_mut() {
-            let obj = props.as_object_mut().expect("properties is always a JSON object");
-            let ext = cook.media.extension.as_deref().unwrap_or("");
-            obj.insert("lossless".into(), (is_lossless_audio_ext(ext) as i32).into());
-        }
+        && let Some(props) = cook.media.properties.as_mut()
+    {
+        let obj = props.as_object_mut().expect("properties is always a JSON object");
+        let ext = cook.media.extension.as_deref().unwrap_or("");
+        obj.insert("lossless".into(), (is_lossless_audio_ext(ext) as i32).into());
+    }
 
     // Route determines which tier should process this — informational only at
     // this point; the cook will escalate if needed during shortcut/render.
     let _route = dispatch::route(kind, cook.media.extension.as_deref());
 }
 
-//  Sniffing 
+//  Sniffing
 
 /// Identify the (kind, mime, extension) triple for a byte prefix.
 ///
@@ -86,21 +87,21 @@ fn sniff(bytes: &[u8], url: &str, content_type: Option<&str>) -> (FileKind, Stri
 
         // infer classifies SVG as text/xml (MatcherType::Text); sniff the
         // byte prefix for an <svg root element, falling back to URL extension.
-        if infer_kind == FileKind::Text
-            && (sniff_svg(bytes) || url_ext.as_deref() == Some("svg")) {
-                return (FileKind::Vector, "image/svg+xml".to_string(), "svg".to_string());
-            }
+        if infer_kind == FileKind::Text && (sniff_svg(bytes) || url_ext.as_deref() == Some("svg")) {
+            return (FileKind::Vector, "image/svg+xml".to_string(), "svg".to_string());
+        }
 
         // When magic bytes identify a generic container, prefer a more
         // specific kind from the URL extension (e.g. USDZ, DOCX are ZIP).
         if matches!(infer_kind, FileKind::Archive | FileKind::Binary | FileKind::Unknown)
-            && let Some(ext) = &url_ext {
-                let url_kind = ext_to_kind(ext);
-                if !matches!(url_kind, FileKind::Archive | FileKind::Binary | FileKind::Unknown) {
-                    let mime = ext_to_mime(ext).to_string();
-                    return (url_kind, mime, ext.clone());
-                }
+            && let Some(ext) = &url_ext
+        {
+            let url_kind = ext_to_kind(ext);
+            if !matches!(url_kind, FileKind::Archive | FileKind::Binary | FileKind::Unknown) {
+                let mime = ext_to_mime(ext).to_string();
+                return (url_kind, mime, ext.clone());
             }
+        }
 
         // When magic bytes identify plain TIFF but the URL names a known
         // camera-raw format, prefer the raw extension.  This lets the
@@ -108,9 +109,10 @@ fn sniff(bytes: &[u8], url: &str, content_type: Option<&str>) -> (FileKind, Stri
         // correct format in traces ("shortcut/raw" vs "shortcut/exif").
         if infer_ext == "tiff"
             && let Some(ext) = &url_ext
-                && is_raw_tiff_extension(ext) {
-                    return (FileKind::Image, ext_to_mime(ext).to_string(), ext.clone());
-                }
+            && is_raw_tiff_extension(ext)
+        {
+            return (FileKind::Image, ext_to_mime(ext).to_string(), ext.clone());
+        }
 
         return (infer_kind, t.mime_type().to_string(), infer_ext);
     }
@@ -148,17 +150,20 @@ fn sniff(bytes: &[u8], url: &str, content_type: Option<&str>) -> (FileKind, Stri
 /// untouched if it cannot determine a value.  Prefer no entry over a wrong one.
 pub(super) fn inspect_image_properties(bytes: &[u8], props: &mut serde_json::Value) {
     // JPEG: parse marker structure ourselves so we skip large APP segments.
-    if bytes.len() >= 4 && bytes[0] == 0xFF && bytes[1] == 0xD8
-        && let Some((w, h, bpp)) = jpeg_sof_dimensions(bytes) {
-            let obj = props.as_object_mut().expect("properties is always a JSON object");
-            obj.insert("width".into(), w.into());
-            obj.insert("height".into(), h.into());
-            obj.insert("bpp".into(), bpp.into());
-            obj.insert("alpha".into(), (0_i32).into());
-            obj.insert("lossless".into(), (0_i32).into());
-            return;
-        }
-        // SOF unreachable — fall through to image crate as a fallback.
+    if bytes.len() >= 4
+        && bytes[0] == 0xFF
+        && bytes[1] == 0xD8
+        && let Some((w, h, bpp)) = jpeg_sof_dimensions(bytes)
+    {
+        let obj = props.as_object_mut().expect("properties is always a JSON object");
+        obj.insert("width".into(), w.into());
+        obj.insert("height".into(), h.into());
+        obj.insert("bpp".into(), bpp.into());
+        obj.insert("alpha".into(), (0_i32).into());
+        obj.insert("lossless".into(), (0_i32).into());
+        return;
+    }
+    // SOF unreachable — fall through to image crate as a fallback.
 
     let cursor = Cursor::new(bytes);
     let Ok(reader) = ImageReader::new(cursor).with_guessed_format() else {
@@ -390,7 +395,7 @@ fn url_extension(url: &str) -> Option<String> {
     Some(canonical_extension(&raw.to_ascii_lowercase()))
 }
 
-//  Kind / MIME tables 
+//  Kind / MIME tables
 
 /// Map an `infer` `MatcherType` directly to a `FileKind`.
 ///

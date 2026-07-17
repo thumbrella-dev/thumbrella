@@ -38,7 +38,7 @@ macro_rules! tbr_debug {
     };
 }
 
-//  Renderer 
+//  Renderer
 
 pub struct Tier2Renderer;
 
@@ -91,7 +91,7 @@ impl InProcessRenderer for Tier2Renderer {
     }
 }
 
-//  Image decode 
+//  Image decode
 
 fn is_image_crate_format(ext: &str) -> bool {
     matches!(ext, "png")
@@ -238,7 +238,7 @@ fn detect_arithmetic_jpeg(reader: &mut dyn ReadSeek) -> bool {
     false
 }
 
-//  JPEG XL decode 
+//  JPEG XL decode
 
 /// Decode a JPEG XL image via the `jxl-oxide` crate.
 ///
@@ -290,7 +290,7 @@ fn decode_jxl(reader: &mut dyn ReadSeek) -> Option<RenderOutput> {
     })
 }
 
-//  SVG render 
+//  SVG render
 
 /// Render an SVG to a raster image via the `resvg` crate.
 ///
@@ -496,9 +496,10 @@ fn raw_subifd_offsets(bytes: &[u8], little: bool) -> Vec<u64> {
         } else {
             for j in 0..fc.min(32) {
                 if let Some(off) = raw_u32(bytes, v + j * 4, little)
-                    && off as usize > bytes.len() {
-                        result.push(off as u64);
-                    }
+                    && off as usize > bytes.len()
+                {
+                    result.push(off as u64);
+                }
             }
         }
     }
@@ -935,7 +936,7 @@ pub async fn fetch_url(url: &str) -> Option<Vec<u8>> {
     reqwest::get(url).await.ok()?.bytes().await.ok().map(|b| b.to_vec())
 }
 
-//  EXIF orientation 
+//  EXIF orientation
 
 /// Extract the EXIF Orientation tag (0x0112) from a JPEG or TIFF byte slice.
 /// Returns the raw tag value (1–8), or 1 (normal) if absent or unreadable.
@@ -958,19 +959,23 @@ fn exif_orientation(bytes: &[u8]) -> u8 {
             let seg_end = (pos + 2 + seg_len).min(bytes.len());
             if marker == 0xE1 {
                 let payload = &bytes[(pos + 4).min(seg_end)..seg_end];
-                if payload.len() >= 6 && &payload[..6] == b"Exif\x00\x00"
-                    && let Some(v) = read_tiff_orientation(&payload[6..]) {
-                        return v;
-                    }
+                if payload.len() >= 6
+                    && &payload[..6] == b"Exif\x00\x00"
+                    && let Some(v) = read_tiff_orientation(&payload[6..])
+                {
+                    return v;
+                }
             }
             pos = pos + 2 + seg_len;
         }
     }
     // TIFF: orientation is directly in IFD0.
-    if bytes.len() >= 8 && (bytes.starts_with(b"II") || bytes.starts_with(b"MM"))
-        && let Some(v) = read_tiff_orientation(bytes) {
-            return v;
-        }
+    if bytes.len() >= 8
+        && (bytes.starts_with(b"II") || bytes.starts_with(b"MM"))
+        && let Some(v) = read_tiff_orientation(bytes)
+    {
+        return v;
+    }
     1
 }
 
@@ -1110,7 +1115,7 @@ fn apply_exif_orientation(img: DynamicImage, orientation: u8) -> DynamicImage {
     }
 }
 
-//  ISOBMFF / HEIC container rotation 
+//  ISOBMFF / HEIC container rotation
 
 /// Read the ISOBMFF `irot` box from a seekable reader and return the
 /// equivalent clockwise rotation in degrees (0 / 90 / 180 / 270).

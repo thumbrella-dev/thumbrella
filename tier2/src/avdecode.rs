@@ -216,7 +216,7 @@ unsafe extern "C" fn avio_seek_cb(opaque: *mut c_void, offset: i64, whence: c_in
     }
 }
 
-//  Resource cleanup helpers 
+//  Resource cleanup helpers
 
 /// Free an `AVIOContext` that was created with `avio_alloc_context`.
 ///
@@ -235,7 +235,7 @@ unsafe fn free_avio_ctx(ctx: &mut *mut AVIOContext) {
     avio_context_free(ctx);
 }
 
-//  Public entry point 
+//  Public entry point
 
 /// Map a canonical file extension to the libav input format name to use as a
 /// probe hint when `avformat_open_input` cannot identify the format from the
@@ -625,7 +625,7 @@ unsafe fn decode_inner(
         }
     }
 
-    //  Decode first frame 
+    //  Decode first frame
     *packet = av_packet_alloc();
     *frame = av_frame_alloc();
     if (*packet).is_null() || (*frame).is_null() {
@@ -646,12 +646,12 @@ unsafe fn decode_inner(
         while av_read_frame(*fmt_ctx, *packet) >= 0 {
             if (**packet).stream_index == stream_idx
                 && avcodec_send_packet(*codec_ctx, *packet) >= 0
-                    && avcodec_receive_frame(*codec_ctx, *frame) >= 0
-                {
-                    decoded = true;
-                    av_packet_unref(*packet);
-                    break;
-                }
+                && avcodec_receive_frame(*codec_ctx, *frame) >= 0
+            {
+                decoded = true;
+                av_packet_unref(*packet);
+                break;
+            }
             av_packet_unref(*packet);
         }
 
@@ -659,9 +659,10 @@ unsafe fn decode_inner(
         // when EOF is signalled by a NULL packet.
         if !decoded
             && avcodec_send_packet(*codec_ctx, ptr::null_mut()) >= 0
-                && avcodec_receive_frame(*codec_ctx, *frame) >= 0 {
-                    decoded = true;
-                }
+            && avcodec_receive_frame(*codec_ctx, *frame) >= 0
+        {
+            decoded = true;
+        }
 
         if decoded {
             break;
@@ -756,11 +757,11 @@ unsafe fn decode_inner(
         (**frame).linesize.as_ptr(),
         0,
         frame_h,
-        dst_data.as_ptr() /*as *const *mut u8*/,
+        dst_data.as_ptr(), /*as *const *mut u8*/
         dst_linesize.as_ptr() as *const c_int,
     );
 
-    //  Build RenderOutput 
+    //  Build RenderOutput
     let img: DynamicImage = if has_alpha {
         match RgbaImage::from_raw(out_w as u32, out_h as u32, buf) {
             Some(i) => DynamicImage::ImageRgba8(i),

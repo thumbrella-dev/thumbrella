@@ -75,7 +75,7 @@ impl UrlFailureCache {
     }
 }
 
-//  OriginBackoffCache 
+//  OriginBackoffCache
 
 /// Rate-control cache for origins that returned 429 / 503.
 ///

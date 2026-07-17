@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::source::CacheHints;
 
-//  Per-item input 
+//  Per-item input
 
 /// Accepts either a bare URL string or a full object.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,7 +45,7 @@ impl ThumbInput {
     }
 }
 
-//  Call request 
+//  Call request
 
 /// Top-level batch call request — the outer HTTP request envelope.
 #[derive(Debug, Clone, Serialize, Deserialize)]

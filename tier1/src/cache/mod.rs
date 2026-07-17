@@ -141,7 +141,7 @@ mod frontend {
     }
 }
 
-//  CacheStore 
+//  CacheStore
 
 /// Holds a single durable cache backend with an optional sticky+coalescing
 /// frontend.
@@ -149,14 +149,12 @@ mod frontend {
 /// Cheap to clone — backend and frontend are behind `Arc`.
 /// An empty store (`CacheStore::none()`) is used for handoff cooks and when
 /// no cache is configured.
-#[derive(Clone)]
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct CacheStore {
     backend: Option<Arc<dyn CacheBackend>>,
     #[cfg(feature = "native")]
     frontend: Option<Arc<frontend::CacheFrontend>>,
 }
-
 
 impl CacheStore {
     /// Construct a store with a durable backend and sticky frontend.
@@ -187,11 +185,12 @@ impl CacheStore {
         //  1. Sticky cache (native only)
         #[cfg(feature = "native")]
         if let Some(ref fe) = self.frontend
-            && let Some(result) = fe.sticky_check(key) {
-                return Some((result, "sticky"));
-            }
+            && let Some(result) = fe.sticky_check(key)
+        {
+            return Some((result, "sticky"));
+        }
 
-        //  2. Inflight coalescing (native only) 
+        //  2. Inflight coalescing (native only)
         #[cfg(feature = "native")]
         let mut is_leader = false;
         #[cfg(feature = "native")]
@@ -217,24 +216,24 @@ impl CacheStore {
             }
         }
 
-        //  3. Check durable backend 
+        //  3. Check durable backend
         if let Some(ref backend) = self.backend
             && let Some(json) = backend.get(key).await
-                && let Ok(result) = serde_json::from_str(&json) {
-                    #[cfg(feature = "native")]
-                    if let Some(ref fe) = self.frontend {
-                        fe.sticky_store(key, &result);
-                        fe.complete(key, Arc::new(result.clone()));
-                    }
-                    return Some((result, backend.name()));
-                }
+            && let Ok(result) = serde_json::from_str(&json)
+        {
+            #[cfg(feature = "native")]
+            if let Some(ref fe) = self.frontend {
+                fe.sticky_store(key, &result);
+                fe.complete(key, Arc::new(result.clone()));
+            }
+            return Some((result, backend.name()));
+        }
 
         // Miss — cancel the inflight slot so it doesn't leak.
         #[cfg(feature = "native")]
-        if is_leader
-            && let Some(ref fe) = self.frontend {
-                fe.cancel(key);
-            }
+        if is_leader && let Some(ref fe) = self.frontend {
+            fe.cancel(key);
+        }
 
         None
     }
@@ -285,7 +284,7 @@ pub fn render_cost_from_secs(render_secs: f64) -> u8 {
     (render_ms.min(1000) / 10) as u8
 }
 
-//  DSN parser 
+//  DSN parser
 
 /// Build a single cache backend from a DSN string.
 ///

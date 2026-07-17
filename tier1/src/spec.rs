@@ -86,7 +86,7 @@ impl ThumbnailConfig {
     };
 }
 
-//  ShortcutLimits 
+//  ShortcutLimits
 
 /// I/O and decode budget limits for the shortcut pipeline.
 ///

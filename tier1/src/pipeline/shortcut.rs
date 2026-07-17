@@ -190,7 +190,7 @@ async fn try_progressive_jpeg_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     cook.render_image = Some(img);
 }
 
-//  EXIF embedded thumbnail shortcut 
+//  EXIF embedded thumbnail shortcut
 
 /// Attempt to serve a thumbnail from an embedded JPEG preview.
 ///
@@ -338,9 +338,11 @@ async fn try_raw_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
                         continue;
                     };
                     if let (Some(o), Some(l)) = (jpeg_off, jpeg_len)
-                        && l >= 4 && best.is_none_or(|(_, bl)| l > bl) {
-                            best = Some((o as u64, l));
-                        }
+                        && l >= 4
+                        && best.is_none_or(|(_, bl)| l > bl)
+                    {
+                        best = Some((o as u64, l));
+                    }
                 }
                 best
             } else {
@@ -418,7 +420,7 @@ async fn try_raw_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     cook.render_image = Some(img);
 }
 
-//  ZIP container shortcut 
+//  ZIP container shortcut
 
 /// Attempt to extract and render a thumbnail from a ZIP-based container.
 ///
@@ -575,7 +577,7 @@ fn zip_extract_from_buffer(buf: &[u8], entry: &ZipEntry, buf_start: u64) -> Opti
     }
 }
 
-//  ZIP helper types 
+//  ZIP helper types
 
 struct ZipEntry {
     local_offset: u64,
@@ -584,7 +586,7 @@ struct ZipEntry {
     method: u16,
 }
 
-//  ZIP helper functions 
+//  ZIP helper functions
 
 /// Find the End-of-Central-Directory record by scanning backwards.
 fn zip_find_eocd(buf: &[u8]) -> Option<usize> {
@@ -790,21 +792,22 @@ fn parse_tiff_exif_thumbnail(tiff: &[u8], tiff_file_offset: u64) -> Option<JpegE
     let mut px_height: Option<u32> = None;
     if let Some(exif_off) = exif_ifd_off
         && exif_off + 2 <= tiff.len()
-            && let Some(n) = read_u16(tiff, exif_off, little) {
-                for i in 0..n as usize {
-                    let entry = exif_off + 2 + i * 12;
-                    if entry + 12 > tiff.len() {
-                        break;
-                    }
-                    let tag = read_u16(tiff, entry, little).unwrap_or(0);
-                    let ft = read_u16(tiff, entry + 2, little).unwrap_or(0);
-                    match tag {
-                        0xA002 => px_width = tiff_scalar(tiff, ft, entry + 8, little),
-                        0xA003 => px_height = tiff_scalar(tiff, ft, entry + 8, little),
-                        _ => {}
-                    }
-                }
+        && let Some(n) = read_u16(tiff, exif_off, little)
+    {
+        for i in 0..n as usize {
+            let entry = exif_off + 2 + i * 12;
+            if entry + 12 > tiff.len() {
+                break;
             }
+            let tag = read_u16(tiff, entry, little).unwrap_or(0);
+            let ft = read_u16(tiff, entry + 2, little).unwrap_or(0);
+            match tag {
+                0xA002 => px_width = tiff_scalar(tiff, ft, entry + 8, little),
+                0xA003 => px_height = tiff_scalar(tiff, ft, entry + 8, little),
+                _ => {}
+            }
+        }
+    }
 
     let source_dims = match (px_width.or(ifd0_width), px_height.or(ifd0_height)) {
         (Some(w), Some(h)) if w > 0 && h > 0 => Some((w, h)),
@@ -1131,9 +1134,11 @@ fn find_tiff_embedded_jpeg_span(bytes: &[u8]) -> Option<(usize, usize)> {
         }
 
         if let (Some(o), Some(l)) = (joff, jlen)
-            && l >= 4 && best.is_none_or(|(_, bl)| l > bl) {
-                best = Some((o, l));
-            }
+            && l >= 4
+            && best.is_none_or(|(_, bl)| l > bl)
+        {
+            best = Some((o, l));
+        }
     }
     best
 }
@@ -1207,16 +1212,15 @@ fn parse_tiff_ifd(
     }
 
     // JPEG-compressed IFDs may use strip/tile layout instead of JPEGInterchangeFormat.
-    if (jpeg_off.is_none() || jpeg_len.is_none())
-        && matches!(compression, Some(6 | 7)) {
-            if let (Some(o), Some(l)) = (strip_off, strip_cnt) {
-                jpeg_off = Some(o);
-                jpeg_len = Some(l);
-            } else if let (Some(o), Some(l)) = (tile_off, tile_cnt) {
-                jpeg_off = Some(o);
-                jpeg_len = Some(l);
-            }
+    if (jpeg_off.is_none() || jpeg_len.is_none()) && matches!(compression, Some(6 | 7)) {
+        if let (Some(o), Some(l)) = (strip_off, strip_cnt) {
+            jpeg_off = Some(o);
+            jpeg_len = Some(l);
+        } else if let (Some(o), Some(l)) = (tile_off, tile_cnt) {
+            jpeg_off = Some(o);
+            jpeg_len = Some(l);
         }
+    }
 
     let next_ifd = read_u32(bytes, next_ptr_off, little)? as usize;
     Some((next_ifd, sub_ifds, jpeg_off, jpeg_len))
@@ -1262,7 +1266,7 @@ fn tiff_u32_values(bytes: &[u8], ft: u16, fc: usize, v: usize, little: bool, max
     }
 }
 
-//  Power-of-two pre-scale 
+//  Power-of-two pre-scale
 
 /// Reduce a decoded image to near the thumbnail target using a two-phase
 /// strategy that balances speed and quality:
@@ -1442,7 +1446,7 @@ fn read_u32(buf: &[u8], off: usize, little: bool) -> Option<u32> {
     })
 }
 
-//  Audio: ID3v2 APIC cover art shortcut 
+//  Audio: ID3v2 APIC cover art shortcut
 
 /// Attempt to extract embedded cover art from an audio file's ID3v2 tag.
 ///
@@ -1470,7 +1474,7 @@ async fn try_audio_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
         Err(_) => return,
     };
 
-    //  Detect ID3v2 header (optional) 
+    //  Detect ID3v2 header (optional)
     let id3 = parse_id3_header(&tag_bytes);
 
     //  Locate the first MPEG audio frame
@@ -1502,7 +1506,7 @@ async fn try_audio_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
         props["duration_seconds"] = serde_json::json!(d);
     }
 
-    //  Scan ID3v2 frames for APIC cover art 
+    //  Scan ID3v2 frames for APIC cover art
     let image_bytes = id3.and_then(|h| find_id3_apic(&tag_bytes, h.version_major));
 
     let Some(image_bytes) = image_bytes else {
@@ -1760,7 +1764,7 @@ fn extract_apic_image(apic_data: &[u8]) -> Option<Vec<u8>> {
     Some(apic_data[image_start..].to_vec())
 }
 
-//  Public pipeline step (merged) 
+//  Public pipeline step (merged)
 
 // SMALL_FILE_THRESHOLD is now runtime-configurable via
 // cook.runtime.shortcut_limits.small_file_threshold.
@@ -1789,7 +1793,7 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     let ext_owned = cook.media.extension.clone().unwrap_or_default();
     let ext = ext_owned.as_str();
 
-    //  EXIF embedded thumbnail (JPEG EXIF IFD1 / TIFF IFD chain) 
+    //  EXIF embedded thumbnail (JPEG EXIF IFD1 / TIFF IFD chain)
     //
     // Attempt this BEFORE the small-image full-download path so that JPEG/TIFF
     // files with an embedded thumbnail are served from the thumbnail bytes only
@@ -1810,7 +1814,7 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
         }
     }
 
-    //  Small image: known `image`-crate formats, ≤ SMALL_FILE_THRESHOLD 
+    //  Small image: known `image`-crate formats, ≤ SMALL_FILE_THRESHOLD
     //
     // `inspect` has already classified the file; trust its verdict.
     //
@@ -1838,27 +1842,28 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
         let data = cook.http_read_at(0, file_size as usize).await.unwrap_or_default();
 
         if !data.is_empty()
-            && let Ok(img) = image::load_from_memory(&data) {
-                let (src_w, src_h) = (img.width(), img.height());
-                let color_type = img.color();
-                let dl_bytes = cook.http_bytes_fetched();
+            && let Ok(img) = image::load_from_memory(&data)
+        {
+            let (src_w, src_h) = (img.width(), img.height());
+            let color_type = img.color();
+            let dl_bytes = cook.http_bytes_fetched();
 
-                cook.http_close().await;
+            cook.http_close().await;
 
-                let img = pre_scale_to_target(img, config.exact_width, config.exact_height);
+            let img = pre_scale_to_target(img, config.exact_width, config.exact_height);
 
-                cook.render_renderer = Some("shortcut/small".into());
-                cook.render_handler = RenderHandler::Builtin;
-                cook.out_download_bytes = dl_bytes;
-                if src_w > 0 && src_h > 0 {
-                    cook.media.properties = Some(image_properties(src_w, src_h, color_type));
-                }
-                cook.render_image = Some(img);
-                return;
+            cook.render_renderer = Some("shortcut/small".into());
+            cook.render_handler = RenderHandler::Builtin;
+            cook.out_download_bytes = dl_bytes;
+            if src_w > 0 && src_h > 0 {
+                cook.media.properties = Some(image_properties(src_w, src_h, color_type));
             }
-            // load_from_memory failed — buffer is still intact (read_at
-            // restored the cursor; streaming mode was never entered).
-            // Fall through so tier2 can handle the format via libav.
+            cook.render_image = Some(img);
+            return;
+        }
+        // load_from_memory failed — buffer is still intact (read_at
+        // restored the cursor; streaming mode was never entered).
+        // Fall through so tier2 can handle the format via libav.
     }
 
     //  Progressive JPEG (falls through from EXIF and small-image checks)
@@ -1882,7 +1887,7 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
         }
     }
 
-    //  ZIP containers (ODT, DOCX, …) 
+    //  ZIP containers (ODT, DOCX, …)
     let is_zip_doc = cook.media.kind == Some(FileKind::Document)
         && matches!(
             cook.media.extension.as_deref(),
@@ -1900,7 +1905,7 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     }
 }
 
-//  MP3 frame header parser 
+//  MP3 frame header parser
 
 /// Parsed first MPEG audio frame header (4 bytes after sync).
 #[derive(Debug)]
@@ -1932,10 +1937,12 @@ fn parse_first_mp3_frame(bytes: &[u8]) -> Option<Mp3FrameInfo> {
     // Search for a sync word within the first 2 KiB.
     let limit = bytes.len().min(2048);
     for i in 0..limit.saturating_sub(1) {
-        if bytes[i] == 0xFF && (bytes[i + 1] & 0xE0) == 0xE0
-            && let Some(info) = parse_mp3_frame_header(&bytes[i..]) {
-                return Some(info);
-            }
+        if bytes[i] == 0xFF
+            && (bytes[i + 1] & 0xE0) == 0xE0
+            && let Some(info) = parse_mp3_frame_header(&bytes[i..])
+        {
+            return Some(info);
+        }
     }
     None
 }

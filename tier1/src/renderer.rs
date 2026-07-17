@@ -163,7 +163,7 @@ pub trait InProcessRenderer: Send + Sync + 'static {
     fn render<'a>(&'a self, cook: &'a mut dyn RenderCook) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
 }
 
-//  Type alias 
+//  Type alias
 
 /// Shared handle to an in-process renderer installed at startup.
 pub type SharedRenderer = Arc<dyn InProcessRenderer>;

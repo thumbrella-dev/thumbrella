@@ -39,7 +39,7 @@ use std::sync::Arc;
 use tier1::InProcessRenderer;
 use tier1::RenderCook;
 
-//  Embedded Python scripts 
+//  Embedded Python scripts
 
 /// Embedded `usd_extract.py` — extracts triangulated mesh from USD/USDZ → OBJ.
 const USD_EXTRACT_PY: &str = include_str!("usd_extract.py");
@@ -366,7 +366,7 @@ fn run_ffmpeg_decode(bytes: &[u8], ext: &str, is_video: bool) -> Result<RenderOu
         .stage_bytes(bytes, &format!("input.{ext}"))
         .map_err(|e| format!("stage input: {e}"))?;
 
-    //  ffprobe: get dimensions, colour depth, duration, audio channels 
+    //  ffprobe: get dimensions, colour depth, duration, audio channels
     let (src_w, src_h, bits_per_pixel, duration_secs, channel_count) = {
         let output = Command::new("ffprobe")
             .arg("-v")
@@ -383,7 +383,7 @@ fn run_ffmpeg_decode(bytes: &[u8], ext: &str, is_video: bool) -> Result<RenderOu
             serde_json::from_slice(&output.stdout).map_err(|e| format!("ffprobe json: {e}"))?;
         let streams = json["streams"].as_array().ok_or_else(|| "ffprobe: no streams".to_string())?;
 
-        //  video stream 
+        //  video stream
         let vs = streams.iter().find(|s| s["codec_type"] == "video");
         let (w, h, bpp) = if let Some(s) = vs {
             let w = s["width"].as_u64().unwrap_or(0) as u32;
@@ -404,13 +404,13 @@ fn run_ffmpeg_decode(bytes: &[u8], ext: &str, is_video: bool) -> Result<RenderOu
             .filter_map(|s| s["channels"].as_u64())
             .sum::<u64>() as u32;
 
-        //  duration 
+        //  duration
         let dur = json["format"]["duration"].as_str().and_then(|s| s.parse::<f64>().ok());
 
         (w, h, bpp, dur, chan)
     };
 
-    //  power-of-2 downscale 
+    //  power-of-2 downscale
     let max_dim = src_w.max(src_h);
     let scale: u32 = if max_dim > 512 {
         let mut s = 1u32;
@@ -747,7 +747,7 @@ fn run_oiiotool_decode(bytes: &[u8], ext: &str) -> Result<RenderOutput, String> 
         .stage_bytes(bytes, &format!("input.{ext}"))
         .map_err(|e| format!("stage input: {e}"))?;
 
-    //  oiiotool --info: get dimensions 
+    //  oiiotool --info: get dimensions
     let (src_w, src_h) = {
         let output = Command::new("oiiotool")
             .arg("--info")
@@ -780,7 +780,7 @@ fn run_oiiotool_decode(bytes: &[u8], ext: &str) -> Result<RenderOutput, String> 
         (w, h)
     };
 
-    //  power-of-2 downscale 
+    //  power-of-2 downscale
     let mut resize_w = src_w;
     let mut resize_h = src_h;
     let max_dim = src_w.max(src_h);
@@ -1311,8 +1311,7 @@ fn should_apply_geometry_tonemap(ext: &str) -> bool {
     matches!(ext, "stl" | "obj")
 }
 
-
-//  Linear → sRGB helpers (shared by ffmpeg_cli and oiiotool paths) 
+//  Linear → sRGB helpers (shared by ffmpeg_cli and oiiotool paths)
 
 /// Returns `true` for extensions that are scene-linear (needs gamma correction).
 fn is_linear_format(ext: &str) -> bool {

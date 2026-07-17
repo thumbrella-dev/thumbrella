@@ -62,7 +62,7 @@ pub mod cli;
 #[cfg(feature = "native")]
 pub mod renderer;
 
-//  Convenience re-exports 
+//  Convenience re-exports
 
 pub use cook::{
     CallerContext, CookStatus, InputSpec, MediaInfo, Runtime, SourceIdentity, ThumbCook as ThumbCookGeneric,

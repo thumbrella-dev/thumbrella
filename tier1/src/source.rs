@@ -12,7 +12,7 @@ use web_time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-//  Source reference 
+//  Source reference
 
 /// A pointer to an input source.
 ///
@@ -175,7 +175,7 @@ pub fn conditional_headers(etag: &str) -> Option<(&'static str, &str)> {
     }
 }
 
-//  CacheHints 
+//  CacheHints
 
 /// Structured cache freshness hints derived from upstream HTTP response headers.
 ///
@@ -299,7 +299,7 @@ impl CacheHints {
             }
         }
 
-        //  ETag / Last-Modified 
+        //  ETag / Last-Modified
         // ETag is the authoritative validator (RFC 7232 §6 — servers must give
         // it precedence over If-Modified-Since).  Only fall back to Last-Modified
         // when no ETag is available; storing both would be redundant dead weight.
@@ -378,7 +378,7 @@ fn unix_now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-//  Wire format: <hex_epoch>:<base64_blob> 
+//  Wire format: <hex_epoch>:<base64_blob>
 
 impl CacheHints {
     /// Encode to the opaque wire string for `ThumbResult.cache`.

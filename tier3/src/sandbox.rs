@@ -83,7 +83,7 @@ pub fn default_strict() -> SandboxConfig {
 pub fn bwrap_command(scratch_dir: &Path, program: &str, args: &[&str], config: &SandboxConfig) -> Command {
     let mut cmd = Command::new("bwrap");
 
-    //  Namespace isolation 
+    //  Namespace isolation
     cmd.arg("--unshare-all");
     if config.needs_networking {
         cmd.arg("--share-net");
@@ -91,7 +91,7 @@ pub fn bwrap_command(scratch_dir: &Path, program: &str, args: &[&str], config: &
     cmd.arg("--die-with-parent");
     cmd.arg("--new-session");
 
-    //  Read-only system mounts 
+    //  Read-only system mounts
     for dir in &["/usr", "/lib", "/lib64", "/bin", "/etc", "/opt"] {
         if Path::new(dir).exists() {
             cmd.arg("--ro-bind").arg(dir).arg(dir);
@@ -104,7 +104,7 @@ pub fn bwrap_command(scratch_dir: &Path, program: &str, args: &[&str], config: &
     //  Minimal /dev
     cmd.arg("--dev").arg("/dev");
 
-    //  /proc for self-inspection 
+    //  /proc for self-inspection
     cmd.arg("--proc").arg("/proc");
 
     //  Private /tmp
@@ -153,7 +153,7 @@ pub fn sandboxed_command(scratch_dir: &Path, program: &str, args: &[&str]) -> Co
     }
 }
 
-//  pre_exec fallback (Linux / macOS, no bwrap) 
+//  pre_exec fallback (Linux / macOS, no bwrap)
 
 /// Apply sandbox restrictions via `pre_exec` (rlimits, capabilities).
 /// Used as fallback when bubblewrap is not available.
@@ -177,7 +177,7 @@ pub fn apply(_cmd: &mut Command, _config: &SandboxConfig) {
     // Windows: pre_exec and rlimits are not available.  No-op.
 }
 
-//  Linux implementation 
+//  Linux implementation
 
 #[cfg(target_os = "linux")]
 fn sandbox_linux(config: &SandboxConfig) -> std::io::Result<()> {
@@ -238,7 +238,7 @@ fn cap_last_cap() -> u32 {
         .unwrap_or(40)
 }
 
-//  macOS implementation 
+//  macOS implementation
 
 #[cfg(target_os = "macos")]
 fn sandbox_macos(config: &SandboxConfig) -> std::io::Result<()> {

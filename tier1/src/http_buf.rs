@@ -76,7 +76,7 @@ impl std::fmt::Display for HttpError {
 
 impl std::error::Error for HttpError {}
 
-//  HttpStream trait 
+//  HttpStream trait
 
 /// Minimal interface required from an HTTP backend.
 ///
@@ -131,7 +131,7 @@ pub trait HttpStream: Sized {
     async fn close(&mut self) {}
 }
 
-//  StreamBound — platform-sensitive trait bound 
+//  StreamBound — platform-sensitive trait bound
 
 /// Sealed bound used by [`crate::ThumbCookGeneric::run`].
 ///
@@ -151,7 +151,7 @@ pub trait StreamBound: HttpStream {}
 #[cfg(not(feature = "native"))]
 impl<S: HttpStream> StreamBound for S {}
 
-//  HttpBuffer 
+//  HttpBuffer
 
 /// Async random-access buffer over an HTTP resource.
 ///
@@ -199,7 +199,7 @@ pub struct HttpBuffer<S: HttpStream> {
 }
 
 impl<S: HttpStream> HttpBuffer<S> {
-    //  Construction 
+    //  Construction
 
     /// Open an HTTP GET to `url` and return a buffer ready for reads.
     /// Zero bytes are pulled from the body at this point.
@@ -236,7 +236,7 @@ impl<S: HttpStream> HttpBuffer<S> {
         })
     }
 
-    //  Cursor 
+    //  Cursor
 
     /// Set the cursor to `offset`.  No I/O.
     pub fn seek(&mut self, offset: u64) {
@@ -267,7 +267,7 @@ impl<S: HttpStream> HttpBuffer<S> {
         self.eof_override.or(self.content_length)
     }
 
-    //  Artificial EOF 
+    //  Artificial EOF
 
     /// Make reads at or past `len` return `Ok(0)`.  Does not evict pages.
     pub fn set_eof(&mut self, len: u64) {
@@ -278,7 +278,7 @@ impl<S: HttpStream> HttpBuffer<S> {
         self.eof_override = None;
     }
 
-    //  Streaming mode 
+    //  Streaming mode
 
     /// Enter streaming mode (one-way).  New chunks bypass the page cache.
     pub fn enter_streaming_mode(&mut self) {
@@ -312,7 +312,7 @@ impl<S: HttpStream> HttpBuffer<S> {
         self.pages.get(&0).cloned()
     }
 
-    //  Accounting 
+    //  Accounting
 
     /// Total bytes received from the network so far.
     pub fn bytes_fetched(&self) -> u64 {
@@ -335,9 +335,10 @@ impl<S: HttpStream> HttpBuffer<S> {
             return Ok(0);
         }
         if let Some(end) = self.eof_override.or(self.content_length)
-            && self.cursor >= end {
-                return Ok(0);
-            }
+            && self.cursor >= end
+        {
+            return Ok(0);
+        }
         if self.streaming_mode {
             self.read_streaming(buf).await
         } else {
@@ -364,7 +365,7 @@ impl<S: HttpStream> HttpBuffer<S> {
         Ok(out)
     }
 
-    //  Cached-mode read 
+    //  Cached-mode read
 
     async fn read_cached(&mut self, buf: &mut [u8]) -> Result<usize, HttpError> {
         let page_index = self.cursor / PAGE_SIZE as u64;
@@ -665,7 +666,7 @@ enum ReqwestStreamInner {
 #[cfg(feature = "native")]
 impl HttpStream for ReqwestStream {
     async fn connect(url: &str, options: &ConnectOptions) -> Result<Self, HttpError> {
-        //  file:// — stream from disk 
+        //  file:// — stream from disk
         if let Some(path) = url.strip_prefix("file://") {
             // Get file length without reading any content.
             let file_len = match std::fs::metadata(path) {
@@ -716,7 +717,7 @@ impl HttpStream for ReqwestStream {
             });
         }
 
-        //  http:// / https:// — reqwest 
+        //  http:// / https:// — reqwest
         let client = http_client();
 
         let mut req = client.get(url);
@@ -781,16 +782,17 @@ impl HttpStream for ReqwestStream {
 #[cfg(feature = "native")]
 fn parse_file_range(headers: &[(String, String)], file_len: u64) -> (u64, u64) {
     if let Some((_, v)) = headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("range"))
-        && let Some(range) = v.strip_prefix("bytes=") {
-            let mut parts = range.splitn(2, '-');
-            let start = parts.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-            let end = parts
-                .next()
-                .and_then(|s| s.parse::<u64>().ok())
-                .map(|e| e + 1) // Range header end is inclusive
-                .unwrap_or(file_len);
-            return (start.min(file_len), end.min(file_len));
-        }
+        && let Some(range) = v.strip_prefix("bytes=")
+    {
+        let mut parts = range.splitn(2, '-');
+        let start = parts.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+        let end = parts
+            .next()
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(|e| e + 1) // Range header end is inclusive
+            .unwrap_or(file_len);
+        return (start.min(file_len), end.min(file_len));
+    }
     (0, file_len)
 }
 
@@ -862,7 +864,7 @@ pub type PlatformStream = ReqwestStream;
 pub trait ReadSeek: std::io::Read + std::io::Seek {}
 impl<T: std::io::Read + std::io::Seek> ReadSeek for T {}
 
-//  SyncHttpReader 
+//  SyncHttpReader
 
 /// Synchronous `std::io::Read + Seek` adapter over an [`HttpBuffer`].
 ///

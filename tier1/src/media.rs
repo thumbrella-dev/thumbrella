@@ -73,4 +73,3 @@ pub enum FileKind {
     #[default]
     Unknown,
 }
-

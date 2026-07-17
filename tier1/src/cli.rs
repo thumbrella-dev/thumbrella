@@ -18,7 +18,7 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 
 use crate::cook::Runtime;
 
-//  CLI schema 
+//  CLI schema
 
 #[derive(Parser)]
 #[command(about = "Thumbrella — thumbnail and describe service")]
@@ -142,14 +142,15 @@ where
 
         // Fail fast on handshake values that look like auth tokens.
         if let Some(ref hs) = cfg.handshake
-            && crate::connect::looks_like_auth_token(hs) {
-                ux.fatal(
-                    "TBR_HANDSHAKE looks like an auth token — this is almost certainly a mistake",
-                    "Auth tokens start with 'tbr_' and belong in the connect string or \
+            && crate::connect::looks_like_auth_token(hs)
+        {
+            ux.fatal(
+                "TBR_HANDSHAKE looks like an auth token — this is almost certainly a mistake",
+                "Auth tokens start with 'tbr_' and belong in the connect string or \
                      Authorization header, not in TBR_HANDSHAKE.  Set TBR_HANDSHAKE to a \
                      simple shared secret instead.",
-                );
-            }
+            );
+        }
 
         let rt = crate::startup::startup(&cfg).await;
         Some(hook(rt).await)
@@ -257,9 +258,10 @@ async fn run_server(runtime: Arc<Runtime>) {
             issues.push("handshake value looks like an auth token".into());
         }
         if let Some(ref fc) = report.cache_file_check
-            && !fc.writable {
-                issues.push(format!("cache file path is not writable: {}", fc.path));
-            }
+            && !fc.writable
+        {
+            issues.push(format!("cache file path is not writable: {}", fc.path));
+        }
 
         for issue in &issues {
             ux.print_startup_issue(issue);
@@ -385,12 +387,11 @@ async fn run_thumb(
                 let mut value = serde_json::to_value(result).unwrap();
                 if let Some(media) = value.get_mut("media")
                     && let Some(thumb) = media.get("thumbnail").and_then(|v| v.as_str())
-                        && thumb.len() > 200 {
-                            media["thumbnail"] = serde_json::Value::String(format!(
-                                "<base64 jpeg data: {} bytes>",
-                                thumb.len()
-                            ));
-                        }
+                    && thumb.len() > 200
+                {
+                    media["thumbnail"] =
+                        serde_json::Value::String(format!("<base64 jpeg data: {} bytes>", thumb.len()));
+                }
                 let pretty = serde_json::to_string_pretty(&value).unwrap();
                 let ux = crate::ux::get();
                 println!("{}", ux.colorize_json(&pretty));
@@ -403,7 +404,7 @@ async fn run_thumb(
     }
 }
 
-//  thumb pretty printer 
+//  thumb pretty printer
 
 pub fn print_thumb_items(results: &[crate::ThumbResult]) {
     for result in results {
@@ -490,18 +491,19 @@ async fn run_check(json: bool, tier: u8) {
     // validate_dsn skipped.  This sends a dummy /cache/lookup to verify
     // the auth token and cloud endpoint.
     if let Some(ref dsn) = cfg.cache_url
-        && dsn.starts_with("cloud:") {
-            let token = dsn.strip_prefix("cloud:").unwrap_or("");
-            match crate::cache::cloud::ping_cloud_token(token).await {
-                Ok(()) => {
-                    report.cache_validation = check::Validation::ok();
-                }
-                Err(e) => {
-                    report.cache_validation = check::Validation::error(e);
-                    report.healthy = false;
-                }
+        && dsn.starts_with("cloud:")
+    {
+        let token = dsn.strip_prefix("cloud:").unwrap_or("");
+        match crate::cache::cloud::ping_cloud_token(token).await {
+            Ok(()) => {
+                report.cache_validation = check::Validation::ok();
+            }
+            Err(e) => {
+                report.cache_validation = check::Validation::error(e);
+                report.healthy = false;
             }
         }
+    }
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report).unwrap());

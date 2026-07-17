@@ -21,7 +21,7 @@ use crate::media::FileKind;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-//  Render handler 
+//  Render handler
 
 /// Which renderer handled (or attempted to handle) this item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -35,7 +35,7 @@ pub enum RenderHandler {
     Punt,
 }
 
-//  Job status 
+//  Job status
 
 /// High-level outcome of processing a single item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -49,7 +49,7 @@ pub enum ResultStatus {
     Intermediate,
 }
 
-//  Source 
+//  Source
 
 /// How the thumbnail was produced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,7 +86,7 @@ pub struct CallRecord {
     pub duration_secs: Option<f64>,
 }
 
-//  ThumbMedia 
+//  ThumbMedia
 
 /// The stable, cacheable unit of a thumbnail response.
 ///
@@ -179,7 +179,7 @@ impl Default for ThumbResult {
     }
 }
 
-//  ThumbTrace 
+//  ThumbTrace
 
 /// Internal per-item telemetry — the server's private record of work done.
 ///
@@ -188,7 +188,7 @@ impl Default for ThumbResult {
 /// to clients.  Written to the configured log sink.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ThumbTrace {
-    //  Request identity 
+    //  Request identity
     /// RFC 3339 timestamp of when the trace was materialised.
     pub timestamp: String,
     /// Outcome of the job, mirroring [`ThumbResult::status`].
@@ -203,7 +203,7 @@ pub struct ThumbTrace {
     pub cache_key: Option<String>,
     pub cache_key_source: Option<String>,
     pub source_etag: Option<String>,
-    //  Download metrics 
+    //  Download metrics
     pub download_bytes: u64,
     pub download_tail_bytes: u64,
     /// All time awaiting fetch (connect + transfer).
@@ -216,14 +216,14 @@ pub struct ThumbTrace {
     pub render_secs: f64,
     pub deliver_secs: f64,
 
-    //  Render details 
+    //  Render details
     pub thumbnail_bytes: Option<u64>,
 
-    //  Job provenance 
+    //  Job provenance
     pub job_tier: u8,
     pub job_renderer: Option<String>,
 
-    //  Failure detail 
+    //  Failure detail
     /// Human-readable error description; `None` on success.  Mirrors
     /// [`ThumbResult::message`] so the trace contains the full failure reason.
     pub message: Option<String>,

@@ -157,7 +157,7 @@ impl CacheBackend for SqliteCacheBackend {
     }
 }
 
-//  Eviction 
+//  Eviction
 
 /// Delete oldest entries until total stored bytes fits within `max_bytes`.
 ///

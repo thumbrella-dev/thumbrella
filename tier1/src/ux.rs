@@ -20,7 +20,7 @@ use std::io::{self, Write};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-//  Once-only warnings 
+//  Once-only warnings
 
 /// Flags that fire exactly once per process lifetime.
 static WARNED_FILE_URL: AtomicBool = AtomicBool::new(false);
@@ -80,7 +80,7 @@ impl OutputStyle {
     }
 }
 
-//  Colour helpers 
+//  Colour helpers
 
 fn use_colour() -> bool {
     !matches!(
@@ -121,7 +121,7 @@ impl Colour {
     }
 }
 
-//  Global UX instance 
+//  Global UX instance
 
 static UX: OnceLock<Ux> = OnceLock::new();
 
@@ -154,7 +154,7 @@ pub struct Ux {
 }
 
 impl Ux {
-    //  Public colour helpers (for CLI output) 
+    //  Public colour helpers (for CLI output)
 
     pub fn green(&self, s: &str) -> String {
         Colour::green(s)
@@ -198,7 +198,7 @@ impl Ux {
         colorize_json_str(json)
     }
 
-    //  Startup banner 
+    //  Startup banner
 
     /// Print the startup block — banner, hints, and connection info.
     /// Called once from `run_server`.
@@ -216,7 +216,7 @@ impl Ux {
 
         let mut lines: Vec<String> = Vec::new();
 
-        //  Identity 
+        //  Identity
         lines.push(format!(
             "  #  {} {} - online thumbnail server",
             Colour::bold("☂  Thumbrella"),
@@ -231,19 +231,22 @@ impl Ux {
             }
         }
 
-        //  Docs 
+        //  Docs
         lines.push("  # docs: https://thumbrella.dev/docs/".to_string());
 
         //  Hints
         if self.style.show_hints()
-            && !tier2_configured && !tier3_configured && !crate::check::has_builtin_renderer() {
-                lines.push(format!(
-                    "  # hint: {} {} {}",
-                    "No higher tiers configured - only basic formats will render.",
-                    Colour::dim("Set"),
-                    Colour::bold("TBR_TIER2=http://tier2:8000"),
-                ));
-            }
+            && !tier2_configured
+            && !tier3_configured
+            && !crate::check::has_builtin_renderer()
+        {
+            lines.push(format!(
+                "  # hint: {} {} {}",
+                "No higher tiers configured - only basic formats will render.",
+                Colour::dim("Set"),
+                Colour::bold("TBR_TIER2=http://tier2:8000"),
+            ));
+        }
 
         //  Container hint
         if in_container() {
@@ -252,7 +255,7 @@ impl Ux {
             ));
         }
 
-        //  Connection 
+        //  Connection
         let connect = if let Some(hs) = handshake {
             let masked = Self::mask_handshake(hs);
             Colour::dim(&format!("TBR_CONNECT=http://localhost:{port},{masked} (use secret handshake)"))
@@ -390,7 +393,7 @@ impl Ux {
         self.log_thumb_result(url, status, duration_ms, kind, extension, source, message);
     }
 
-    //  Error messages 
+    //  Error messages
 
     /// Print a fatal startup error with a suggested fix.
     pub fn fatal(&self, problem: &str, suggestion: &str) -> ! {

@@ -33,7 +33,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-//  ScratchArena 
+//  ScratchArena
 
 /// A managed temporary directory for subprocess rendering I/O.
 ///
@@ -95,16 +95,17 @@ impl ScratchArena {
 
         // Check limit before downloading.
         if self.max_bytes > 0
-            && let Some(cl) = content_length {
-                let current = self.current_bytes.load(Ordering::Relaxed);
-                if current + cl > self.max_bytes {
-                    return Err(ArenaError::LimitExceeded {
-                        current,
-                        needed: cl,
-                        max: self.max_bytes,
-                    });
-                }
+            && let Some(cl) = content_length
+        {
+            let current = self.current_bytes.load(Ordering::Relaxed);
+            if current + cl > self.max_bytes {
+                return Err(ArenaError::LimitExceeded {
+                    current,
+                    needed: cl,
+                    max: self.max_bytes,
+                });
             }
+        }
 
         // Build a collision-free file name.
         let stem = url
@@ -204,7 +205,7 @@ impl ScratchArena {
         self.stage_bytes(&buf, hint_name)
     }
 
-    //  Output paths 
+    //  Output paths
 
     /// Allocate a unique output file path in the arena.
     ///
@@ -252,7 +253,7 @@ fn raw_logs_enabled() -> bool {
     matches!(std::env::var("TBR_LOG").as_deref(), Ok("full"))
 }
 
-//  ArenaError 
+//  ArenaError
 
 /// Errors from scratch arena operations.
 #[derive(Debug)]

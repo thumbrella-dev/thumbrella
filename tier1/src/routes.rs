@@ -260,7 +260,7 @@ pub async fn placeholder(axum::extract::Path(kind): axum::extract::Path<String>)
         .into_response()
 }
 
-//  GET /thumb 
+//  GET /thumb
 
 /// Single-URL thumbnail endpoint.
 ///
@@ -496,10 +496,11 @@ fn normalize_url(url: String, allow_local: bool) -> Result<String, &'static str>
         // Check for localhost / private-network hosts.
         if !allow_local
             && let Ok(parsed) = url::Url::parse(&url)
-                && is_private_host(parsed.host_str()) {
-                    ux::warn_localhost_denied();
-                    return Err("localhost and private-network URLs are not permitted");
-                }
+            && is_private_host(parsed.host_str())
+        {
+            ux::warn_localhost_denied();
+            return Err("localhost and private-network URLs are not permitted");
+        }
 
         Ok(url)
     } else if allow_local {
@@ -546,7 +547,7 @@ fn as_ndjson_line(value: Value) -> Bytes {
     Bytes::from(buf)
 }
 
-//  POST /handoff 
+//  POST /handoff
 
 /// Trusted tier-to-tier handoff endpoint.
 ///
@@ -595,9 +596,10 @@ pub async fn handoff(
 
     // Save bandwidth on tier-to-tier responses: send placeholder token only.
     if result.media.as_ref().is_some_and(|m| !m.placeholder.is_empty())
-        && let Some(ref mut media) = result.media {
-            media.thumbnail.clear();
-        }
+        && let Some(ref mut media) = result.media
+    {
+        media.thumbnail.clear();
+    }
 
     let body = HandoffResponse { result, trace };
     (StatusCode::OK, Json(body)).into_response()
