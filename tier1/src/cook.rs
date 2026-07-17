@@ -75,7 +75,7 @@ use crate::source::CacheHints;
 use crate::spec::ShortcutLimits;
 use crate::tracelog::TraceStore;
 
-//  CookStatus 
+//  CookStatus
 
 /// Internal pipeline gate.  Steps check `cook.status == CookStatus::Processing`
 /// to decide whether to continue.  Any step that hits a terminal condition sets
@@ -225,7 +225,7 @@ impl Runtime {
     }
 }
 
-//  Portable handoff sub-structs 
+//  Portable handoff sub-structs
 //
 // These three structs are the only parts of ThumbCook that cross tier
 // boundaries.  ThumbHandoff (in handoff.rs) is composed entirely of them, so
@@ -298,7 +298,7 @@ pub struct ThumbCook<S: HttpStream> {
     /// doing work.  Set to a terminal variant to stop the pipeline.
     pub status: CookStatus,
 
-    //  Shared runtime 
+    //  Shared runtime
     pub runtime: Arc<Runtime>,
 
     //  Handoff-portable groups
@@ -309,7 +309,7 @@ pub struct ThumbCook<S: HttpStream> {
     /// Source identity and cache key populated during `connect`.
     pub src: SourceIdentity,
 
-    //  HTTP connection metadata 
+    //  HTTP connection metadata
     /// Response headers captured on `connect`.
     pub http_headers: HashMap<String, String>,
     /// HTTP status code of the response.
@@ -319,7 +319,7 @@ pub struct ThumbCook<S: HttpStream> {
     // Live connection — access via the http_* methods below.
     http_buf: Option<HttpBuffer<S>>,
 
-    //  Render state 
+    //  Render state
     /// Decoded pixel buffer.  Populated by shortcut or render; consumed and
     /// cleared to `None` by `deliver`.
     pub render_image: Option<DynamicImage>,
@@ -338,7 +338,7 @@ pub struct ThumbCook<S: HttpStream> {
     /// is an artifact of partial decoding, not genuine small-image content.
     pub render_is_progressive_partial: bool,
 
-    //  Output fields — written as steps complete 
+    //  Output fields — written as steps complete
     /// The encoded JPEG thumbnail bytes.
     pub out_thumbnail: Vec<u8>,
     /// Human-readable error/status message; empty on success.
@@ -386,12 +386,28 @@ pub struct ThumbCook<S: HttpStream> {
     /// Handoff cooks skip cache and inspect/shortcut stages.
     pub ctx_handoff: bool,
 
+    /// Set to true after `resolve_cache` runs (whether it resolved or not).
+    /// Prevents `run_with_progress` from re-running the cache phase.
+    pub cache_resolved: bool,
+
+    /// When true, skip the handoff/render chain after shortcut+deliver.
+    /// The pipeline still runs cache checks, connect, inspect, shortcut,
+    /// and deliver — only expensive render/handoff is gated.  Set by the
+    /// cloud wrapper when an account is over its render quota.
+    pub render_disabled: bool,
+
+    /// When set, shortcut-produced results and over-quota placeholders use
+    /// this TTL (seconds from now) for both cache storage expiry and client
+    /// freshness hints.  Computed by the cloud wrapper as the time until
+    /// the quota window resets (end of hour/day).
+    pub render_disabled_ttl_secs: Option<u64>,
+
     // Cancel flag — set via request_cancel(), read via cancelled().
     cancel: Arc<AtomicBool>,
 }
 
 impl<S: HttpStream> ThumbCook<S> {
-    //  Construction 
+    //  Construction
 
     /// Create a new cook for a URL with a shared runtime.
     pub fn new(url: impl Into<String>, runtime: Arc<Runtime>) -> Self {
@@ -440,6 +456,9 @@ impl<S: HttpStream> ThumbCook<S> {
             ctx_customer_id: None,
             ctx_cancelled: false,
             ctx_handoff: false,
+            cache_resolved: false,
+            render_disabled: false,
+            render_disabled_ttl_secs: None,
             cancel: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -612,7 +631,7 @@ impl<S: HttpStream> ThumbCook<S> {
         self.tel_io_secs = self.http_io_secs();
     }
 
-    //  Output views 
+    //  Output views
 
     /// Materialise the client-facing [`ThumbResult`].  Called once at end of `run()`.
     pub fn to_result(&self) -> ThumbResult {
@@ -834,7 +853,7 @@ impl<S: HttpStream> ThumbCook<S> {
         self.render_renderer = Some(format!("handoff/tier{target_tier}"));
     }
 
-    //  Pipeline entry 
+    //  Pipeline entry
 
     /// Run the full pipeline and return `(result, trace, after)`.
     ///
@@ -849,35 +868,31 @@ impl<S: HttpStream> ThumbCook<S> {
         self.run_with_progress(None).await
     }
 
-    /// Run the full pipeline and optionally emit intermediate progress snapshots.
-    pub async fn run_with_progress(
-        mut self,
-        #[allow(unused_mut, unused_variables)] mut on_progress: Option<Box<dyn FnMut(ThumbResult) + Send>>,
-    ) -> (ThumbResult, ThumbTrace, AfterResponse)
+    /// Run the cache-resolution phase: client freshness check, pre-connect
+    /// KV check, HTTP connect, cache-key derivation, post-connect KV check.
+    ///
+    /// Returns `true` if the cook resolved to a terminal state (cache hit,
+    /// 304 Not Modified, connect error, etc.) and `finish()` should be called.
+    /// Returns `false` if the pipeline should continue — the connection is
+    /// open, headers are populated, and `media.kind` is not yet set.
+    ///
+    /// Sets `cache_resolved = true` so `run_with_progress` skips this phase
+    /// when called afterwards.  The caller (cloud wrapper) can interpose
+    /// rate-limit checks between this call and `run_with_progress`.
+    pub async fn resolve_cache(&mut self, _after: &mut AfterResponse, t0: web_time::Instant) -> bool
     where
         S: Send + 'static,
     {
-        let mut after = AfterResponse::new();
-        let t0 = web_time::Instant::now();
+        self.cache_resolved = true;
 
         //  Client-side freshness fast path
-        // If the caller's cache hints say the resource is still fresh, skip
-        // the upstream fetch entirely.  The client sent cache hints — it
-        // declares it has the cached data and only wants a freshness check.
         if self.input.cache.as_ref().is_some_and(|h| h.is_fresh()) {
             self.status = CookStatus::Fresh;
             self.out_duration = t0.elapsed().as_secs_f64();
-            return self.finish(after);
+            return true;
         }
 
         //  Pre-connect cache check
-        // Only run when the caller did NOT provide hints.  When the caller
-        // provides hints they already have a cached copy — they just want
-        // a freshness check via conditional headers, not our KV data.
-        //
-        // If we have a fresh KV entry we skip the HTTP request entirely.
-        // If the KV entry is stale, its freshness hints (etag / last-modified)
-        // are used to send a conditional request in connect.
         let mut pre_cached: Option<ThumbResult> = None;
         let mut pre_cache_backend: Option<String> = None;
         if !self.ctx_handoff && self.input.cache.is_none() {
@@ -896,8 +911,6 @@ impl<S: HttpStream> ThumbCook<S> {
             let pre_key = format!("{account_id}/{url_hash}");
 
             if let Some((cached, backend_name)) = self.runtime.cache.check(&pre_key).await {
-                // If the cached hints say the resource is still fresh,
-                // return the cached result without any HTTP request.
                 let decoded = cached
                     .media
                     .as_ref()
@@ -923,11 +936,9 @@ impl<S: HttpStream> ThumbCook<S> {
                     self.cache_hit = Some(backend_name.to_string());
                     self.status = CookStatus::Complete;
                     self.out_duration = t0.elapsed().as_secs_f64();
-                    return self.finish(after);
+                    return true;
                 }
 
-                // Stale — use the cached freshness hints as conditional
-                // request headers so connect can get a 304 instead of 200.
                 self.input.cache = decoded;
                 pre_cached = Some(cached);
                 pre_cache_backend = Some(backend_name.to_string());
@@ -936,14 +947,10 @@ impl<S: HttpStream> ThumbCook<S> {
 
         //  connect
         let t_step = web_time::Instant::now();
-        pipeline::connect(&mut self).await;
+        pipeline::connect(self).await;
         self.tel_connect_secs = t_step.elapsed().as_secs_f64();
         if !self.status.is_processing() {
-            // connect set a terminal status (failed / not_modified / unavailable).
             if self.status == CookStatus::Fresh {
-                // When the caller provided hints they have their own cached copy;
-                // just confirm it's still valid — no thumbnail needed.
-                // When we did a KV-assisted conditional fetch, return the KV data.
                 if let Some(cached) = pre_cached {
                     if let Some(ref media) = cached.media {
                         self.out_thumbnail = media.thumbnail.clone();
@@ -966,14 +973,13 @@ impl<S: HttpStream> ThumbCook<S> {
                         .and_then(CacheHints::decode);
                     self.cache_hit = pre_cache_backend.clone();
                 }
-                // pre_cached is None when caller provided hints → empty not_modified.
             }
             self.stamp_download_bytes();
             self.out_duration = t0.elapsed().as_secs_f64();
-            return self.finish(after);
+            return true;
         }
 
-        //  cache key derivation 
+        //  cache key derivation
         {
             use crate::source::content_hash_from_headers;
             use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -997,8 +1003,6 @@ impl<S: HttpStream> ThumbCook<S> {
                 self.ctx_customer_id.as_deref().unwrap_or("")
             );
             let url_hash = URL_SAFE_NO_PAD.encode(Sha256::digest(key_input.as_bytes()));
-            // Prefix with customer_id so the KV inventory key can extract it
-            // for per-account scoping (see parse_cache_key in the API crate).
             let account_id = self.ctx_customer_id.as_deref().unwrap_or("_");
             self.src.cache_key = Some(format!("{account_id}/{url_hash}"));
             self.src.cache_key_source = Some(source);
@@ -1007,32 +1011,69 @@ impl<S: HttpStream> ThumbCook<S> {
         //  cache check
         if !self.ctx_handoff
             && let Some(ref key) = self.src.cache_key.clone()
-                && let Some((cached, backend_name)) = self.runtime.cache.check(key).await {
-                    self.http_close().await;
-                    if let Some(ref media) = cached.media {
-                        self.out_thumbnail = media.thumbnail.clone();
-                        self.media.mime = Some(media.mime.clone());
-                        self.media.file_size = Some(media.file_size);
-                        self.media.kind = Some(media.kind);
-                        self.media.extension = Some(media.extension.clone());
-                        self.media.properties = Some(media.properties.clone());
-                    }
-                    self.out_message = cached.message.unwrap_or_default();
-                    self.out_placeholder = cached.media.as_ref().and_then(|m| {
-                        if m.placeholder.is_empty() { None } else { Some(m.placeholder.clone()) }
-                    });
-                    self.out_download_bytes = cached.download_size;
-                    self.src.cache_hints = cached
-                        .media
-                        .as_ref()
-                        .filter(|m| !m.cache.is_empty())
-                        .map(|m| m.cache.as_str())
-                        .and_then(CacheHints::decode);
-                    self.cache_hit = Some(backend_name.to_string());
-                    self.status = CookStatus::Complete;
-                    self.out_duration = t0.elapsed().as_secs_f64();
-                    return self.finish(after);
-                }
+            && let Some((cached, backend_name)) = self.runtime.cache.check(key).await
+        {
+            self.http_close().await;
+            if let Some(ref media) = cached.media {
+                self.out_thumbnail = media.thumbnail.clone();
+                self.media.mime = Some(media.mime.clone());
+                self.media.file_size = Some(media.file_size);
+                self.media.kind = Some(media.kind);
+                self.media.extension = Some(media.extension.clone());
+                self.media.properties = Some(media.properties.clone());
+            }
+            self.out_message = cached.message.unwrap_or_default();
+            self.out_placeholder = cached
+                .media
+                .as_ref()
+                .and_then(|m| if m.placeholder.is_empty() { None } else { Some(m.placeholder.clone()) });
+            self.out_download_bytes = cached.download_size;
+            self.src.cache_hints = cached
+                .media
+                .as_ref()
+                .filter(|m| !m.cache.is_empty())
+                .map(|m| m.cache.as_str())
+                .and_then(CacheHints::decode);
+            self.cache_hit = Some(backend_name.to_string());
+            self.status = CookStatus::Complete;
+            self.out_duration = t0.elapsed().as_secs_f64();
+            return true;
+        }
+
+        // Cache did not resolve.  Connection is open, headers are set.
+        // Caller should check rate limits, then call run_with_progress to
+        // continue with inspect / shortcut / render.
+        false
+    }
+
+    /// Run the full pipeline and optionally emit intermediate progress snapshots.
+    pub async fn run_with_progress(
+        mut self,
+        #[allow(unused_mut, unused_variables)] mut on_progress: Option<Box<dyn FnMut(ThumbResult) + Send>>,
+    ) -> (ThumbResult, ThumbTrace, AfterResponse)
+    where
+        S: Send + 'static,
+    {
+        let mut after = AfterResponse::new();
+        let t0 = web_time::Instant::now();
+
+        //  Cache-resolution phase
+        // Skip when resolve_cache() already ran externally (cloud wrapper
+        // calls it to interpose rate-limit checks between cache and render).
+        if !self.cache_resolved {
+            if self.resolve_cache(&mut after, t0).await {
+                return self.finish(after);
+            }
+        } else {
+            // resolve_cache already ran; the cook is either at Processing
+            // (continue) or a terminal state.
+            if !self.status.is_processing() {
+                return self.finish(after);
+            }
+        }
+
+        //  Below this point: cache did not resolve.  The connection is open,
+        // headers are populated.  Proceed with inspect / shortcut / render.
 
         if !self.ctx_handoff {
             //  inspect
@@ -1046,7 +1087,7 @@ impl<S: HttpStream> ThumbCook<S> {
             }
         }
 
-        //  shortcut 
+        //  shortcut
         // Runs in both direct and handoff modes.  On a handoff, media
         // kind/extension are already set from the tier-1 inspect, so the
         // shortcut has all the context it needs.  Tier-2's higher
@@ -1061,12 +1102,28 @@ impl<S: HttpStream> ThumbCook<S> {
             if self.status == CookStatus::Complete {
                 self.out_duration = t0.elapsed().as_secs_f64();
                 if !self.ctx_handoff
-                    && let Some(ref key) = self.src.cache_key.clone() {
-                        let result = self.to_result();
-                        let cost = render_cost_from_secs(self.out_duration);
-                        let expires = self.cache_expires_at();
-                        self.runtime.cache.store(key, &result, cost, expires, &mut after);
+                    && let Some(ref key) = self.src.cache_key.clone()
+                {
+                    // Override freshness so the client knows to retry
+                    // after the quota window ends.
+                    if self.render_disabled {
+                        if let Some(ttl) = self.render_disabled_ttl_secs {
+                            self.src.cache_hints = Some(CacheHints::expiring_in(ttl));
+                        }
                     }
+                    let result = self.to_result();
+                    let cost = render_cost_from_secs(self.out_duration);
+                    let now = web_time::SystemTime::now()
+                        .duration_since(web_time::SystemTime::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let expires = if let Some(ttl) = self.render_disabled_ttl_secs {
+                        now + ttl
+                    } else {
+                        self.cache_expires_at()
+                    };
+                    self.runtime.cache.store(key, &result, cost, expires, &mut after);
+                }
                 return self.finish(after);
             }
 
@@ -1075,23 +1132,36 @@ impl<S: HttpStream> ThumbCook<S> {
             // — success or placeholder — so an intermediate just adds noise.
         }
 
-        //  deliver (when shortcut decoded an image) 
+        //  deliver (when shortcut decoded an image)
         if self.render_image.is_some() {
             let t_step = web_time::Instant::now();
             pipeline::deliver(&mut self).await;
             self.tel_deliver_secs = t_step.elapsed().as_secs_f64();
             self.out_duration = t0.elapsed().as_secs_f64();
-            if !self.ctx_handoff && self.status == CookStatus::Complete
-                && let Some(ref key) = self.src.cache_key.clone() {
-                    let result = self.to_result();
-                    let cost = render_cost_from_secs(self.out_duration);
-                    let expires = self.cache_expires_at();
-                    self.runtime.cache.store(key, &result, cost, expires, &mut after);
-                }
+            if !self.ctx_handoff
+                && self.status == CookStatus::Complete
+                && let Some(ref key) = self.src.cache_key.clone()
+            {
+                let result = self.to_result();
+                let cost = render_cost_from_secs(self.out_duration);
+                let expires = self.cache_expires_at();
+                self.runtime.cache.store(key, &result, cost, expires, &mut after);
+            }
             return self.finish(after);
         }
 
-        //  handoff to higher tier 
+        //  render-disabled gate — over quota: no handoff or render
+        if self.render_disabled {
+            // Shortcut didn't produce a result and deliver didn't fire.
+            // Produce a placeholder based on inspect results.  finish()
+            // selects the appropriate placeholder JPEG by FileKind.
+            self.status = CookStatus::Failed;
+            self.out_message = "render quota reached".to_string();
+            self.out_duration = t0.elapsed().as_secs_f64();
+            return self.finish(after);
+        }
+
+        //  handoff to higher tier
         // Check for a registered in-process renderer *before* closing the
         // connection so the renderer can stream from the live HttpBuffer.
         #[cfg(feature = "native")]
@@ -1123,13 +1193,15 @@ impl<S: HttpStream> ThumbCook<S> {
                     pipeline::deliver(&mut self).await;
                     self.tel_deliver_secs = t_step.elapsed().as_secs_f64();
                     self.out_duration = t0.elapsed().as_secs_f64();
-                    if !self.ctx_handoff && self.status == CookStatus::Complete
-                        && let Some(ref key) = self.src.cache_key.clone() {
-                            let result = self.to_result();
-                            let cost = render_cost_from_secs(self.out_duration);
-                            let expires = self.cache_expires_at();
-                            self.runtime.cache.store(key, &result, cost, expires, &mut after);
-                        }
+                    if !self.ctx_handoff
+                        && self.status == CookStatus::Complete
+                        && let Some(ref key) = self.src.cache_key.clone()
+                    {
+                        let result = self.to_result();
+                        let cost = render_cost_from_secs(self.out_duration);
+                        let expires = self.cache_expires_at();
+                        self.runtime.cache.store(key, &result, cost, expires, &mut after);
+                    }
                 }
                 return self.finish(after);
             }
@@ -1140,7 +1212,7 @@ impl<S: HttpStream> ThumbCook<S> {
             self.placeholder_source = Some(ResultSource::Fallback);
         }
 
-        //  handoff fallback chain 
+        //  handoff fallback chain
         // Build the handoff payload once (closes the HTTP connection), then
         // try tiers in ascending order: start with the routing recommendation
         // and escalate upward on failure.  Tier 2 never falls back on its own;
@@ -1189,9 +1261,10 @@ impl<S: HttpStream> ThumbCook<S> {
 
                 // Emit intermediate progress before the async handoff gap.
                 if !self.ctx_handoff
-                    && let Some(ref mut progress) = on_progress {
-                        progress(self.to_progress_result(t0.elapsed().as_secs_f64()));
-                    }
+                    && let Some(ref mut progress) = on_progress
+                {
+                    progress(self.to_progress_result(t0.elapsed().as_secs_f64()));
+                }
 
                 let outcome: Result<HandoffResponse, String> = if first_attempt {
                     first_attempt = false;
@@ -1225,7 +1298,7 @@ impl<S: HttpStream> ThumbCook<S> {
                         }
                     }
                 } else {
-                    //  Fallback attempt (no dedup) 
+                    //  Fallback attempt (no dedup)
                     crate::handoff::post_handoff(url, &target.headers, &payload).await
                 };
 
@@ -1314,6 +1387,8 @@ impl<S: HttpStream> ThumbCook<S> {
                 let hints = self.src.cache_hints.take();
                 self.src.cache_hints = if tried_render {
                     Some(hints.unwrap_or_default().with_min_expiry(3600))
+                } else if let Some(ttl) = self.render_disabled_ttl_secs {
+                    Some(CacheHints::expiring_in(ttl))
                 } else {
                     Some(CacheHints::expiring_in(86400))
                 };
