@@ -65,7 +65,7 @@ pub mod renderer;
 //  Convenience re-exports
 
 pub use cook::{
-    CallerContext, CookStatus, InputSpec, MediaInfo, Runtime, SourceIdentity, ThumbCook as ThumbCookGeneric,
+    CookStatus, InputSpec, MediaInfo, Runtime, SourceIdentity, ThumbCook as ThumbCookGeneric,
 };
 pub use dispatch::{
     FormatEntry, ThumbRoute, format_manifest, route, set_tier3_available_extensions, tier3_can_handle,

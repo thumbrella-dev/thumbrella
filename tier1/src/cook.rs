@@ -106,20 +106,6 @@ impl CookStatus {
     }
 }
 
-//  CallerContext
-
-/// How this cook was invoked — written to [`ThumbTrace`], never sent to clients.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-pub enum CallerContext {
-    /// HTTP client identified by IP address.
-    Ip { addr: String },
-    /// Invoked from the `tier1 thumb` CLI subcommand.
-    Cli,
-    /// Invoked programmatically as a library (e.g. unit tests, embedders).
-    Library,
-}
-
 //  Runtime
 
 /// Shared server-wide configuration.  One instance per process, referenced by
@@ -374,8 +360,6 @@ pub struct ThumbCook<S: HttpStream> {
     pub tel_version_override: Option<String>,
 
     //  Attribution / context
-    /// How this cook was invoked.
-    pub ctx_caller: Option<CallerContext>,
     /// Groups multiple trace records from the same inbound batch call.
     pub ctx_session_id: Option<String>,
     /// Customer identifier for billing and quota attribution.
@@ -451,7 +435,6 @@ impl<S: HttpStream> ThumbCook<S> {
             tel_thumbnail_bytes: None,
             tel_job_tier_override: None,
             tel_version_override: None,
-            ctx_caller: None,
             ctx_session_id: None,
             ctx_customer_id: None,
             ctx_cancelled: false,
@@ -736,14 +719,6 @@ impl<S: HttpStream> ThumbCook<S> {
         #[cfg(not(feature = "native"))]
         let timestamp = String::new();
 
-        let status = match self.status {
-            CookStatus::Processing | CookStatus::Complete => ResultStatus::Success,
-            CookStatus::Fresh => ResultStatus::Success,
-            CookStatus::Failed => ResultStatus::Failed,
-            CookStatus::Overloaded => ResultStatus::Overloaded,
-            CookStatus::Intermediate => ResultStatus::Intermediate,
-        };
-
         #[cfg(feature = "native")]
         let default_tier = if self.runtime.renderer.is_some() { 2 } else { 1 };
         #[cfg(not(feature = "native"))]
@@ -754,13 +729,20 @@ impl<S: HttpStream> ThumbCook<S> {
 
         ThumbTrace {
             timestamp,
-            status,
+            source: if self.status == CookStatus::Fresh {
+                Some(ResultSource::NotModified)
+            } else if let Some(ps) = self.placeholder_source {
+                Some(ps)
+            } else if self.out_placeholder.is_some() {
+                Some(ResultSource::Fallback)
+            } else if self.render_renderer.as_deref().is_some_and(|r| r.starts_with("shortcut/")) {
+                Some(ResultSource::Shortcut)
+            } else {
+                Some(ResultSource::Render)
+            },
             kind: self.media.kind,
             extension: self.media.extension.as_deref().map(crate::pipeline::canonical_extension),
             canonical_url: self.src.canonical_url.clone(),
-            cache_key: self.src.cache_key.clone(),
-            cache_key_source: self.src.cache_key_source.clone(),
-            source_etag: self.src.cache_hints.as_ref().and_then(|h| h.etag.clone()),
             download_bytes: self.out_download_bytes,
             download_tail_bytes: self.tel_download_tail_bytes,
             io_secs: self.tel_connect_secs + self.tel_io_secs,
@@ -771,14 +753,8 @@ impl<S: HttpStream> ThumbCook<S> {
             thumbnail_bytes: self.tel_thumbnail_bytes,
             job_tier: self.tel_job_tier_override.unwrap_or(default_tier),
             job_renderer: self.render_renderer.clone(),
-            session_id: self.ctx_session_id.clone(),
-            customer_id: self.ctx_customer_id.clone(),
             message: if self.out_message.is_empty() { None } else { Some(self.out_message.clone()) },
-            cache_hit: self.cache_hit.clone(),
             server: self.runtime.server.clone(),
-            render_handler: self.render_handler,
-            caller: self.ctx_caller.clone(),
-            cancelled: self.ctx_cancelled,
             version: self
                 .tel_version_override
                 .clone()

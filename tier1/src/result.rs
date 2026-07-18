@@ -16,7 +16,6 @@
 //! they are output views constructed once at the end of
 //! [`crate::cook::ThumbCook::run`].
 
-use crate::cook::CallerContext;
 use crate::media::FileKind;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -191,8 +190,9 @@ pub struct ThumbTrace {
     //  Request identity
     /// RFC 3339 timestamp of when the trace was materialised.
     pub timestamp: String,
-    /// Outcome of the job, mirroring [`ThumbResult::status`].
-    pub status: ResultStatus,
+    /// How the thumbnail was produced (render, shortcut, cache, fallback, …).
+    /// `None` on total failure where no classification was possible.
+    pub source: Option<ResultSource>,
     /// Media kind detected (mirrors [`ThumbMedia::kind`]).
     pub kind: Option<FileKind>,
     /// File extension detected (mirrors [`ThumbMedia::extension`]).
@@ -200,9 +200,6 @@ pub struct ThumbTrace {
 
     //  Source identity
     pub canonical_url: Option<String>,
-    pub cache_key: Option<String>,
-    pub cache_key_source: Option<String>,
-    pub source_etag: Option<String>,
     //  Download metrics
     pub download_bytes: u64,
     pub download_tail_bytes: u64,
@@ -229,13 +226,6 @@ pub struct ThumbTrace {
     pub message: Option<String>,
 
     //  Attribution
-    pub session_id: Option<String>,
-    pub customer_id: Option<String>,
-    /// Name of the cache backend that produced the hit (e.g. `"sqlite"`, `"redis"`); `None` on miss.
-    pub cache_hit: Option<String>,
-    pub render_handler: RenderHandler,
-    pub caller: Option<CallerContext>,
-    pub cancelled: bool,
     pub server: Option<String>,
     pub version: String,
 }
