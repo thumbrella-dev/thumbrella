@@ -1,10 +1,10 @@
-//! Trace-log integration — `TraceBackend` trait, `TraceStore` runtime holder,
+//! Trace-log integration - `TraceBackend` trait, `TraceStore` runtime holder,
 //! and DSN-based backend construction.
 //!
 //! ## Async contract
 //!
 //! `record_task` returns an owned [`DeferredFuture`] the caller schedules via
-//! [`AfterResponse`] — writes never block the response path.
+//! [`AfterResponse`] - writes never block the response path.
 //!
 //! ## One file per tier
 //!
@@ -42,7 +42,7 @@ pub trait TraceBackend: Send + Sync {
 
 /// Holds the active trace backends for the process.
 ///
-/// Cheap to clone — backends are behind `Arc`.  An empty store
+/// Cheap to clone - backends are behind `Arc`.  An empty store
 /// (`TraceStore::none()`) is used when no sink is configured.
 #[derive(Clone, Default)]
 pub struct TraceStore {
@@ -55,7 +55,7 @@ impl TraceStore {
         Self { backends }
     }
 
-    /// Empty store — no writes.
+    /// Empty store - no writes.
     pub fn none() -> Self {
         Self { backends: Vec::new() }
     }
@@ -81,7 +81,7 @@ impl TraceStore {
 /// Build a backend list from a `TBR_TRACE` DSN string.
 ///
 /// Supported schemes:
-/// - `ndjson:<path>` — Append-only NDJSON file (path may be absolute or relative)
+/// - `ndjson:<path>` - Append-only NDJSON file (path may be absolute or relative)
 ///
 /// Returns an error string if the scheme is unknown or the backend fails to open.
 #[cfg(feature = "native")]
@@ -109,7 +109,7 @@ pub fn validate_dsn(dsn: &str) -> (crate::check::Validation, Option<crate::check
     let scheme = dsn.split(':').next().unwrap_or(dsn);
     (
         crate::check::Validation::error(format!(
-            "unknown trace DSN scheme '{scheme}' — supported: ndjson:<path>"
+            "unknown trace DSN scheme '{scheme}' - supported: ndjson:<path>"
         )),
         None,
     )

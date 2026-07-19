@@ -1,4 +1,4 @@
-//! Connect-string parsing — shared between native and WASM builds.
+//! Connect-string parsing - shared between native and WASM builds.
 //!
 //! Follows the same grammar as `parseConnect()` in the TypeScript client
 //! and is used by both `TBR_CONNECT`, `TBR_TIER2`, and `TBR_TIER3`.
@@ -15,7 +15,7 @@
 //!   Tokens starting with `tbr_[a-z]_` are recognised as Bearer auth.
 //! - **URL + handshake:** `http://tier2:8000,mysecret`
 //!   Any bare value that does *not* look like an auth token is treated as
-//!   an `x-tbr-handshake` header — a shorthand for the common case.
+//!   an `x-tbr-handshake` header - a shorthand for the common case.
 //! - **Backward-compat `#` fragment:** `http://tier2:8000#secret`
 //!   (converted to `x-tbr-handshake: secret`)
 //! - **Bare token:** `tbr_s_AbCd...` → `Authorization: Bearer`
@@ -23,7 +23,7 @@
 
 use std::collections::HashMap;
 
-/// Parsed connect-string target — URL plus optional HTTP headers.
+/// Parsed connect-string target - URL plus optional HTTP headers.
 ///
 /// Follows the same syntax as `TBR_CONNECT` in the TypeScript client.
 #[derive(Debug, Clone, Default)]
@@ -55,7 +55,7 @@ pub fn parse_connect_target(raw: Option<String>) -> ConnectTarget {
         return ConnectTarget::default();
     };
 
-    // Bare value (no scheme) — either an auth token or a handshake.
+    // Bare value (no scheme) - either an auth token or a handshake.
     if !raw.contains("://") {
         let mut headers = HashMap::new();
         if looks_like_auth_token(&raw) {

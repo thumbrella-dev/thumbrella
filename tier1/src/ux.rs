@@ -1,4 +1,4 @@
-//! Server UX — startup banner, request logging, hints, and error formatting.
+//! Server UX - startup banner, request logging, hints, and error formatting.
 //!
 //! All intentional user-facing output flows through this module.  Raw
 //! tracing / eprintln is suppressed by default and only enabled when
@@ -52,11 +52,11 @@ pub fn warn_localhost_denied() {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputStyle {
-    /// Full output — banner, request log, hints, AND raw tracing/ffmpeg logs.
+    /// Full output - banner, request log, hints, AND raw tracing/ffmpeg logs.
     Full,
-    /// Default — banner, request log, hints.  No raw logs.
+    /// Default - banner, request log, hints.  No raw logs.
     Standard,
-    /// Sparse — request log only, no banner, no hints, no raw logs.
+    /// Sparse - request log only, no banner, no hints, no raw logs.
     Minimal,
 }
 
@@ -200,7 +200,7 @@ impl Ux {
 
     //  Startup banner
 
-    /// Print the startup block — banner, hints, and connection info.
+    /// Print the startup block - banner, hints, and connection info.
     /// Called once from `run_server`.
     pub fn print_startup(
         &self,
@@ -251,7 +251,7 @@ impl Ux {
         //  Container hint
         if in_container() {
             lines.push(format!(
-                "  # hint: running in a container — map with -p HOST:{port} to access from the host",
+                "  # hint: running in a container - map with -p HOST:{port} to access from the host",
             ));
         }
 
@@ -473,7 +473,7 @@ fn colorize_json_str(json: &str) -> String {
             }
 
             '-' | '0'..='9' => {
-                // Number — read until non-number char.
+                // Number - read until non-number char.
                 let start = i;
                 while i < len && matches!(chars[i], '-' | '+' | '0'..='9' | '.' | 'e' | 'E') {
                     i += 1;

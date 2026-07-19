@@ -33,7 +33,7 @@ def extract_mesh(stage, output_path):
     if stage_up == UsdGeom.Tokens.z:
         pass  # already Z-up
     elif stage_up == UsdGeom.Tokens.y:
-        # (x, y, z) → (x, z, -y)  — +90° around X
+        # (x, y, z) → (x, z, -y)  - +90° around X
         up_rotation = Gf.Matrix4d().SetRotate(Gf.Rotation(Gf.Vec3d(1, 0, 0), 90.0))
     # Unknown: leave as-is.
 
@@ -56,12 +56,12 @@ def extract_mesh(stage, output_path):
         indices = fvi_attr.Get()
         counts = fvc_attr.Get()
 
-        # UVs — skip entirely. Without an MTL they serve no purpose
+        # UVs - skip entirely. Without an MTL they serve no purpose
         # and F3D may interpret them as vertex attributes causing
         # noisy faceted shading on dense meshes at thumbnail size.
         mesh_uvs = []
 
-        # Normals — skip. USD sometimes authors per-face normals that
+        # Normals - skip. USD sometimes authors per-face normals that
         # produce a noisy faceted look at thumbnail size.  Let F3D
         # auto-compute smooth normals from the geometry instead.
         mesh_normals = []

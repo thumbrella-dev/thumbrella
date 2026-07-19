@@ -2,22 +2,22 @@
 //!
 //! Tier 1 owns the full pipeline (connect → inspect → shortcut → **render** →
 //! deliver → cache → trace).  The render step is the only part it cannot
-//! perform entirely in-process on its own — formats like video, HEIC, EXR,
+//! perform entirely in-process on its own - formats like video, HEIC, EXR,
 //! SVG, and documents require native libraries beyond what tier 1 links.
 //!
 //! # One cook, all the way through
 //!
 //! There is exactly one [`crate::cook::ThumbCook`] per request.  The renderer
-//! receives it as `&mut dyn RenderCook` — a thin trait-object view that erases
+//! receives it as `&mut dyn RenderCook` - a thin trait-object view that erases
 //! the `S` (HttpStream) type parameter and exposes only what the renderer
 //! needs:
-//! - **Read** — `take_reader()` moves the buffer out as a
+//! - **Read** - `take_reader()` moves the buffer out as a
 //!   `Box<dyn ReadSeek + Send>` while preserving random-access page-cache
 //!   semantics.  libav's `AVIOContext` callbacks call into this synchronously,
 //!   driving HTTP reads on-demand without buffering the whole file.
-//! - **Metadata** — `media_kind()`, `media_extension()`, `content_length()`,
+//! - **Metadata** - `media_kind()`, `media_extension()`, `content_length()`,
 //!   `input_url()`.
-//! - **Write-back** — `set_render_image()`, `set_render_renderer()`, etc.
+//! - **Write-back** - `set_render_image()`, `set_render_renderer()`, etc.
 //!   The renderer writes results directly into the cook's fields; tier 1 then
 //!   runs its own `deliver` step as normal.
 //!
@@ -32,7 +32,7 @@
 //! Implementations must:
 //! - Set `cook.set_render_image(img)` on success.
 //! - Return `true` when the format was claimed (whether decode succeeded
-//!   or not — call `cook.fail_cook(msg)` on unrecoverable errors).
+//!   or not - call `cook.fail_cook(msg)` on unrecoverable errors).
 //! - Return `false` to signal "not my format".
 
 use std::future::Future;
@@ -45,7 +45,7 @@ use crate::cook::Runtime;
 use crate::http_buf::ReadSeek;
 use crate::media::FileKind;
 
-//  RenderCook — type-erased view of ThumbCook for renderer impls
+//  RenderCook - type-erased view of ThumbCook for renderer impls
 
 /// Trait-object interface passed to [`InProcessRenderer::render`].
 ///
@@ -80,7 +80,7 @@ pub trait RenderCook: Send {
     /// during inspect).  Returns `None` if fewer than `len` bytes are
     /// available or no connection is open.
     ///
-    /// This is safe to call before `take_reader()` — the reader remains
+    /// This is safe to call before `take_reader()` - the reader remains
     /// intact for the chosen backend.
     fn peek_bytes(&self, len: usize) -> Option<Vec<u8>>;
 
@@ -118,7 +118,7 @@ pub trait RenderCook: Send {
 
 // RenderCook is implemented for ThumbCook in cook.rs (needs private field access).
 
-//  RenderOutput — convenience struct for internal decode pipelines
+//  RenderOutput - convenience struct for internal decode pipelines
 
 /// Intermediate result from a decode function (image crate, libav, etc.).
 ///
@@ -157,7 +157,7 @@ pub fn apply_render_output(cook: &mut dyn RenderCook, out: RenderOutput) {
 pub trait InProcessRenderer: Send + Sync + 'static {
     /// Attempt to render the item in `cook`.
     ///
-    /// Returns `true` when the format was claimed (regardless of success —
+    /// Returns `true` when the format was claimed (regardless of success -
     /// call `cook.fail_cook(msg)` on decode errors).
     /// Returns `false` to signal "not my format".
     fn render<'a>(&'a self, cook: &'a mut dyn RenderCook) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;

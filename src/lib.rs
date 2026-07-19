@@ -16,7 +16,7 @@
 //! photographs, video, documents, and 3D models. One command runs it locally
 //! or in Docker.
 //!
-//! This crate is the **workspace root** — it provides the top-level
+//! This crate is the **workspace root** it provides the top-level
 //! documentation entry point for the entire codebase. The server is split
 //! across several internal crates (called *tiers*) that build on each other.
 //!
@@ -45,15 +45,15 @@
 //!
 //! | Crate | Role | Key modules |
 //! |-------|------|-------------|
-//! | [`tier1`] | Core types and pipeline — compiles to both native and `wasm32-unknown-unknown` | `request`, `result`, `spec`, `dispatch`, `pipeline`, `cache` |
-//! | [`tier2`] | Media decoding — re-exports `tier1` and adds FFmpeg-backed renderers | `avdecode`, `renderer` |
-//! | [`tier3`] | Full server — sandbox, env checks, pluggable backends, the `thumbrella` binary | `sandbox`, `env_check`, `renderer`, `scratch` |
+//! | [`tier1`] | Core types and pipeline - compiles to both native and `wasm32-unknown-unknown` | `request`, `result`, `spec`, `dispatch`, `pipeline`, `cache` |
+//! | [`tier2`] | Media decoding - re-exports `tier1` and adds FFmpeg-backed renderers | `avdecode`, `renderer` |
+//! | [`tier3`] | Full server - sandbox, env checks, pluggable backends, the `thumbrella` binary | `sandbox`, `env_check`, `renderer`, `scratch` |
 //!
 //! ### Supporting crates
 //!
 //! | Crate | Role |
 //! |-------|------|
-//! | [`ffs_build`] | Bundled static FFmpeg — version info, build metadata, vcpkg integration |
+//! | [`ffs_build`] | Bundled static FFmpeg - version info, build metadata, vcpkg integration |
 //! | [`ffs_check`] | Build-environment preflight checks for FFmpeg linkage |
 //!
 //! ## Naming conventions
@@ -68,12 +68,12 @@
 //!
 //! ## Where to start
 //!
-//! - **[`tier1::request`]** — incoming request structure
-//! - **[`tier1::result`]** — thumbnail result types
-//! - **[`tier1::dispatch`]** — the render dispatch table
-//! - **[`tier1::pipeline`]** — end-to-end request pipeline
-//! - **[`tier2::avdecode`]** — FFmpeg-based media decoding
-//! - **[`tier3::sandbox`]** — server sandboxing and environment checks
+//! - **[`tier1::request`]** - incoming request structure
+//! - **[`tier1::result`]** - thumbnail result types
+//! - **[`tier1::dispatch`]** - the render dispatch table
+//! - **[`tier1::pipeline`]** - end-to-end request pipeline
+//! - **[`tier2::avdecode`]** - FFmpeg-based media decoding
+//! - **[`tier3::sandbox`]** - server sandboxing and environment checks
 //!
 //! ## Build modes
 //!

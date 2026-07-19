@@ -1,4 +1,4 @@
-//! Dispatch routing — mapping (kind, extension) to a processing tier.
+//! Dispatch routing - mapping (kind, extension) to a processing tier.
 //!
 //! # Tier definitions
 //!
@@ -27,11 +27,11 @@
 //! the budget for non-trivial inputs.  Only truly trivial raster cases are
 //! processed in-tier; everything else dispatches.
 //!
-//! SVG rendering via resvg is definitively Tier 2 — layout and rasterization
+//! SVG rendering via resvg is definitively Tier 2 - layout and rasterization
 //! of even modest SVG files can consume tens of milliseconds of CPU.
 //!
 //! When a tier is not configured (no handoff target registered), the cook falls
-//! back to a `Fallback` strategy — a pre-rendered placeholder icon is used and
+//! back to a `Fallback` strategy - a pre-rendered placeholder icon is used and
 //! the result is marked accordingly.  No error is surfaced to the client.
 //!
 //! # Tier 2 bypass
@@ -49,7 +49,7 @@
 //! # Cache invalidation note
 //!
 //! A per-route cache generation integer was considered but removed.  Cache
-//! lookup must happen *before* sniffing — we need a cache hit to return before
+//! lookup must happen *before* sniffing - we need a cache hit to return before
 //! spending any CPU on file type detection.  Since routing only happens after
 //! sniffing, a route-level generation number cannot be part of the cache key
 //! at the point where it would matter.  Any cache invalidation strategy will
@@ -65,13 +65,13 @@ use crate::media::FileKind;
 /// between local processing and a tier handoff.
 ///
 /// `tier` is a **recommendation**, not a hard constraint.  The cook may
-/// escalate to a higher tier at runtime — for example, if a TIFF turns out to
+/// escalate to a higher tier at runtime - for example, if a TIFF turns out to
 /// be 200 MB, or if the connect step reveals a codec that requires libav.
 /// The `tier` recorded here is the *initial* routing decision; the actual tier
 /// used is recorded in `ThumbTrace` after the cook completes.
 ///
 /// If the required tier is not available (no handoff configured), the cook
-/// falls back to a placeholder icon — the tier is still logged accurately.
+/// falls back to a placeholder icon - the tier is still logged accurately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThumbRoute {
     /// Tier that should process this item (1 = this server, 2+ = handoff).
@@ -87,7 +87,7 @@ pub struct ThumbRoute {
 /// kind-based defaults when the extension is not in the manifest.
 ///
 /// Called during the inspect step once the file kind and canonical extension
-/// are known.  Returns a best-effort recommendation — the cook may still
+/// are known.  Returns a best-effort recommendation - the cook may still
 /// escalate to a higher tier at runtime based on file size, detected codec,
 /// or other properties discovered during connect/inspect.
 ///
@@ -154,12 +154,12 @@ pub struct FormatEntry {
 
 /// Static manifest of every format Thumbrella knows about.
 ///
-/// This is a fixed, hardcoded list — Tier 1 servers do not probe the
+/// This is a fixed, hardcoded list - Tier 1 servers do not probe the
 /// environment, so they must know the full universe of formats statically.
 /// This is the single source of truth for both [`route`] and CLI diagnostics.
 #[rustfmt::skip]
 pub fn format_manifest() -> &'static [FormatEntry] {&[
-    //  Tier 1 — pure Rust (image crate)
+    //  Tier 1 - pure Rust (image crate)
     FormatEntry {extension: "png", label: "PNG",
                 kind: FileKind::Image,  tier: 1, renderer: "image_crate", shortcut: true },
     FormatEntry {extension: "gif", label: "GIF",
@@ -172,10 +172,10 @@ pub fn format_manifest() -> &'static [FormatEntry] {&[
                 kind: FileKind::Image,  tier: 1, renderer: "image_crate", shortcut: true },
     FormatEntry {extension: "ico", label: "Windows Icon",
                 kind: FileKind::Image,  tier: 1, renderer: "image_crate", shortcut: true },
-    //  Tier 2 — JPEG (baseline/progressive) via libav
+    //  Tier 2 - JPEG (baseline/progressive) via libav
     FormatEntry {extension: "jpeg", label: "JPEG",
                 kind: FileKind::Image,  tier: 2, renderer: "libav", shortcut: true },
-    //  Tier 2 — libav / resvg / jxl-oxide
+    //  Tier 2 - libav / resvg / jxl-oxide
     FormatEntry {extension: "svg", label: "Scalable Vector",
                 kind: FileKind::Vector, tier: 2, renderer: "resvg", shortcut: false},
     FormatEntry {extension: "jxl", label: "JPEG XL",
@@ -224,7 +224,7 @@ pub fn format_manifest() -> &'static [FormatEntry] {&[
                 kind: FileKind::Image,  tier: 2, renderer: "libav", shortcut: false},
     FormatEntry {extension: "tga", label: "Targa",
                 kind: FileKind::Image,  tier: 2, renderer: "libav", shortcut: false},
-    //  Tier 2 — video (libav / ffmpeg)
+    //  Tier 2 - video (libav / ffmpeg)
     FormatEntry {extension: "mp4", label: "MPEG-4",
                 kind: FileKind::Video,  tier: 2, renderer: "libav", shortcut: false},
     FormatEntry {extension: "mov", label: "QuickTime",
@@ -253,7 +253,7 @@ pub fn format_manifest() -> &'static [FormatEntry] {&[
                 kind: FileKind::Video,  tier: 2, renderer: "libav", shortcut: false},
     FormatEntry {extension: "av1", label: "AV1 bitstream",
                 kind: FileKind::Video,  tier: 2, renderer: "libav", shortcut: false},
-    //  Tier 2 — audio (libav / ffmpeg)
+    //  Tier 2 - audio (libav / ffmpeg)
     FormatEntry {extension: "mp3", label: "MPEG",
                 kind: FileKind::Audio,  tier: 2, renderer: "libav", shortcut: true },
     FormatEntry {extension: "wav", label: "Windows",
@@ -272,7 +272,7 @@ pub fn format_manifest() -> &'static [FormatEntry] {&[
                 kind: FileKind::Audio,  tier: 2, renderer: "libav", shortcut: false},
     FormatEntry {extension: "opus", label: "Opus",
                 kind: FileKind::Audio,  tier: 2, renderer: "libav", shortcut: false},
-    //  Tier 2 — documents (thumbnail extraction from ZIP)
+    //  Tier 2 - documents (thumbnail extraction from ZIP)
     FormatEntry {extension: "odt", label: "OpenOffice Document",
                 kind: FileKind::Document,   tier: 2, renderer: "builtin", shortcut: true },
     FormatEntry {extension: "ods", label: "OpenOffice Spreadsheet",
@@ -285,7 +285,7 @@ pub fn format_manifest() -> &'static [FormatEntry] {&[
                 kind: FileKind::Document,   tier: 2, renderer: "builtin", shortcut: true },
     FormatEntry {extension: "pptx", label: "Office presentation",
                 kind: FileKind::Document,   tier: 2, renderer: "builtin", shortcut: true },
-    //  Tier 3 — ffmpeg CLI: arithmetic JPEG + all image formats
+    //  Tier 3 - ffmpeg CLI: arithmetic JPEG + all image formats
     FormatEntry {extension: "jpeg", label: "JPEG (arithmetic)",
                 kind: FileKind::Image,  tier: 3, renderer: "ffmpeg_cli", shortcut: false},
     FormatEntry {extension: "png", label: "PNG (via ffmpeg)",
@@ -322,7 +322,7 @@ pub fn format_manifest() -> &'static [FormatEntry] {&[
                 kind: FileKind::Image,  tier: 3, renderer: "ffmpeg_cli", shortcut: false},
     FormatEntry {extension: "heic", label: "HEIC (via ffmpeg)",
                 kind: FileKind::Image,  tier: 3, renderer: "ffmpeg_cli", shortcut: false},
-    //  Tier 3 — oiiotool: studio image formats
+    //  Tier 3 - oiiotool: studio image formats
     FormatEntry {extension: "exr", label: "OpenEXR",
                 kind: FileKind::Image,  tier: 3, renderer: "oiiotool", shortcut: false},
     FormatEntry {extension: "hdr", label: "Radiance HDR",
@@ -347,7 +347,7 @@ pub fn format_manifest() -> &'static [FormatEntry] {&[
                 kind: FileKind::Image,  tier: 3, renderer: "oiiotool", shortcut: false},
     FormatEntry {extension: "zfile", label: "RenderMan Depth",
                 kind: FileKind::Image,  tier: 3, renderer: "oiiotool", shortcut: false},
-    //  Tier 3 — subprocess: 3D geometry
+    //  Tier 3 - subprocess: 3D geometry
     FormatEntry {extension: "glb", label: "Khronos Binary",
                 kind: FileKind::Geometry,   tier: 3, renderer: "f3d", shortcut: false},
     FormatEntry {extension: "gltf", label: "Khronos Asset",
@@ -421,7 +421,7 @@ pub fn bypass() -> ThumbRoute {
 ///
 /// Populated at startup by tier 3 based on the environment probe
 /// ([`probe_environment`]).  When `None` (the default), tier 3 is
-/// assumed to handle everything — this is correct for the hosted-service
+/// assumed to handle everything - this is correct for the hosted-service
 /// case where tier 3 runs as a separate, fully-provisioned server.
 ///
 /// When `Some`, only the listed extensions are considered available.
@@ -433,7 +433,7 @@ static TIER3_AVAILABLE_EXTS: std::sync::RwLock<Option<std::collections::HashSet<
 /// Register the set of extensions tier 3 can handle in this process.
 ///
 /// Call once at startup, before any requests are served.  Passing an
-/// empty set means "tier 3 handles nothing" — every tier-3 format will
+/// empty set means "tier 3 handles nothing" - every tier-3 format will
 /// fall through to a placeholder.
 pub fn set_tier3_available_extensions(exts: std::collections::HashSet<String>) {
     *TIER3_AVAILABLE_EXTS.write().unwrap() = Some(exts);
@@ -445,7 +445,7 @@ pub fn set_tier3_available_extensions(exts: std::collections::HashSet<String>) {
 /// returns `true` unconditionally.
 pub fn tier3_can_handle(extension: &str) -> bool {
     match TIER3_AVAILABLE_EXTS.read().unwrap().as_ref() {
-        None => true, // external tier3 server — assume full support
+        None => true, // external tier3 server - assume full support
         Some(set) => set.contains(extension),
     }
 }

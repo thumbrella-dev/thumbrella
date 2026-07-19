@@ -16,7 +16,7 @@ LABEL org.opencontainers.image.source="https://github.com/PeterShinners/thumbrel
 LABEL org.opencontainers.image.version="${VERSION}"
 LABEL org.opencontainers.image.licenses="Apache 2"
 
-# PS1, MOTD, release info, and bashrc setup — single layer.
+# PS1, MOTD, release info, and bashrc setup.
 # Written to /root/.bashrc because the base image's /etc/bash.bashrc gets
 # overridden by its own skel files.
 RUN echo 'export PS1="\[\033[1;35m\]thumbrella\[\033[0m\] \w $ "' > /root/.bashrc && \

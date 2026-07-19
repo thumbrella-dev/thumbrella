@@ -1,4 +1,4 @@
-//! Cook execution context — the central processing state for one thumbnail.
+//! Cook execution context - the central processing state for one thumbnail.
 //!
 //! Many items in this module are only used by the native HTTP server path and
 //! appear dead when building for wasm32 (without the `native` feature).
@@ -9,7 +9,7 @@
 //!
 //! [`ThumbCook`] is a flat buffer of all state needed to process one thumbnail,
 //! from initial inputs through to final output.  Pipeline steps read and write
-//! fields directly — there are no intermediate aggregation types or synchronisation
+//! fields directly - there are no intermediate aggregation types or synchronisation
 //! bridges.
 //!
 //! Fields are grouped by prefix:
@@ -19,8 +19,8 @@
 //! | `in_`    | Caller inputs (set at construction, never mutated by pipeline) |
 //! | `http_`  | HTTP connection metadata captured during `connect` |
 //! | `media_` | Sniffed type info populated during `inspect` |
-//! | `src_`   | Source identity — cache key, canonical URL, etag |
-//! | `render_`| Pixel work state — decoded buffer, resolution, codec info |
+//! | `src_`   | Source identity - cache key, canonical URL, etag |
+//! | `render_`| Pixel work state - decoded buffer, resolution, codec info |
 //! | `out_`   | Client-facing output fields written as steps complete |
 //! | `tel_`   | Per-step timing telemetry |
 //! | `ctx_`   | Attribution / request context (caller, session, customer) |
@@ -29,8 +29,8 @@
 //!
 //! Neither [`ThumbResult`] nor [`ThumbTrace`] exist during processing.  They
 //! are materialised only at two points:
-//! - [`ThumbCook::to_result`] — called once to cache and return to the client.
-//! - [`ThumbCook::to_trace`] — called once to emit to the configured log sink.
+//! - [`ThumbCook::to_result`] - called once to cache and return to the client.
+//! - [`ThumbCook::to_trace`] - called once to emit to the configured log sink.
 //!
 //! # Tier handoff
 //!
@@ -46,7 +46,7 @@
 //!
 //! Steps check `cook.status == CookStatus::Processing` to decide whether to
 //! continue.  Any step that encounters a terminal condition sets `cook.status`
-//! to the appropriate [`CookStatus`] variant and returns — no other sentinel
+//! to the appropriate [`CookStatus`] variant and returns - no other sentinel
 //! checking is needed.
 //!
 //! # Build note
@@ -84,14 +84,14 @@ use crate::tracelog::TraceStore;
 /// Maps to [`ResultStatus`] via [`ThumbCook::to_result`] for the client view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CookStatus {
-    /// Pipeline is running — the only "keep going" state.
+    /// Pipeline is running - the only "keep going" state.
     #[default]
     Processing,
     /// Thumbnail produced successfully (may be a placeholder).
     Complete,
     /// Conditional request; source unchanged since caller's supplied validator.
     Fresh,
-    /// Terminal failure — message is in `out_message`.
+    /// Terminal failure - message is in `out_message`.
     Failed,
     /// Server is at capacity; client should retry later.
     Overloaded,
@@ -111,7 +111,7 @@ impl CookStatus {
 /// Shared server-wide configuration.  One instance per process, referenced by
 /// every concurrent cook via `Arc<Runtime>`.
 ///
-/// On `wasm32-unknown-unknown` (Cloudflare Workers) `Arc` is zero-cost — the
+/// On `wasm32-unknown-unknown` (Cloudflare Workers) `Arc` is zero-cost - the
 /// atomic refcount compiles to plain loads/stores on a single-threaded isolate.
 #[derive(Clone)]
 pub struct Runtime {
@@ -261,7 +261,7 @@ pub struct SourceIdentity {
     pub canonical_url: Option<String>,
     /// Structured freshness hints parsed from upstream response headers.
     pub cache_hints: Option<CacheHints>,
-    /// SHA-256(customer_id ":" content_identity) — the cache storage key.
+    /// SHA-256(customer_id ":" content_identity) - the cache storage key.
     pub cache_key: Option<String>,
     /// Which header (or fallback) was used as the identity input for `cache_key`.
     pub cache_key_source: Option<String>,
@@ -302,7 +302,7 @@ pub struct ThumbCook<S: HttpStream> {
     pub http_status: u16,
     /// Whether the server supports byte-range requests.
     pub http_accepts_ranges: bool,
-    // Live connection — access via the http_* methods below.
+    // Live connection - access via the http_* methods below.
     http_buf: Option<HttpBuffer<S>>,
 
     //  Render state
@@ -324,7 +324,7 @@ pub struct ThumbCook<S: HttpStream> {
     /// is an artifact of partial decoding, not genuine small-image content.
     pub render_is_progressive_partial: bool,
 
-    //  Output fields — written as steps complete
+    //  Output fields - written as steps complete
     /// The encoded JPEG thumbnail bytes.
     pub out_thumbnail: Vec<u8>,
     /// Human-readable error/status message; empty on success.
@@ -333,7 +333,7 @@ pub struct ThumbCook<S: HttpStream> {
     pub out_placeholder: Option<String>,
     /// When set, overrides the source in `to_result()` for placeholder paths.
     pub placeholder_source: Option<ResultSource>,
-    /// Cache outcome — `None` until the cache check runs.
+    /// Cache outcome - `None` until the cache check runs.
     pub cache_hit: Option<String>,
     /// Wall-clock seconds to generate this result.
     pub out_duration: f64,
@@ -343,7 +343,7 @@ pub struct ThumbCook<S: HttpStream> {
     /// When Some, this overrides the file_size fallback in the download counter.
     render_bytes_consumed: Option<u64>,
 
-    //  Telemetry — per-step timing
+    //  Telemetry - per-step timing
     pub tel_connect_secs: f64,
     pub tel_inspect_secs: f64,
     pub tel_shortcut_secs: f64,
@@ -376,7 +376,7 @@ pub struct ThumbCook<S: HttpStream> {
 
     /// When true, skip the handoff/render chain after shortcut+deliver.
     /// The pipeline still runs cache checks, connect, inspect, shortcut,
-    /// and deliver — only expensive render/handoff is gated.  Set by the
+    /// and deliver - only expensive render/handoff is gated.  Set by the
     /// cloud wrapper when an account is over its render quota.
     pub render_disabled: bool,
 
@@ -386,7 +386,7 @@ pub struct ThumbCook<S: HttpStream> {
     /// the quota window resets (end of hour/day).
     pub render_disabled_ttl_secs: Option<u64>,
 
-    // Cancel flag — set via request_cancel(), read via cancelled().
+    // Cancel flag - set via request_cancel(), read via cancelled().
     cancel: Arc<AtomicBool>,
 }
 
@@ -557,7 +557,7 @@ impl<S: HttpStream> ThumbCook<S> {
         self.http_buf.as_ref().and_then(|b| b.stream_len())
     }
 
-    /// Alias for `http_stream_len` — the `Content-Length` or effective file size.
+    /// Alias for `http_stream_len` - the `Content-Length` or effective file size.
     pub fn http_len(&self) -> Option<u64> {
         self.http_stream_len()
     }
@@ -768,7 +768,7 @@ impl<S: HttpStream> ThumbCook<S> {
     ///
     /// Closing and serialising are combined into a single step so it is
     /// structurally impossible to send a handoff while the connection is
-    /// still open — the caller cannot obtain a `ThumbHandoff` without
+    /// still open - the caller cannot obtain a `ThumbHandoff` without
     /// first relinquishing the live stream.
     pub async fn take_handoff(&mut self) -> crate::handoff::ThumbHandoff
     where
@@ -849,7 +849,7 @@ impl<S: HttpStream> ThumbCook<S> {
     ///
     /// Returns `true` if the cook resolved to a terminal state (cache hit,
     /// 304 Not Modified, connect error, etc.) and `finish()` should be called.
-    /// Returns `false` if the pipeline should continue — the connection is
+    /// Returns `false` if the pipeline should continue - the connection is
     /// open, headers are populated, and `media.kind` is not yet set.
     ///
     /// Sets `cache_resolved = true` so `run_with_progress` skips this phase
@@ -1105,7 +1105,7 @@ impl<S: HttpStream> ThumbCook<S> {
 
             // Intermediate progress: only emit when there's a real async gap
             // (handoff to higher tier).  In-process renderer results are immediate
-            // — success or placeholder — so an intermediate just adds noise.
+            // - success or placeholder - so an intermediate just adds noise.
         }
 
         //  deliver (when shortcut decoded an image)
@@ -1126,7 +1126,7 @@ impl<S: HttpStream> ThumbCook<S> {
             return self.finish(after);
         }
 
-        //  render-disabled gate — over quota: no handoff or render
+        //  render-disabled gate - over quota: no handoff or render
         if self.render_disabled {
             // Shortcut didn't produce a result and deliver didn't fire.
             // Produce a placeholder based on inspect results.  finish()
@@ -1184,7 +1184,7 @@ impl<S: HttpStream> ThumbCook<S> {
             // Renderer returned false (format not recognised).
             // Contract: the renderer did not call take_reader(), so the
             // connection is still open.  Fall through to out-of-process
-            // handoff — a higher tier may still be able to handle this.
+            // handoff - a higher tier may still be able to handle this.
             self.placeholder_source = Some(ResultSource::Fallback);
         }
 
@@ -1285,7 +1285,7 @@ impl<S: HttpStream> ThumbCook<S> {
                             self.out_duration = t0.elapsed().as_secs_f64();
                             return self.finish(after);
                         }
-                        // Remote tier returned a non-OK status — escalate.
+                        // Remote tier returned a non-OK status - escalate.
                         self.out_message.clear();
                     }
                     Ok(ref remote) => {
@@ -1335,18 +1335,18 @@ impl<S: HttpStream> ThumbCook<S> {
     }
 
     fn finish(mut self, mut after: AfterResponse) -> (ThumbResult, ThumbTrace, AfterResponse) {
-        // Final snapshot of I/O counters — safe to call multiple times since
+        // Final snapshot of I/O counters - safe to call multiple times since
         // stamp_download_bytes is idempotent on the bytes field.
         self.stamp_download_bytes();
 
         // Always return a thumbnail.  If the pipeline didn't produce one,
-        // fill in the appropriate placeholder JPEG — except for NotModified,
+        // fill in the appropriate placeholder JPEG - except for NotModified,
         // where an empty thumbnail tells the caller "use your cached copy".
         if self.out_thumbnail.is_empty() && self.status != CookStatus::Fresh {
             if let Some(kind) = self.media.kind {
                 // Kind was identified: use the kind-specific placeholder.
                 // If the pipeline failed at the render step (e.g. unsupported
-                // codec, EXR, SVG) promote the status to Placeholder — we know
+                // codec, EXR, SVG) promote the status to Placeholder - we know
                 // what the file is, we just can't render it yet.
                 let tried_render = self.status == CookStatus::Failed;
                 if tried_render {
@@ -1369,7 +1369,7 @@ impl<S: HttpStream> ThumbCook<S> {
                     Some(CacheHints::expiring_in(86400))
                 };
             } else {
-                // Kind never determined (network error, bad URL, early abort) —
+                // Kind never determined (network error, bad URL, early abort) -
                 // use the FAILED icon only for genuine infrastructure errors.
                 let (bytes, label): (&[u8], &str) = if self.status == CookStatus::Failed
                     || self.out_placeholder.as_deref() == Some("error")

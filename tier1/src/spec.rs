@@ -135,7 +135,7 @@ impl ShortcutLimits {
     /// Sized to keep the full CPU pipeline under ~15 ms and memory under
     /// the Worker heap limit.
     pub const TIER1: Self = Self {
-        max_progressive_pixels: 1_000_000, // ~1 MP — ~7 ms decode
+        max_progressive_pixels: 1_000_000, // ~1 MP  ~7 ms decode
         small_file_threshold: 80 * 1024,   // 80 KiB
         zip_tail_size: 128 * 1024,         // 128 KiB
         audio_cover_max_fetch: 128 * 1024, // 128 KiB
@@ -146,7 +146,7 @@ impl ShortcutLimits {
     /// Progressive JPEG is effectively unbounded so tier 2 always attempts the
     /// partial-read shortcut for progressive sources before any full-file JPEG path.
     /// Small-file threshold is kept moderate for non-progressive inline decodes.
-    /// ZIP tail is 256 KiB — enough to cover the Central Directory plus a
+    /// ZIP tail is 256 KiB - enough to cover the Central Directory plus a
     /// 256×256 px LibreOffice thumbnail PNG (~120 KiB) sitting at the end of
     /// the archive.  Files smaller than this threshold stream in full from the
     /// already-open connection (no Range request).

@@ -1,4 +1,4 @@
-//! Pipeline step: **connect** — open the HTTP connection and capture headers.
+//! Pipeline step: **connect** - open the HTTP connection and capture headers.
 
 use std::sync::Arc;
 
@@ -24,13 +24,13 @@ fn origin_of(url: &str) -> &str {
 /// `Failed` or `NotModified`); the pipeline stops.
 ///
 /// Populates:
-/// - `cook.media.file_size`       — from `Content-Length`
-/// - `cook.http_headers`          — full response headers
-/// - `cook.http_status`           — HTTP status code
-/// - `cook.http_accepts_ranges`   — from `Accept-Ranges` header
-/// - `cook.src.cache_hints`        — upstream freshness hints (parsed from headers)
-/// - `cook.src.final_url`         — URL after any redirects
-/// - `cook.src.canonical_url`     — query-stripped stable cache key
+/// - `cook.media.file_size`       - from `Content-Length`
+/// - `cook.http_headers`          - full response headers
+/// - `cook.http_status`           - HTTP status code
+/// - `cook.http_accepts_ranges`   - from `Accept-Ranges` header
+/// - `cook.src.cache_hints`       - upstream freshness hints (parsed from headers)
+/// - `cook.src.final_url`         - URL after any redirects
+/// - `cook.src.canonical_url`     - query-stripped stable cache key
 pub async fn connect<S: HttpStream>(cook: &mut ThumbCook<S>) {
     let mut options = ConnectOptions::default();
 
@@ -45,7 +45,7 @@ pub async fn connect<S: HttpStream>(cook: &mut ThumbCook<S>) {
         options.headers.push((name.to_string(), value.to_string()));
     }
 
-    // Enforce the file:// restriction — second line of defence after routes.rs.
+    // Enforce the file:// restriction - second line of defence after routes.rs.
     if cook.input.url.starts_with("file://") && !cook.input.allow_local {
         cook.fail("file:// URLs are not permitted");
         return;
@@ -79,7 +79,7 @@ pub async fn connect<S: HttpStream>(cook: &mut ThumbCook<S>) {
     cook.http_accepts_ranges = buf.accepts_ranges;
     cook.media.file_size = buf.content_length;
 
-    // 429 / 503 — rate limiting: engage origin back-off, return Unavailable.
+    // 429 / 503 - rate limiting: engage origin back-off, return Unavailable.
     // Parse `Retry-After` (integer seconds only); fall back to default TTL.
     if matches!(buf.status, 429 | 503) {
         let ttl = buf

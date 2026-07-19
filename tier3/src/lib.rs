@@ -5,8 +5,8 @@
 //! available in-process.  On top of that, tier 3 adds a pluggable dispatch
 //! table of optional renderer backends that are probed at startup:
 //!
-//! - **Shared library backends** — detected via `dlopen` (e.g. libpdfium).
-//! - **Subprocess backends** — detected via `which` + a benign invocation
+//! - **Shared library backends** - detected via `dlopen` (e.g. libpdfium).
+//! - **Subprocess backends** - detected via `which` + a benign invocation
 //!   (e.g. inkscape, blender, ffmpeg CLI).
 //!
 //! Only backends that are detected at startup are registered in the dispatch

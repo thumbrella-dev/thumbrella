@@ -1,18 +1,18 @@
-//! Call and thumb response types — the public outbound contract.
+//! Call and thumb response types - the public outbound contract.
 //!
 //! # Key types
 //!
-//! - [`ResultStatus`] — high-level per-item outcome returned to the client.
-//! - [`ThumbResult`] — the per-item result materialised from
+//! - [`ResultStatus`] - high-level per-item outcome returned to the client.
+//! - [`ThumbResult`] - the per-item result materialised from
 //!   [`crate::cook::ThumbCook`] at the end of processing.  This is what gets
 //!   serialised to the client, stored in cache, and returned verbatim on a
 //!   cache hit.
-//! - [`ThumbTrace`] — internal per-item telemetry materialised from
+//! - [`ThumbTrace`] - internal per-item telemetry materialised from
 //!   [`crate::cook::ThumbCook`] and emitted to the configured log sink.  Never
 //!   sent to clients.
-//! - [`CallRecord`] / [`CallResponse`] — per-HTTP-request envelope types.
+//! - [`CallRecord`] / [`CallResponse`] - per-HTTP-request envelope types.
 //!
-//! Neither `ThumbResult` nor `ThumbTrace` exist during thumbnail processing —
+//! Neither `ThumbResult` nor `ThumbTrace` exist during thumbnail processing -
 //! they are output views constructed once at the end of
 //! [`crate::cook::ThumbCook::run`].
 
@@ -61,7 +61,7 @@ pub enum ResultSource {
     /// Served from server-side cache.
     Cache,
     /// Client cache hints were valid; upstream resource unchanged.
-    /// `media.thumbnail` is empty — the client should use its cached copy.
+    /// `media.thumbnail` is empty - the client should use its cached copy.
     NotModified,
     /// A registered renderer tried but could not handle this format.
     Fallback,
@@ -138,7 +138,7 @@ impl Default for ThumbMedia {
 /// Per-request result: the public API response for one URL.
 ///
 /// Top-level fields describe this invocation (status, timing, source).
-/// [`media`](ThumbMedia) is the stable, cacheable payload — two results
+/// [`media`](ThumbMedia) is the stable, cacheable payload - two results
 /// for the same file share the same `media`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThumbResult {
@@ -180,7 +180,7 @@ impl Default for ThumbResult {
 
 //  ThumbTrace
 
-/// Internal per-item telemetry — the server's private record of work done.
+/// Internal per-item telemetry - the server's private record of work done.
 ///
 /// Materialised from [`crate::cook::ThumbCook`] by
 /// [`crate::cook::ThumbCook::to_trace`] at the end of processing.  Never sent

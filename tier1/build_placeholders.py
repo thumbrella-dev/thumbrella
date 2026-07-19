@@ -12,7 +12,7 @@ Writes one JPEG per media kind plus a generic 'failed' icon:
 Dependencies (install once):
     pip install cairosvg pillow
 
-Icons: Heroicons v2 outline — MIT licence
+Icons: Heroicons v2 outline,  MIT licence
     https://github.com/tailwindlabs/heroicons
 """
 
@@ -32,7 +32,7 @@ DEFAULT_QUALITY = 62
 #  Per-kind spec 
 # color    – background hex; all media kinds desaturated ~50% via HSL
 #            (keeps colour family legible without competing with the icon).
-#            "failed" retains its richer hue — it signals a process error,
+#            "failed" retains its richer hue, it signals a process error,
 #            not a media kind, and warrants visual distinction.
 # label    – short uppercase string rendered below the icon
 # icon     – Heroicons v2 outline path data  (24 × 24 viewBox, stroke icons)
@@ -195,8 +195,8 @@ SPECS = [
     ),
     dict(
         name="failed",
-        color="#3D3D3D",   # neutral dark grey — deliberately dull; not a media kind
-        label="",          # no label — the error icon is self-explanatory
+        color="#3D3D3D",   # neutral dark grey - deliberately dull; not a media kind
+        label="",          # no label - the error icon is self-explanatory
         fg="#B83838",       # red icon on grey (inverted from the others)
         # x-circle: error/close indicator
         icon=(
@@ -340,7 +340,7 @@ def main() -> None:
             fh.write(data)
         print(f"  {out_path}  ({len(data):,} bytes)")
 
-    print(f"\ndone — {len(SPECS)} placeholders written to {args.out}")
+    print(f"\ndone - {len(SPECS)} placeholders written to {args.out}")
 
 
 if __name__ == "__main__":

@@ -25,7 +25,7 @@ fn resolve_path(raw: &str) -> PathBuf {
     if p.is_absolute() {
         return p.to_path_buf();
     }
-    // ffs-check lives at ffs/ffs-check/ — workspace root is two levels up
+    // ffs-check lives at ffs/ffs-check/  workspace root is two levels up
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir
         .parent()
@@ -72,7 +72,7 @@ fn validate() -> String {
 
     #[cfg(not(windows))]
     {
-        // PKG_CONFIG_PATH is the preferred method — it provides library paths,
+        // PKG_CONFIG_PATH is the preferred method, it provides library paths,
         // include paths, and transitive linker flags (-lz, -lbz2, …) from the
         // .pc files.  FFMPEG_DIR is a fallback; if both are set, PKG_CONFIG_PATH
         // takes precedence for ffmpeg-sys-next but we still validate FFMPEG_DIR

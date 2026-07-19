@@ -1,5 +1,5 @@
 set(VCPKG_TARGET_ARCHITECTURE x64)
 set(VCPKG_CRT_LINKAGE static)
 set(VCPKG_LIBRARY_LINKAGE static)
-# Release only — skip debug builds (cuts build time in half)
+# Release only, skip debug builds (cuts build time in half)
 set(VCPKG_BUILD_TYPE release)

@@ -1,4 +1,4 @@
-//! Pipeline step: **deliver** — resize, colour-correct, and JPEG-encode the render buffer.
+//! Pipeline step: **deliver** - resize, colour-correct, and JPEG-encode the render buffer.
 //!
 //! Receives a decoded image buffer in `cook.render` (populated by shortcut or
 //! a higher-tier handoff) and produces the final thumbnail JPEG stored in
@@ -17,7 +17,7 @@ use crate::spec::ThumbnailConfig;
 
 /// Encode `cook.render_image` into the final thumbnail JPEG.
 ///
-/// Assumes `cook.render_image.is_some()` — called only when shortcut has populated it.
+/// Assumes `cook.render_image.is_some()` - called only when shortcut has populated it.
 /// Sets `cook.out_thumbnail` and `status = Complete`.
 pub async fn deliver<S: HttpStream>(cook: &mut ThumbCook<S>) {
     let Some(img) = cook.render_image.take() else {
@@ -32,7 +32,7 @@ pub async fn deliver<S: HttpStream>(cook: &mut ThumbCook<S>) {
     // Embedded camera thumbnails (e.g. 192×144 EXIF previews) are photographic
     // content and must NOT trigger this path.
     // Also, progressive JPEG partial decodes produce artificially small images
-    // and must NOT trigger this path — use the photographic quality instead.
+    // and must NOT trigger this path - use the photographic quality instead.
     let pixel_art = !cook.render_is_progressive_partial
         && img.width() <= config.pixel_art_max_px
         && img.height() <= config.pixel_art_max_px;
@@ -99,7 +99,7 @@ pub(super) struct ProcessBuffer {
 }
 
 impl ProcessBuffer {
-    /// Convert a decoded image to RGB or RGBA — exactly one allocation.
+    /// Convert a decoded image to RGB or RGBA - exactly one allocation.
     pub(super) fn from_dynamic(img: DynamicImage) -> Self {
         let inner = if img.color().has_alpha() {
             match img {
@@ -174,7 +174,7 @@ impl ProcessBuffer {
             // Normal fit-within range (not clamped by min_fill_ratio).
             //
             // Sources with AR between 1:1 (1.0) and ~3:2 (1.5) snap directly to
-            // full fill — they are cropped to the canvas AR with no letterbox.
+            // full fill - they are cropped to the canvas AR with no letterbox.
             // This keeps near-4:3 and slightly wider images from getting razor-thin
             // top/bottom bands that look accidental.
             //
@@ -275,7 +275,7 @@ impl ProcessBuffer {
         let prev = std::mem::replace(&mut self.inner, BufInner::Rgb(image::RgbImage::new(0, 0)));
         self.inner = BufInner::Rgb(match prev {
             BufInner::Rgb(src) if content_w == canvas_w && content_h == canvas_h => {
-                // Content fills canvas exactly — no background needed.
+                // Content fills canvas exactly - no background needed.
                 src
             }
             BufInner::Rgb(src) => {
@@ -299,7 +299,7 @@ impl ProcessBuffer {
         *img = unsharpen(img as &image::RgbImage, sigma, threshold);
     }
 
-    /// Radial vignette using squared distance from centre — no sqrt, JPEG-friendly.
+    /// Radial vignette using squared distance from centre - no sqrt, JPEG-friendly.
     /// `strength` = 0.0 (none) … 1.0 (corners fully black).
     pub(super) fn apply_vignette(&mut self, strength: f32) {
         if strength <= 0.0 {
@@ -360,7 +360,7 @@ fn premultiply_rgba(img: &mut image::RgbaImage) {
 /// SOI marker (`FFD8`).
 ///
 /// Mozjpeg-rs does not expose `jpeg_write_marker`, so we must splice
-/// post-encode.  This is safe because JPEG parsing is marker-relative — no
+/// post-encode.  This is safe because JPEG parsing is marker-relative - no
 /// internal offset depends on absolute byte positions.
 pub fn inject_exif_comment(jpeg: &[u8]) -> Vec<u8> {
     use exif::experimental::Writer;

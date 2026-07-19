@@ -1,4 +1,4 @@
-//! Tier 1 library — core types and pipeline.
+//! Tier 1 library - core types and pipeline.
 //!
 //! # Build modes
 //!
@@ -17,8 +17,8 @@
 //!
 //! The project uses `tbr` as the short form of "thumbrella" in identifiers
 //! (e.g. `TBR_VERSION`).  Public API types follow the family naming scheme:
-//! - `Call*` — outer HTTP envelope types (`CallRequest`, `CallResponse`, …)
-//! - `Thumb*` — per-item types (`ThumbInput`, `ThumbResult`, `ThumbTrace`, `ThumbCook`, `ThumbHandoff`, …)
+//! - `Call*` - outer HTTP envelope types (`CallRequest`, `CallResponse`, …)
+//! - `Thumb*` - per-item types (`ThumbInput`, `ThumbResult`, `ThumbTrace`, `ThumbCook`, `ThumbHandoff`, …)
 
 //  Core modules (always compiled)
 pub mod after;
@@ -107,7 +107,7 @@ pub use http_buf::SyncHttpReader;
 pub const TBR_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Cache format version.  Increment this to invalidate all cached results
-/// globally — e.g. after a breaking change to `ThumbResult`, thumbnail
+/// globally - e.g. after a breaking change to `ThumbResult`, thumbnail
 /// dimensions, or image quality settings.
 ///
 /// Baked into the SHA-256 key input so old entries become unreachable without

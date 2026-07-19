@@ -1,6 +1,6 @@
 [package]
 name = "ffs-build"
-description = "Bundled static FFmpeg — version info and build metadata"
+description = "Bundled static FFmpeg, version info and build metadata"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

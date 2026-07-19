@@ -1,4 +1,4 @@
-// build.rs — placeholder icon generation + wasm32 time-type guard
+// build.rs - placeholder icon generation + wasm32 time-type guard
 //
 // Reruns only when tier1/build_placeholders.py is edited.  If Python or the
 // required pip packages are absent the build continues using the committed
@@ -6,7 +6,7 @@
 //
 // Also, when building for wasm32-unknown-unknown, scans source files for
 // std::time::Instant and std::time::SystemTime.  tier1 uses web_time types
-// in its public API — mixing them with std::time types causes confusing
+// in its public API - mixing them with std::time types causes confusing
 // "mismatched types" errors.
 
 use std::path::Path;
@@ -52,8 +52,7 @@ fn check_time_types(manifest: &str) {
         eprintln!(
             "\n=== WASM TIME-TYPE GUARD ===\n\
              The following files in tier1/src/ use std::time::{{Instant, SystemTime}}.\n\
-             tier1 uses web_time types in its public API — please use\n\
-             web_time::{{Instant, SystemTime}} instead.\n"
+             tier1 uses web_time types in its public API, use `web_time` instead.\n"
         );
         for e in &errors {
             eprintln!("  {e}");

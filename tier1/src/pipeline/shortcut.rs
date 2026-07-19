@@ -1,12 +1,12 @@
-//! Pipeline step: **shortcut** — extract an embedded thumbnail without full decode.
+//! Pipeline step: **shortcut** - extract an embedded thumbnail without full decode.
 //!
 //! Uses a two-phase read strategy to minimise network I/O:
 //!
-//! 1. **Header scan** — reads a small prefix (typically served from the
+//! 1. **Header scan** - reads a small prefix (typically served from the
 //!    `inspect` page cache with zero additional network I/O) to locate the
 //!    embedded thumbnail's byte range within the remote file.
 //!
-//! 2. **Targeted fetch** — calls `read_at(thumb_offset, thumb_len)` to pull
+//! 2. **Targeted fetch** - calls `read_at(thumb_offset, thumb_len)` to pull
 //!    exactly the thumbnail bytes, then closes the connection immediately.
 //!
 //! When no embedded thumbnail is found, the HTTP connection is left open and
@@ -46,7 +46,7 @@ const HEADER_SCAN: usize = 4 * 1024;
 /// - Thumbnail PNG (83.7 KB stored): starts 88.3 KB from EOF
 /// - 128 KB tail gives ~40 KB margin over the observed minimum, comfortably
 ///   covering LibreOffice thumbnails up to roughly 120 KB (256×256 px, complex
-///   content).  DOCX thumbnails (JPEG) are much smaller — typically under 50 KB.
+///   content).  DOCX thumbnails (JPEG) are much smaller - typically under 50 KB.
 ///
 /// Tier 1 default is 128 KiB; tier 2 uses 2 MiB to cover larger documents.
 /// The actual value at runtime comes from `cook.runtime.shortcut_limits.zip_tail_size`.
@@ -107,7 +107,7 @@ fn jpeg_source_dimensions(data: &[u8]) -> (Option<u32>, Option<u32>) {
 /// component) before any AC refinement.  Fetching `(w * h) / 42` bytes is
 /// enough to reconstruct a full-frame preview for most images.  We append an
 /// EOI marker unconditionally so the decoder treats the truncated stream as a
-/// complete file — this is cheaper than a failed first attempt.
+/// complete file - this is cheaper than a failed first attempt.
 ///
 /// The shortcut works for files of any size; there is no content-length gate.
 ///
@@ -120,7 +120,7 @@ async fn try_progressive_jpeg_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     // Read a heuristic prefix: (w * h) / 42 bytes covers the first progressive
     // scan for typical camera images.  The already-fetched inspect pages are
     // served from the page cache; only bytes beyond that come from the network.
-    // The divisor 42 is empirically derived — see progressive_partial_read_bytes
+    // The divisor 42 is empirically derived - see progressive_partial_read_bytes
     // in the thumbrella-tier1 prototype.
     //
     // We need the source dimensions to size the window, so peek at the header
@@ -164,7 +164,7 @@ async fn try_progressive_jpeg_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
         return;
     }
 
-    // Append EOI — harmless if already present, required for truncated streams.
+    // Append EOI - harmless if already present, required for truncated streams.
     data.extend_from_slice(&[0xFF, 0xD9]);
 
     let t_render = Instant::now();
@@ -243,7 +243,7 @@ async fn try_exif_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
             .and_then(|chunk| super::inspect::find_sof_in_bytes(&chunk))
             .map(|(w, h, _)| (w, h))
     } else {
-        // Header scan couldn't find the SOF boundary — read a larger prefix.
+        // Header scan couldn't find the SOF boundary - read a larger prefix.
         let Ok(big) = cook.http_read_at(0, 65536).await else {
             return;
         };
@@ -285,12 +285,12 @@ const IFD1_FETCH: usize = 512;
 /// SRW, 3FR, MEF, RWL.
 ///
 /// Strategy:
-/// - Read the first `RAW_HEADER_SCAN` bytes (32 KiB) — larger than the
+/// - Read the first `RAW_HEADER_SCAN` bytes (32 KiB) - larger than the
 ///   standard 4 KiB EXIF scan because SubIFD entries can be deeper in raw
 ///   files.
 /// - Traverse the full IFD chain (including SubIFDs) via
 ///   `find_tiff_embedded_jpeg_file_span`, which picks the **largest** embedded
-///   JPEG — typically the full-resolution preview, not the small IFD1 thumbnail.
+///   JPEG - typically the full-resolution preview, not the small IFD1 thumbnail.
 /// - Issue one Range request for those exact bytes, then close the connection.
 ///
 /// `properties.width_pixels`/`height_pixels` reports the sensor resolution from IFD0
@@ -304,7 +304,7 @@ async fn try_raw_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
         Err(_) => return,
     };
 
-    // Determine endianness up-front — used for the fallback span search and
+    // Determine endianness up-front - used for the fallback span search and
     // for the orientation correction that follows decoding.
     let little = match header.get(0..2) {
         Some(b"II") => true,
@@ -407,7 +407,7 @@ async fn try_raw_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     cook.out_download_bytes = dl_bytes;
     // Prefer IFD0 sensor resolution over the embedded preview dimensions.
     if let Some((sw, sh)) = tiff_ifd0_dimensions(&header, little) {
-        // Raw sensor bpp — TIFF IFD0 BitsPerSample tag (0x0102) is per-component,
+        // Raw sensor bpp - TIFF IFD0 BitsPerSample tag (0x0102) is per-component,
         // typically 12 or 14 for raw files.  We don't parse it here yet, so omit bpp.
         cook.media.properties = Some(serde_json::json!({
             "width": sw,
@@ -450,7 +450,7 @@ async fn try_zip_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     cook.tel_decode_secs = render_secs;
     cook.out_download_bytes = dl_bytes;
     cook.tel_download_tail_bytes = tail_bytes;
-    // Document thumbnails are just previews — the source file isn't an image
+    // Document thumbnails are just previews - the source file isn't an image
     // so reporting the thumbnail's pixel dimensions as "properties" is misleading.
     if cook.media.kind != Some(FileKind::Document) && src_w > 0 && src_h > 0 {
         cook.media.properties = Some(image_properties(src_w, src_h, color_type));
@@ -464,10 +464,10 @@ async fn try_zip_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
 /// Phase 1: fetch the tail (Central Directory) via a Range request so we can
 /// discover where the thumbnail lives.  Phase 2: if the thumbnail sits inside
 /// the tail window, extract it directly (zero extra I/O).  If it is outside
-/// the tail, read it via the existing HttpBuffer's `read_at` — this streams
+/// the tail, read it via the existing HttpBuffer's `read_at` - this streams
 /// through the already-open connection on tier 2 rather than opening a third
 /// Range request.  Tier 1 gives up here (the out-of-tail path is guarded by
-/// `zip_tail_size`, which is small on tier 1 — if the thumbnail was far enough
+/// `zip_tail_size`, which is small on tier 1 - if the thumbnail was far enough
 /// to miss the tail, tier 1 hands off to tier 2).
 async fn zip_extract<S: HttpStream>(cook: &mut ThumbCook<S>) -> Option<(Vec<u8>, u64, u64)> {
     let file_size = cook.http_stream_len()?;
@@ -494,7 +494,7 @@ async fn zip_extract<S: HttpStream>(cook: &mut ThumbCook<S>) -> Option<(Vec<u8>,
     let entry = zip_find_thumb_entry(&tail, tail_start)?;
 
     let image_bytes = if entry.local_offset >= tail_start {
-        // Thumbnail data sits within the tail window — extract inline,
+        // Thumbnail data sits within the tail window - extract inline,
         // zero extra I/O.
         zip_extract_from_buffer(&tail, &entry, tail_start)?
     } else {
@@ -506,7 +506,7 @@ async fn zip_extract<S: HttpStream>(cook: &mut ThumbCook<S>) -> Option<(Vec<u8>,
         // and continues the already-open connection on tier 2.
         //
         // Tier 1's small `zip_tail_size` (128 KiB) means this path is
-        // only reached when the thumbnail is far from the tail — in
+        // only reached when the thumbnail is far from the tail - in
         // practice tier 1 gives up here (the read would exceed the CPU
         // budget) and hands off to tier 2, where the buffer is already
         // open and streaming is cheap.
@@ -732,7 +732,7 @@ fn find_jpeg_exif_shortcut(bytes: &[u8]) -> Option<JpegExifShortcutInfo> {
         pos += seg_len;
         if marker == 0xDA {
             break;
-        } // SOS — stop scanning
+        } // SOS - stop scanning
     }
     None
 }
@@ -786,7 +786,7 @@ fn parse_tiff_exif_thumbnail(tiff: &[u8], tiff_file_offset: u64) -> Option<JpegE
         }
     }
 
-    // Prefer PixelXDimension/PixelYDimension from ExifIFD — these are the
+    // Prefer PixelXDimension/PixelYDimension from ExifIFD - these are the
     // authoritative JPEG pixel counts, excluding MCU alignment padding.
     let mut px_width: Option<u32> = None;
     let mut px_height: Option<u32> = None;
@@ -926,7 +926,7 @@ fn webp_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 //  WebP: EXIF chunk (tail-read)
 
 /// WebP stores EXIF data in an `EXIF` chunk that follows the VP8/VP8L image
-/// data — it is NOT reachable from the standard 4 KiB header scan.  This
+/// data - it is NOT reachable from the standard 4 KiB header scan.  This
 /// function reads the tail of the file, scans for the `EXIF` chunk marker,
 /// and delegates to [`parse_tiff_exif_thumbnail`].
 async fn try_webp_exif_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
@@ -944,7 +944,7 @@ async fn try_webp_exif_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     };
 
     // Scan for the 'EXIF' chunk marker.  The tail starts mid-VP8-data so we
-    // can't walk chunk headers — search for the 4-byte marker directly.
+    // can't walk chunk headers - search for the 4-byte marker directly.
     let mut pos = 0usize;
     while pos + 12 <= tail.len() {
         if &tail[pos..pos + 4] == b"EXIF" {
@@ -993,7 +993,7 @@ async fn try_webp_exif_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
                 return;
             }
         }
-        pos += 1; // scan byte-by-byte — tail starts mid-VP8-data
+        pos += 1; // scan byte-by-byte - tail starts mid-VP8-data
     }
 }
 
@@ -1034,7 +1034,7 @@ fn tiff_ifd0_orientation(bytes: &[u8], little: bool) -> u16 {
 
 /// Read IFD0 `ImageWidth` (0x0100) and `ImageLength` (0x0101) from a TIFF
 /// header.  Returns `None` when the header is too short or the tags are
-/// absent — raw files should fall back to embedded-preview dimensions.
+/// absent - raw files should fall back to embedded-preview dimensions.
 fn tiff_ifd0_dimensions(bytes: &[u8], little: bool) -> Option<(u32, u32)> {
     let ifd0_off = read_u32(bytes, 4, little)? as usize;
     let count = read_u16(bytes, ifd0_off, little)? as usize;
@@ -1271,13 +1271,13 @@ fn tiff_u32_values(bytes: &[u8], ft: u16, fc: usize, v: usize, little: bool, max
 /// Reduce a decoded image to near the thumbnail target using a two-phase
 /// strategy that balances speed and quality:
 ///
-/// **Phase 1** — fast 2×2 box-average halvings down to ~2× the target.
+/// **Phase 1** - fast 2×2 box-average halvings down to ~2× the target.
 /// Each step averages four source pixels into one, done in-place on the raw
 /// pixel buffer.  The write cursor (`oy*(w/2)+ox`) is always ≤ the first
 /// read cursor (`2*oy*w+2*ox`), so no extra allocation is needed and we
 /// never overwrite source data before it has been read.
 ///
-/// **Phase 2** — Triangle filter for the remaining ≤2× step.
+/// **Phase 2** - Triangle filter for the remaining ≤2× step.
 /// At ≤2× the Triangle kernel is small, so cost is low, but the quality
 /// improvement over a final nearest-neighbour step is substantial.
 fn pre_scale_to_target(img: DynamicImage, target_w: u32, target_h: u32) -> DynamicImage {
@@ -1323,7 +1323,7 @@ fn pre_scale_to_target(img: DynamicImage, target_w: u32, target_h: u32) -> Dynam
 /// (`oy*(w/2)+ox ≤ 2*oy*w+2*ox`), so source data is never overwritten before
 /// it has been consumed.
 ///
-/// Odd dimensions are truncated (last row/column dropped) — acceptable for a
+/// Odd dimensions are truncated (last row/column dropped) - acceptable for a
 /// pre-scale pass where the final fill_crop will trim any small error.
 fn box_half(img: DynamicImage) -> DynamicImage {
     use image::{GrayImage, RgbImage, RgbaImage};
@@ -1335,7 +1335,7 @@ fn box_half(img: DynamicImage) -> DynamicImage {
         return img;
     }
 
-    // Luma8 — 1 byte/pixel
+    // Luma8 - 1 byte/pixel
     if matches!(img, DynamicImage::ImageLuma8(_)) {
         let mut buf = img.into_luma8().into_raw();
         let stride = w as usize;
@@ -1357,7 +1357,7 @@ fn box_half(img: DynamicImage) -> DynamicImage {
         return DynamicImage::ImageLuma8(GrayImage::from_raw(ow, oh, buf).unwrap());
     }
 
-    // RGBA8 — 4 bytes/pixel
+    // RGBA8 - 4 bytes/pixel
     if img.color().has_alpha() {
         let mut buf = img.into_rgba8().into_raw();
         let stride = (w * 4) as usize;
@@ -1381,7 +1381,7 @@ fn box_half(img: DynamicImage) -> DynamicImage {
         return DynamicImage::ImageRgba8(RgbaImage::from_raw(ow, oh, buf).unwrap());
     }
 
-    // RGB8 — 3 bytes/pixel (most photos land here)
+    // RGB8 - 3 bytes/pixel (most photos land here)
     let mut buf = img.into_rgb8().into_raw();
     let stride = (w * 3) as usize;
     for oy in 0..oh as usize {
@@ -1602,7 +1602,7 @@ fn be_u32(bytes: &[u8]) -> u32 {
 /// frame and return the embedded image bytes.
 ///
 /// `bytes` starts at byte 0 of the file (including the ID3 header).
-/// `version_major` is 3 or 4 — determines whether frame sizes are synchsafe.
+/// `version_major` is 3 or 4 - determines whether frame sizes are synchsafe.
 ///
 /// Scanning stops at the declared tag end OR when a non-ASCII-uppercase
 /// frame ID is encountered (padding or audio data), whichever comes first.
@@ -1662,7 +1662,7 @@ fn find_id3_apic(bytes: &[u8], version_major: u8) -> Option<Vec<u8>> {
         pos = data_start.checked_add(frame_size)?;
 
         // If we've passed the declared end of the tag and haven't found
-        // APIC yet, continue scanning anyway — the tag size may have been
+        // APIC yet, continue scanning anyway - the tag size may have been
         // underreported.  But don't go past the end of our buffer.
     }
 
@@ -1774,15 +1774,15 @@ fn extract_apic_image(apic_data: &[u8]) -> Option<Vec<u8>> {
 ///
 /// Six active paths, in priority order:
 ///
-/// 1. **Small image** (any `image`-supported format ≤ `SMALL_FILE_THRESHOLD`) —
+/// 1. **Small image** (any `image`-supported format ≤ `SMALL_FILE_THRESHOLD`) -
 ///    read all bytes, full decode, pre-scale, set `cook.render_image`.
-/// 2. **EXIF embedded thumbnail** (JPEG EXIF IFD1 / TIFF IFD chain) —
+/// 2. **EXIF embedded thumbnail** (JPEG EXIF IFD1 / TIFF IFD chain) -
 ///    two-phase read: header scan then targeted Range for the embedded JPEG.
-/// 3. **Progressive JPEG** — read a heuristic byte budget, decode the first
+/// 3. **Progressive JPEG** - read a heuristic byte budget, decode the first
 ///    progressive scan, set `cook.render_image`.
-/// 4. **Camera-raw preview** (DNG, CR2, NEF, ARW, …) — 32 KiB header scan,
+/// 4. **Camera-raw preview** (DNG, CR2, NEF, ARW, …) - 32 KiB header scan,
 ///    full IFD traversal, targeted Range for the largest embedded JPEG.
-/// 5. **ZIP container** (ODT, DOCX, …) — single tail Range fetch.
+/// 5. **ZIP container** (ODT, DOCX, …) - single tail Range fetch.
 ///
 /// Sets `cook.render_image = Some(img)` and closes the HTTP connection on success.
 /// Leaves both untouched on any failure so the caller can fall through to
@@ -1861,7 +1861,7 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
             cook.render_image = Some(img);
             return;
         }
-        // load_from_memory failed — buffer is still intact (read_at
+        // load_from_memory failed - buffer is still intact (read_at
         // restored the cursor; streaming mode was never entered).
         // Fall through so tier2 can handle the format via libav.
     }
@@ -1984,7 +1984,7 @@ fn parse_mp3_frame_header(bytes: &[u8]) -> Option<Mp3FrameInfo> {
 
     if bitrate == 0 {
         return None;
-    } // "free" bitrate — can't estimate
+    } // "free" bitrate - can't estimate
 
     Some(Mp3FrameInfo {
         bitrate: bitrate * 1000,

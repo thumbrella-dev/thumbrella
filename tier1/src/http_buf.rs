@@ -1,4 +1,4 @@
-//! Async paged HTTP buffer — `HttpBuffer<S: HttpStream>`.
+//! Async paged HTTP buffer - `HttpBuffer<S: HttpStream>`.
 //!
 //! ## Architecture
 //!
@@ -21,14 +21,14 @@
 //!
 //! ## HttpBuffer features
 //!
-//! * **Seek** — `seek(offset)` is always free; no I/O.
-//! * **Paged cache** — network chunks stored in 4 KiB pages; re-reads served
+//! * **Seek** - `seek(offset)` is always free; no I/O.
+//! * **Paged cache** - network chunks stored in 4 KiB pages; re-reads served
 //!   from cache.
-//! * **Tail fetch** — sparse Range request for the file tail when the cursor
+//! * **Tail fetch** - sparse Range request for the file tail when the cursor
 //!   jumps far ahead of the stream and file length is known.
-//! * **Streaming mode** — new chunks bypass the page cache and flow through a
+//! * **Streaming mode** - new chunks bypass the page cache and flow through a
 //!   rolling buffer.  Already-cached pages remain readable.  One-way.
-//! * **Artificial EOF** — limits the visible file length without evicting pages.
+//! * **Artificial EOF** - limits the visible file length without evicting pages.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -84,9 +84,9 @@ impl std::error::Error for HttpError {}
 /// …) and `HttpBuffer<YourStream>` works without changes to this module.
 ///
 /// The three methods the buffer depends on are:
-/// - `connect` — open a GET (or Range GET, via headers) and return the stream.
-/// - `next_chunk` — pull the next bytes from the response body.
-/// - `close` — release the connection on early exit.
+/// - `connect` - open a GET (or Range GET, via headers) and return the stream.
+/// - `next_chunk` - pull the next bytes from the response body.
+/// - `close` - release the connection on early exit.
 ///
 /// The two metadata accessors (`status`, `response_headers`) are read once
 /// after `connect` and cached in `HttpBuffer`.  `content_length` and
@@ -96,7 +96,7 @@ impl std::error::Error for HttpError {}
 /// # Note on `async fn` in traits
 ///
 /// This trait uses `async fn` (stable since Rust 1.75).  It is intentionally
-/// not object-safe — `dyn HttpStream` is not a goal; the backend is always
+/// not object-safe - `dyn HttpStream` is not a goal; the backend is always
 /// chosen at compile time via generics, so the `Send` bound omission is fine.
 #[allow(async_fn_in_trait)]
 pub trait HttpStream: Sized {
@@ -123,7 +123,7 @@ pub trait HttpStream: Sized {
 
     /// Release the underlying connection before the body is fully consumed.
     ///
-    /// Call this whenever `HttpBuffer` is discarded mid-stream — e.g. after
+    /// Call this whenever `HttpBuffer` is discarded mid-stream - e.g. after
     /// a shortcut or early-exit path.  Backends that own a `ReadableStream`
     /// (Cloudflare Workers) must override this to call `cancel()`; for
     /// native reqwest the default no-op is sufficient because dropping the
@@ -131,7 +131,7 @@ pub trait HttpStream: Sized {
     async fn close(&mut self) {}
 }
 
-//  StreamBound — platform-sensitive trait bound
+//  StreamBound - platform-sensitive trait bound
 
 /// Sealed bound used by [`crate::ThumbCookGeneric::run`].
 ///
@@ -139,7 +139,7 @@ pub trait HttpStream: Sized {
 /// coerce `&mut ThumbCook<S>` to `&mut dyn RenderCook`.  On wasm32 /
 /// non-native targets there is only one thread and no `Send` requirement.
 ///
-/// Callers outside tier1 never need to name this trait — it is automatically
+/// Callers outside tier1 never need to name this trait - it is automatically
 /// satisfied by any `HttpStream` impl on each platform.
 #[cfg(feature = "native")]
 pub trait StreamBound: HttpStream + Send + 'static {}
@@ -155,10 +155,10 @@ impl<S: HttpStream> StreamBound for S {}
 
 /// Async random-access buffer over an HTTP resource.
 ///
-/// Generic over any [`HttpStream`] backend — `HttpBuffer<ReqwestStream>` for
+/// Generic over any [`HttpStream`] backend - `HttpBuffer<ReqwestStream>` for
 /// the native server, `HttpBuffer<FetchStream>` in a workers crate, etc.
 pub struct HttpBuffer<S: HttpStream> {
-    /// URL of the resource — retained for tail Range re-requests.
+    /// URL of the resource - retained for tail Range re-requests.
     pub url: String,
     /// Flattened response headers captured on open.
     pub headers: HashMap<String, String>,
@@ -169,7 +169,7 @@ pub struct HttpBuffer<S: HttpStream> {
     /// `true` if the server supports byte-range requests.
     pub accepts_ranges: bool,
 
-    /// The HTTP backend — the only backend-specific value in this struct.
+    /// The HTTP backend - the only backend-specific value in this struct.
     stream: S,
 
     /// Logical read cursor.
@@ -328,7 +328,7 @@ impl<S: HttpStream> HttpBuffer<S> {
 
     /// Read up to `buf.len()` bytes from the cursor into `buf`.
     ///
-    /// May return fewer bytes than requested at a page boundary — callers
+    /// May return fewer bytes than requested at a page boundary - callers
     /// needing an exact count should loop.  Returns `Ok(0)` at end of stream.
     pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize, HttpError> {
         if buf.is_empty() {
@@ -402,14 +402,14 @@ impl<S: HttpStream> HttpBuffer<S> {
         // How many bytes we need for this page to be complete.
         let expected_len = if let Some(cl) = self.content_length {
             if page_start >= cl {
-                return Ok(()); // past EOF — nothing to fetch
+                return Ok(()); // past EOF - nothing to fetch
             }
             (cl.min(page_end).saturating_sub(page_start)) as usize
         } else {
             PAGE_SIZE // unknown length: wait for a full page
         };
 
-        // Page is already fully populated — nothing to do.
+        // Page is already fully populated - nothing to do.
         let have = self.pages.get(&page_index).map_or(0, |p| p.len());
         if have >= expected_len {
             return Ok(());
@@ -440,7 +440,7 @@ impl<S: HttpStream> HttpBuffer<S> {
         // known-length file, issue a Range request instead of draining every
         // byte in between.  Streaming mode uses a lower gap threshold than
         // read_cached() because each chunk is an individual HTTP round-trip
-        // with no page-cache amortisation — even a modest gap of ~64 KB
+        // with no page-cache amortisation - even a modest gap of ~64 KB
         // (16 pages) is cheaper to bridge with a Range request.
         if let Some(total) = self.content_length {
             let in_tail = self.cursor >= total.saturating_sub(TAIL_FETCH_SIZE);
@@ -629,7 +629,7 @@ impl<S: HttpStream> HttpBuffer<S> {
     }
 }
 
-//  ReqwestStream — native backend
+//  ReqwestStream - native backend
 
 /// reqwest-backed [`HttpStream`] implementation for the native server.
 ///
@@ -638,7 +638,7 @@ impl<S: HttpStream> HttpBuffer<S> {
 ///
 /// Supports both `http://`/`https://` URLs (via reqwest) and `file://` URLs
 /// (read from the local filesystem).  `file://` is useful for local testing
-/// via the CLI — pass a path and it is promoted to a `file://` URL before
+/// via the CLI - pass a path and it is promoted to a `file://` URL before
 /// this point.
 #[cfg(feature = "native")]
 pub struct ReqwestStream {
@@ -666,7 +666,7 @@ enum ReqwestStreamInner {
 #[cfg(feature = "native")]
 impl HttpStream for ReqwestStream {
     async fn connect(url: &str, options: &ConnectOptions) -> Result<Self, HttpError> {
-        //  file:// — stream from disk
+        //  file:// - stream from disk
         if let Some(path) = url.strip_prefix("file://") {
             // Get file length without reading any content.
             let file_len = match std::fs::metadata(path) {
@@ -717,7 +717,7 @@ impl HttpStream for ReqwestStream {
             });
         }
 
-        //  http:// / https:// — reqwest
+        //  http:// / https:// - reqwest
         let client = http_client();
 
         let mut req = client.get(url);
@@ -812,7 +812,7 @@ fn flatten_headers(headers: &reqwest::header::HeaderMap) -> HashMap<String, Stri
 static HTTP_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
 
 /// Build and store the shared reqwest client.  Call once from [`startup`] before
-/// the server starts accepting requests.  Safe to call multiple times — only the
+/// the server starts accepting requests.  Safe to call multiple times - only the
 /// first call has any effect.
 ///
 /// [`startup`]: crate::startup::startup

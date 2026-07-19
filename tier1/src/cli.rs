@@ -21,7 +21,7 @@ use crate::cook::Runtime;
 //  CLI schema
 
 #[derive(Parser)]
-#[command(about = "Thumbrella — thumbnail and describe service")]
+#[command(about = "Thumbrella - thumbnail and describe service")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -41,7 +41,7 @@ enum Command {
     /// Thumbnail one or more URLs and print results to stdout.
     ///
     /// All URLs are processed concurrently.  Output is a JSON object with an
-    /// `items` array, one `ThumbResult` per input URL — the same shape as the
+    /// `items` array, one `ThumbResult` per input URL, the same shape as the
     /// `/batch` endpoint response.
     Thumb {
         /// Source URLs to thumbnail.
@@ -60,7 +60,7 @@ enum Command {
         json: bool,
 
         /// Emit raw result JSON (unwrapped, with base64 thumbnail intact).
-        /// Output is `{"result": {…}}` — one object per URL, no `items` wrapper.
+        /// Output is `{"result": {…}}` - one object per URL, no `items` wrapper.
         #[arg(long)]
         raw: bool,
     },
@@ -69,7 +69,7 @@ enum Command {
     ///
     /// Reports tier status, cache config, account credentials, and concurrency
     /// limits.  Validates external dependencies (handoff servers, caches) where
-    /// possible.  Output is private — not exposed on any HTTP endpoint.
+    /// possible.  Output is private, not exposed on any HTTP endpoint.
     Check {
         /// Emit machine-readable JSON instead of the default pretty text.
         #[arg(long)]
@@ -112,7 +112,7 @@ pub async fn run() {
 /// an `Arc<Runtime>` (possibly the same one, possibly a new one built with
 /// [`crate::renderer::with_renderer`]).
 ///
-/// # Example — tier 2 binary
+/// # Example tier 2 binary
 /// ```ignore
 /// tier1::cli::run_with_hook(|rt| async move {
 ///     tier1::with_renderer(rt, std::sync::Arc::new(tier2::Tier2Renderer::new()))
@@ -123,7 +123,7 @@ where
     F: FnOnce(Arc<Runtime>) -> Fut,
     Fut: std::future::Future<Output = Arc<Runtime>>,
 {
-    // Initialise the UX subsystem first — it controls all output.
+    // Initialise the UX subsystem first, it controls all output.
     let ux = crate::ux::init();
 
     // Only enable tracing-driven logging in full mode.
@@ -145,7 +145,7 @@ where
             && crate::connect::looks_like_auth_token(hs)
         {
             ux.fatal(
-                "TBR_HANDSHAKE looks like an auth token — this is almost certainly a mistake",
+                "TBR_HANDSHAKE looks like an auth token, this is almost certainly a mistake",
                 "Auth tokens start with 'tbr_' and belong in the connect string or \
                      Authorization header, not in TBR_HANDSHAKE.  Set TBR_HANDSHAKE to a \
                      simple shared secret instead.",
@@ -205,7 +205,7 @@ async fn run_server(runtime: Arc<Runtime>) {
         Ok(l) => l,
         Err(e) => {
             ux.fatal(
-                &format!("could not bind port {} — address already in use", cfg.port),
+                &format!("could not bind port {} - address already in use", cfg.port),
                 &format!(
                     "Set TBR_PORT to a different port, or stop any existing \
                      server and try again.  (details: {e})"
@@ -217,7 +217,7 @@ async fn run_server(runtime: Arc<Runtime>) {
     // Report the actual port (port 0 means the OS assigned an ephemeral port).
     let actual_port = listener.local_addr().map(|a| a.port()).unwrap_or(cfg.port);
 
-    // Startup block — banner, hints, and connection info.
+    // Startup block - banner, hints, and connection info.
     ux.print_startup(
         actual_port,
         crate::TBR_VERSION,
@@ -228,7 +228,7 @@ async fn run_server(runtime: Arc<Runtime>) {
 
     // Run a lightweight diagnostic check and print a one-liner for each issue.
     //
-    // We skip the port_available check here — the TcpListener::bind above
+    // We skip the port_available check here - the TcpListener::bind above
     // already either succeeded (we got a socket) or called fatal() and exited.
     // A second bind probe inside collect() would see the port as in-use by
     // this very server and produce a misleading false positive.
@@ -408,7 +408,7 @@ async fn run_thumb(
 
 pub fn print_thumb_items(results: &[crate::ThumbResult]) {
     for result in results {
-        // Not-modified cache hit — compact single-line display.
+        // Not-modified cache hit - compact single-line display.
         if result.source == Some(crate::result::ResultSource::NotModified) {
             println!("304  -  not modified");
             continue;
@@ -630,7 +630,7 @@ fn run_formats(json: bool) {
         FileKind::Unknown,
     ];
 
-    println!("Thumbrella — Supported Formats\n");
+    println!("Thumbrella - Supported Formats\n");
 
     let mut total_defined: usize = 0;
     let mut total_enabled: usize = 0;
@@ -695,10 +695,10 @@ fn run_formats(json: bool) {
     println!();
     println!("  Tier 1 formats are always available.");
     if !tier2_available {
-        println!("  Tier 2 is NOT configured — set TBR_TIER2 to enable.");
+        println!("  Tier 2 is NOT configured - set TBR_TIER2 to enable.");
     }
     if !tier3_available {
-        println!("  Tier 3 is NOT configured — set TBR_TIER3 to enable.");
+        println!("  Tier 3 is NOT configured - set TBR_TIER3 to enable.");
     }
 }
 
@@ -728,7 +728,7 @@ pub fn fmt_bytes(n: u64) -> String {
 
 pub fn fmt_secs(s: f64) -> String {
     if s <= 0.0 {
-        return "—".into();
+        return "-".into();
     }
     if s >= 1.0 {
         format!("{s:.2} s")

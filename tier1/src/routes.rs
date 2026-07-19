@@ -1,12 +1,12 @@
 //! Axum HTTP route handlers for the native server.
 //!
 //! Routes:
-//! - `GET  /health`                       — liveness probe
-//! - `GET  /placeholder/:kind.jpeg`       — static placeholder thumbnail for a file kind
-//! - `GET  /thumb.jpeg?url=<url>`         — single thumbnail; returns raw JPEG bytes (canonical)
-//! - `GET  /thumb?url=<url>`              — same handler; alias without extension
-//! - `POST /handoff`                      — trusted tier-to-tier thumbnail handoff
-//! - `POST /batch`                        — batch thumbnail + describe; waits for all items, returns one JSON object
+//! - `GET  /health`                       - liveness probe
+//! - `GET  /placeholder/:kind.jpeg`       - static placeholder thumbnail for a file kind
+//! - `GET  /thumb.jpeg?url=<url>`         - single thumbnail; returns raw JPEG bytes (canonical)
+//! - `GET  /thumb?url=<url>`              - same handler; alias without extension
+//! - `POST /handoff`                      - trusted tier-to-tier thumbnail handoff
+//! - `POST /batch`                        - batch thumbnail + describe; waits for all items, returns one JSON object
 //!
 //! # Server token
 //!
@@ -113,7 +113,7 @@ fn log_result(result: &crate::ThumbResult, duration_ms: u64) {
 /// {"status":"ok","thumbrella":0}
 /// ```
 ///
-/// The `thumbrella` field is the major version only — no minor or patch,
+/// The `thumbrella` field is the major version only - no minor or patch,
 /// for safety against version-based targeting.
 ///
 /// Logging is rate-limited: after 20 health checks, further requests are
@@ -175,7 +175,7 @@ pub async fn landing(State(runtime): State<Arc<Runtime>>) -> Response {
         .unwrap()
 }
 
-//  Fallback — 404 for unknown routes
+//  Fallback - 404 for unknown routes
 
 /// Catch-all for unmatched routes.  Logs the request and returns 404.
 pub async fn not_found(
@@ -202,7 +202,7 @@ fn log_early_exit(method: &str, path: &str, reason: &str, ip: &Option<String>) {
     let _ = std::io::Write::write_all(&mut std::io::stdout(), line.as_bytes());
 }
 
-/// Tiny colour helpers — duplicated here to avoid a circular dep on ux.
+/// Tiny colour helpers - duplicated here to avoid a circular dep on ux.
 mod colour {
     pub(super) fn cyan(s: &str) -> String {
         if std::env::var("NO_COLOR").is_ok_and(|v| !v.is_empty()) {
@@ -220,7 +220,7 @@ mod colour {
 /// Kinds: `image`, `video`, `audio`, `vector`, `document`, `geometry`,
 /// `archive`, `text`, `binary`, `unknown`, `failed`.
 ///
-/// The `.jpeg` extension is required — `/placeholder/image.jpeg` works,
+/// The `.jpeg` extension is required - `/placeholder/image.jpeg` works,
 /// `/placeholder/image` does not.
 ///
 /// These images are embedded at compile time and never change, so the
@@ -270,12 +270,12 @@ pub async fn placeholder(axum::extract::Path(kind): axum::extract::Path<String>)
 /// GET /thumb.jpeg?url=http%3A%2F%2Fexample.com%2Fimage.jpg
 /// ```
 ///
-/// The `.jpeg` suffix on the path is the canonical form — it allows CDNs, social
+/// The `.jpeg` suffix on the path is the canonical form - it allows CDNs, social
 /// media unfurlers, and image-aware middleware to identify the response as a JPEG
 /// image from the URL alone without fetching it.  `/thumb` is an alias that maps
 /// to the same handler for callers that prefer extension-free URLs.
 ///
-/// This endpoint does not accept or return cache hints — use `/batch` for
+/// This endpoint does not accept or return cache hints - use `/batch` for
 /// conditional requests.
 ///
 /// **CDN note**: if routing through a CDN, ensure the cache key includes the full

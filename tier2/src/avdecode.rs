@@ -1,4 +1,4 @@
-//! libav image decode — custom AVIOContext backed by any `Read + Seek` source.
+//! libav image decode - custom AVIOContext backed by any `Read + Seek` source.
 //!
 //! # Design
 //!
@@ -8,9 +8,9 @@
 //!
 //! Callers can supply:
 //!
-//! * `Box::new(std::io::Cursor::new(bytes))` — reads from a pre-fetched
+//! * `Box::new(std::io::Cursor::new(bytes))` - reads from a pre-fetched
 //!   `Vec<u8>` already held in memory.
-//! * `Box::new(SyncHttpReader::new(http_buf))` — reads from the live
+//! * `Box::new(SyncHttpReader::new(http_buf))` - reads from the live
 //!   `HttpBuffer` paged cache.  Each callback invocation calls
 //!   `handle.block_on(async_read)` inside the `spawn_blocking` thread, so
 //!   libav drives the HTTP download on-demand without buffering the whole
@@ -47,7 +47,7 @@ unsafe extern "C" {
     static ff_ico_demuxer: u8;
 }
 
-//  ReaderState — type-erased I/O state for AVIO callbacks
+//  ReaderState - type-erased I/O state for AVIO callbacks
 
 /// Holds the reader and its optional total length.
 ///
@@ -259,13 +259,13 @@ fn ext_to_libav_format(ext: &str) -> Option<&'static str> {
 ///
 /// # Parameters
 ///
-/// * `reader` — any `Read + Seek + Send` source.  Pass
+/// * `reader` - any `Read + Seek + Send` source.  Pass
 ///   `Box::new(std::io::Cursor::new(bytes))` for in-memory bytes, or
 ///   `Box::new(SyncHttpReader::new(http_buf))` to let libav drive the HTTP
 ///   download on-demand through our paged cache.
-/// * `content_length` — total byte size of the stream, if known.  Used to
+/// * `content_length` - total byte size of the stream, if known.  Used to
 ///   answer libav's `AVSEEK_SIZE` probe; pass `None` if unknown.
-/// * `ext_hint` — canonical file extension (e.g. `"heic"`, `"avif"`), used
+/// * `ext_hint` - canonical file extension (e.g. `"heic"`, `"avif"`), used
 ///   to hint the demuxer when probing an untitled stream.  Pass `None` to
 ///   rely entirely on byte-stream detection.
 ///
@@ -298,7 +298,7 @@ pub fn decode_with_libav(
     }
 
     // Resolve the optional format hint to a *mut AVInputFormat.
-    // av_find_input_format returns NULL when the name is unknown — that's fine,
+    // av_find_input_format returns NULL when the name is unknown - that's fine,
     // the NULL will be passed to avformat_open_input (no hint = auto-probe).
     let fmt_hint_ptr: *mut AVInputFormat = unsafe {
         ext_hint
@@ -314,7 +314,7 @@ pub fn decode_with_libav(
 
     // Suppress ffmpeg's own stderr output unless TBR_LOG=full.
     // libav prints warnings and info messages directly to stderr through
-    // its internal logging — not through our eprintln! calls.
+    // its internal logging - not through our eprintln! calls.
     let ff_log_level = if matches!(std::env::var("TBR_LOG").as_deref(), Ok("full")) {
         AV_LOG_INFO
     } else {
@@ -396,7 +396,7 @@ pub fn decode_with_libav(
             avformat_close_input(&mut fmt_ctx);
         }
         // AVIOContext is NOT freed by avformat_close_input when CUSTOM_IO is
-        // set — free it ourselves.
+        // set - free it ourselves.
         free_avio_ctx(&mut avio_ctx);
     }
     tbr_debug!(
@@ -419,7 +419,7 @@ pub fn decode_with_libav(
     (result, avio_bytes)
 }
 
-//  Inner decode — returns early on any failure
+//  Inner decode - returns early on any failure
 
 #[allow(clippy::too_many_arguments)]
 unsafe fn decode_inner(
@@ -501,14 +501,14 @@ unsafe fn decode_inner(
     //  Find video / image stream
     // Pick the best stream using a two-level heuristic:
     //
-    // 1. **Standalone vs. grid tile** — HEIC/HEIF grid images expose each tile
+    // 1. **Standalone vs. grid tile** - HEIC/HEIF grid images expose each tile
     //    as a separate video stream (e.g. 60 streams of 512×512 for a 4K grid).
     //    A standalone representative thumbnail has unique dimensions that appear
     //    only once.  When ≥4 streams share the same (w,h), the "dominant" size
     //    is almost certainly a set of grid tiles; any stream with unique dims is
     //    a whole-image thumbnail and is strongly preferred.
     //
-    // 2. **Largest area** — among streams in the same preference tier (both
+    // 2. **Largest area** - among streams in the same preference tier (both
     //    standalone, or both tile), pick the one with the most pixels.
     //    This selects the primary track for ordinary video / MOV files.
     let nb = (**fmt_ctx).nb_streams as usize;

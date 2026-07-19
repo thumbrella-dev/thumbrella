@@ -1,15 +1,15 @@
-//! Cache integration — `CacheBackend` trait, `CacheStore` runtime holder,
+//! Cache integration - `CacheBackend` trait, `CacheStore` runtime holder,
 //! and DSN-based backend construction.
 //!
 //! ## Async contract
 //!
 //! `get` is async because Cloudflare Workers cache lookups are async JS calls.
 //! `put` returns an owned [`DeferredFuture`] the caller schedules via
-//! [`AfterResponse`] — writes never block the response path.
+//! [`AfterResponse`] - writes never block the response path.
 //!
 //! ## Handoff note
 //!
-//! Handoff cooks receive [`CacheStore::none()`] — no reads, no writes.
+//! Handoff cooks receive [`CacheStore::none()`] - no reads, no writes.
 //! The originating tier-1 node owns cache population for that request.
 
 use std::future::Future;
@@ -67,11 +67,11 @@ pub trait CacheBackend {
 ///
 /// Lives in front of the durable backend and provides two services:
 ///
-/// 1. **Sticky cache** — holds ALL successful results for a short time
+/// 1. **Sticky cache** - holds ALL successful results for a short time
 ///    (5 s by default) regardless of upstream `Cache-Control`.  Prevents
 ///    duplicate upstream fetches for near-simultaneous identical requests.
 ///
-/// 2. **Inflight coalescing** — when a cache miss occurs, the first request
+/// 2. **Inflight coalescing** - when a cache miss occurs, the first request
 ///    (the "leader") registers an in-flight slot.  Subsequent requests for
 ///    the same key ("joiners") wait on a oneshot channel until the leader
 ///    completes and fans out the result via [`CacheStore::store`].
@@ -146,7 +146,7 @@ mod frontend {
 /// Holds a single durable cache backend with an optional sticky+coalescing
 /// frontend.
 ///
-/// Cheap to clone — backend and frontend are behind `Arc`.
+/// Cheap to clone - backend and frontend are behind `Arc`.
 /// An empty store (`CacheStore::none()`) is used for handoff cooks and when
 /// no cache is configured.
 #[derive(Clone, Default)]
@@ -175,12 +175,12 @@ impl CacheStore {
         }
     }
 
-    /// Empty store — no reads, no writes.
+    /// Empty store - no reads, no writes.
     pub fn none() -> Self {
         Self::default()
     }
 
-    /// Check the cache for `key` — frontend first, then durable backend.
+    /// Check the cache for `key` - frontend first, then durable backend.
     pub async fn check(&self, key: &str) -> Option<(ThumbResult, &'static str)> {
         //  1. Sticky cache (native only)
         #[cfg(feature = "native")]
@@ -197,13 +197,13 @@ impl CacheStore {
         if let Some(ref fe) = self.frontend {
             match fe.try_lead(key) {
                 Some(rx) => {
-                    // Joiner — wait for the leader with a 30 s safety timeout.
+                    // Joiner - wait for the leader with a 30 s safety timeout.
                     let result = tokio::time::timeout(std::time::Duration::from_secs(30), rx).await;
 
                     match result {
                         Ok(Ok(arc)) => return Some(((*arc).clone(), "sticky")),
                         _ => {
-                            // Leader failed or timed out — clean up and become
+                            // Leader failed or timed out - clean up and become
                             // the new leader.
                             fe.cancel(key);
                             is_leader = true;
@@ -211,7 +211,7 @@ impl CacheStore {
                     }
                 }
                 None => {
-                    is_leader = true; // Leader — proceed to check backend.
+                    is_leader = true; // Leader - proceed to check backend.
                 }
             }
         }
@@ -229,7 +229,7 @@ impl CacheStore {
             return Some((result, backend.name()));
         }
 
-        // Miss — cancel the inflight slot so it doesn't leak.
+        // Miss - cancel the inflight slot so it doesn't leak.
         #[cfg(feature = "native")]
         if is_leader && let Some(ref fe) = self.frontend {
             fe.cancel(key);
@@ -289,23 +289,23 @@ pub fn render_cost_from_secs(render_secs: f64) -> u8 {
 /// Build a single cache backend from a DSN string.
 ///
 /// Supported schemes:
-/// - `mem:<size>` — in-memory LRU cache (e.g. `mem:200mb`, `mem:`, default 100 MB)
-/// - `sqlite:<path>[#<size>]` — persistent SQLite cache (e.g. `sqlite:cache.db#1gb`)
-/// - `cloud:<token>` — cloud-service cache (e.g. `cloud:tbr_s_AbCd...`)
-/// - `none:` — disable caching
+/// - `mem:<size>` - in-memory LRU cache (e.g. `mem:200mb`, `mem:`, default 100 MB)
+/// - `sqlite:<path>[#<size>]` - persistent SQLite cache (e.g. `sqlite:cache.db#1gb`)
+/// - `cloud:<token>` - cloud-service cache (e.g. `cloud:tbr_s_AbCd...`)
+/// - `none:` - disable caching
 #[cfg(feature = "native")]
 pub fn open_from_dsn(dsn: &str) -> Result<Arc<dyn CacheBackend>, String> {
-    // none: — explicit no-cache.  Must not have extra content.
+    // none: - explicit no-cache.  Must not have extra content.
     if dsn == "none:" || dsn == "none" {
-        return Err("none: requested — no cache backend to open".to_string());
+        return Err("none: requested - no cache backend to open".to_string());
     }
     if dsn.starts_with("none:") {
-        return Err("none: takes no parameters — use just 'none:' to disable caching".to_string());
+        return Err("none: takes no parameters - use just 'none:' to disable caching".to_string());
     }
 
     let (scheme, rest) = dsn
         .split_once(':')
-        .ok_or_else(|| format!("invalid cache spec '{dsn}' — expected <scheme>:<value>"))?;
+        .ok_or_else(|| format!("invalid cache spec '{dsn}' - expected <scheme>:<value>"))?;
 
     match scheme {
         "mem" => {
@@ -337,7 +337,7 @@ pub fn open_from_dsn(dsn: &str) -> Result<Arc<dyn CacheBackend>, String> {
         }
         "cloud" => cloud::CloudCacheBackend::new(rest).map(|b| Arc::new(b) as Arc<dyn CacheBackend>),
         other => Err(format!(
-            "unsupported cache scheme '{other}' — supported: mem:, sqlite:, cloud:, none:"
+            "unsupported cache scheme '{other}' - supported: mem:, sqlite:, cloud:, none:"
         )),
     }
 }
@@ -351,7 +351,7 @@ pub fn validate_dsn(dsn: &str) -> (crate::check::Validation, Option<crate::check
     if dsn.starts_with("none:") {
         return (
             crate::check::Validation::error(
-                "none: takes no parameters — use just 'none:' to disable caching",
+                "none: takes no parameters - use just 'none:' to disable caching",
             ),
             None,
         );
@@ -384,7 +384,7 @@ pub fn validate_dsn(dsn: &str) -> (crate::check::Validation, Option<crate::check
         }
         _ => (
             crate::check::Validation::error(format!(
-                "unknown cache scheme '{scheme}' — supported: mem:, sqlite:, cloud:, none:"
+                "unknown cache scheme '{scheme}' - supported: mem:, sqlite:, cloud:, none:"
             )),
             None,
         ),

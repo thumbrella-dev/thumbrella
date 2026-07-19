@@ -1,4 +1,4 @@
-//! Tier 3 binary — starts tier 1's pipeline with the tier 3 renderer registered.
+//! Tier 3 binary - starts tier 1's pipeline with the tier 3 renderer registered.
 //!
 //! At startup the environment is probed for available backends (F3D, usd-core,
 //! etc.).  The `tier3 check` command prints a detailed capability report.
@@ -19,7 +19,7 @@ async fn main() {
         category: "geometry",
         command: "f3d",
         // F3D readers available in this runtime (mesh/CAD/simulation formats).
-        // USDZ is NOT in this list — it is handled separately via ZIP extraction.
+        // USDZ is NOT in this list - it is handled separately via ZIP extraction.
         extensions: &[
             "3ds", "brep", "dae", "dxf", "e", "exo", "ex2", "fbx", "glb", "gltf", "gml", "iges", "igs",
             "obj", "off", "p21", "ply", "pts", "step", "stl", "stp", "stpnc", "vtk", "vtm", "vti", "vtp",
@@ -108,7 +108,7 @@ fn register_tier3_check(env: &tier3::env_check::EnvReport) {
             })
             .collect();
         tier1::check::register_section(tier1::check::CheckSection {
-            heading: format!("Tier 2 — Supported Formats ({} formats)", entries.len()),
+            heading: format!("Tier 2 - Supported Formats ({} formats)", entries.len()),
             entries,
         });
     }
@@ -175,12 +175,12 @@ fn register_tier3_check(env: &tier3::env_check::EnvReport) {
             })
             .collect();
         tier1::check::register_section(tier1::check::CheckSection {
-            heading: format!("Tier 3 — Subprocess Handlers ({} formats)", entries.len()),
+            heading: format!("Tier 3 - Subprocess Handlers ({} formats)", entries.len()),
             entries,
         });
     }
 
-    // General tools section — backends not tied to specific extensions.
+    // General tools section - backends not tied to specific extensions.
     {
         let general: &[&str] =
             &["f3d", "python3", "ffmpeg_cli", "magick", "oiiotool", "bwrap", "display_server"];
@@ -197,7 +197,7 @@ fn register_tier3_check(env: &tier3::env_check::EnvReport) {
             })
             .collect();
         tier1::check::register_section(tier1::check::CheckSection {
-            heading: "Tier 3 — General Tools".into(),
+            heading: "Tier 3 - General Tools".into(),
             entries,
         });
     }

@@ -1,15 +1,15 @@
-//! Scratch arena — temporary on-disk workspace for subprocess renderers.
+//! Scratch arena - temporary on-disk workspace for subprocess renderers.
 //!
 //! Tier 3 renderers that invoke external CLI tools often need to stage the
 //! source media as a file on disk (the tool reads a path, not stdin) and
 //! capture the output (the tool writes an image file).  This module provides
 //! a managed temporary directory with:
 //!
-//! - **Automatic cleanup** — the directory and all contents are removed on
+//! - **Automatic cleanup** - the directory and all contents are removed on
 //!   [`Drop`], using [`tempfile::TempDir`].
-//! - **Disk usage tracking** — an atomic counter tracks current bytes used
+//! - **Disk usage tracking** - an atomic counter tracks current bytes used
 //!   and enforces a configurable limit.
-//! - **Unique output paths** — each render invocation gets a collision-free
+//! - **Unique output paths** - each render invocation gets a collision-free
 //!   file path in the arena.
 //!
 //! # Lifecycle
@@ -26,7 +26,7 @@
 //!
 //! On Linux, the arena lives under `$TMPDIR` (or `/tmp`).  Future
 //! enhancements may use `O_TMPFILE` on Linux for unlinked temp files, but
-//! the current implementation uses regular files in a temp dir — portable
+//! the current implementation uses regular files in a temp dir - portable
 //! and sufficient for all targets.
 
 use std::io;
@@ -37,7 +37,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A managed temporary directory for subprocess rendering I/O.
 ///
-/// Created once per tier3 process (or per render invocation — both work).
+/// Created once per tier3 process (or per render invocation - both work).
 /// Tracks disk usage and enforces a byte limit.  All files are removed when
 /// the arena is dropped.
 pub struct ScratchArena {

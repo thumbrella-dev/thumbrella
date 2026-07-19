@@ -1,4 +1,4 @@
-//! Pipeline step: **inspect** — sniff file type and determine processing tier.
+//! Pipeline step: **inspect** - sniff file type and determine processing tier.
 
 use std::io::Cursor;
 
@@ -19,16 +19,16 @@ const SNIFF_LEN: usize = 4 * 1024;
 /// Must only be called after `connect` has opened the HTTP connection.
 ///
 /// Populates:
-/// - `cook.media.mime`         — sniffed MIME type string
-/// - `cook.media.kind`         — coarse `FileKind` category
-/// - `cook.media.extension`    — canonical extension (no dot)
-/// - `cook.media.properties`   — `{width_pixels, height_pixels, bits_per_pixel}` for `Image` kind
+/// - `cook.media.mime`         - sniffed MIME type string
+/// - `cook.media.kind`         - coarse `FileKind` category
+/// - `cook.media.extension`    - canonical extension (no dot)
+/// - `cook.media.properties`   - `{width_pixels, height_pixels, bits_per_pixel}` for `Image` kind
 pub async fn inspect<S: HttpStream>(cook: &mut ThumbCook<S>) {
     if !cook.http_is_open() {
         return;
     }
 
-    // read_at preserves the cursor — subsequent steps (shortcut, render)
+    // read_at preserves the cursor - subsequent steps (shortcut, render)
     // continue from byte 0.
     let prefix = match cook.http_read_at(0, SNIFF_LEN).await {
         Ok(b) => b,
@@ -59,7 +59,7 @@ pub async fn inspect<S: HttpStream>(cook: &mut ThumbCook<S>) {
         obj.insert("lossless".into(), (is_lossless_audio_ext(ext) as i32).into());
     }
 
-    // Route determines which tier should process this — informational only at
+    // Route determines which tier should process this - informational only at
     // this point; the cook will escalate if needed during shortcut/render.
     let _route = dispatch::route(kind, cook.media.extension.as_deref());
 }
@@ -69,10 +69,10 @@ pub async fn inspect<S: HttpStream>(cook: &mut ThumbCook<S>) {
 /// Identify the (kind, mime, extension) triple for a byte prefix.
 ///
 /// Priority order:
-/// 1. Magic bytes via `infer` — most reliable.
-/// 2. HTTP `Content-Type` header — trusted server classification, used when
+/// 1. Magic bytes via `infer` - most reliable.
+/// 2. HTTP `Content-Type` header - trusted server classification, used when
 ///    magic bytes produce nothing or only a generic container result.
-/// 3. URL path extension — last resort when neither infer nor server helped.
+/// 3. URL path extension - last resort when neither infer nor server helped.
 fn sniff(bytes: &[u8], url: &str, content_type: Option<&str>) -> (FileKind, String, String) {
     let url_ext = url_extension(url);
 
@@ -117,7 +117,7 @@ fn sniff(bytes: &[u8], url: &str, content_type: Option<&str>) -> (FileKind, Stri
         return (infer_kind, t.mime_type().to_string(), infer_ext);
     }
 
-    // infer found nothing — try the HTTP Content-Type header.
+    // infer found nothing - try the HTTP Content-Type header.
     if let Some(ct) = content_type {
         // Strip parameters like "; charset=utf-8".
         let mime = ct.split(';').next().unwrap_or(ct).trim().to_ascii_lowercase();
@@ -163,7 +163,7 @@ pub(super) fn inspect_image_properties(bytes: &[u8], props: &mut serde_json::Val
         obj.insert("lossless".into(), (0_i32).into());
         return;
     }
-    // SOF unreachable — fall through to image crate as a fallback.
+    // SOF unreachable - fall through to image crate as a fallback.
 
     let cursor = Cursor::new(bytes);
     let Ok(reader) = ImageReader::new(cursor).with_guessed_format() else {
@@ -238,7 +238,7 @@ pub(super) fn jpeg_sof_dimensions(bytes: &[u8]) -> Option<(u32, u32, u32)> {
             let bpp = (components as u32) * (bytes[pos + 4] as u32);
             return Some((w, h, bpp));
         }
-        // SOS — scan data follows, SOF must precede it
+        // SOS - scan data follows, SOF must precede it
         if marker == 0xDA {
             return None;
         }
@@ -256,7 +256,7 @@ pub(super) fn jpeg_sof_dimensions(bytes: &[u8]) -> Option<(u32, u32, u32)> {
 }
 
 /// Walk JPEG markers from a file prefix (starting at SOI) and return the byte
-/// offset where APP segments end — the position just before DQT/DHT/SOF/SOS.
+/// offset where APP segments end - the position just before DQT/DHT/SOF/SOS.
 /// This is the offset from which a targeted read can reliably find the SOF
 /// marker.  Returns `None` if the header is invalid or SOS is reached first.
 pub(super) fn jpeg_app_segments_end(bytes: &[u8]) -> Option<u64> {
@@ -273,7 +273,7 @@ pub(super) fn jpeg_app_segments_end(bytes: &[u8]) -> Option<u64> {
             pos += 2;
             continue;
         }
-        // Terminal markers — stop walking, return current position
+        // Terminal markers - stop walking, return current position
         if matches!(marker, 0xC0..=0xC2 | 0xC4 | 0xDB | 0xDA) {
             return Some(pos as u64);
         }
@@ -283,13 +283,13 @@ pub(super) fn jpeg_app_segments_end(bytes: &[u8]) -> Option<u64> {
         }
         pos += 2 + seg_len;
     }
-    // Fell off the end of the buffer — the SOF is beyond this prefix.
+    // Fell off the end of the buffer - the SOF is beyond this prefix.
     None
 }
 
 /// Scan arbitrary bytes for a JPEG SOF marker and return dimensions.
 /// Unlike [`jpeg_sof_dimensions`], this does not require the bytes to start
-/// at SOI — it searches for the first FF C0/C1/C2 marker.
+/// at SOI - it searches for the first FF C0/C1/C2 marker.
 pub(super) fn find_sof_in_bytes(bytes: &[u8]) -> Option<(u32, u32, u32)> {
     for i in 0..bytes.len().saturating_sub(9) {
         if bytes[i] == 0xFF && matches!(bytes[i + 1], 0xC0..=0xC2) {
@@ -376,7 +376,7 @@ pub fn canonical_extension(raw: &str) -> String {
         "igs" => "iges",
         "ex2" | "e" => "exo",
         "usda" | "usdc" => "usd",
-        // camera raw — uncommon aliases
+        // camera raw - uncommon aliases
         "crw" => "cr2",
         // web
         "htm" => "html",
@@ -399,7 +399,7 @@ fn url_extension(url: &str) -> Option<String> {
 
 /// Map an `infer` `MatcherType` directly to a `FileKind`.
 ///
-/// Preferred over `mime_to_kind` on the infer branch — uses the same
+/// Preferred over `mime_to_kind` on the infer branch - uses the same
 /// classification the library already committed to rather than re-parsing
 /// the mime string.
 fn infer_matcher_to_kind(mt: infer::MatcherType) -> FileKind {

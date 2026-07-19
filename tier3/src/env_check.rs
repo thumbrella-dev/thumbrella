@@ -1,6 +1,6 @@
 //! Environment capability probe.
 //!
-//! Tier 3 renderers depend on the host environment — shared libraries that
+//! Tier 3 renderers depend on the host environment - shared libraries that
 //! may or may not be installed, command-line tools at known paths, and
 //! runtime services like `xvfb`.  This module probes the environment at
 //! startup and produces an [`EnvReport`] describing which backends are
@@ -16,7 +16,7 @@
 //!
 //! # Design
 //!
-//! Probes are **lazy and non-blocking** — each one runs once via
+//! Probes are **lazy and non-blocking** - each one runs once via
 //! [`probe_environment`] and caches its result.
 //!
 //! # Probe types
@@ -286,7 +286,7 @@ fn probe_executables(report: &mut EnvReport) {
         );
     }
 
-    // Registered handlers — probed by file existence + execute bit.
+    // Registered handlers - probed by file existence + execute bit.
     // Handlers with command "(builtin)" are always available (pure-Rust).
     let handlers = HANDLER_REGISTRY.read().unwrap().clone();
     for h in &handlers {
@@ -544,7 +544,7 @@ fn try_executable(binary: &str, check_arg: &str, _desc: &str) -> (bool, Option<S
 
 /// Check whether a file at an absolute path exists and is executable.
 ///
-/// Does not invoke the tool — only checks metadata.  Use this for scripts
+/// Does not invoke the tool - only checks metadata.  Use this for scripts
 /// and binaries at known paths that do not support a `--version` flag.
 ///
 /// Returns `(available, details, reason)`.
@@ -588,6 +588,6 @@ fn check_file_executable(
     _meta: std::fs::Metadata,
     resolved: &std::path::Path,
 ) -> (bool, Option<String>, Option<String>) {
-    // Windows: just check file exists — execute bits don't apply.
+    // Windows: just check file exists - execute bits don't apply.
     (true, Some(format!("found at {}", resolved.display())), None)
 }

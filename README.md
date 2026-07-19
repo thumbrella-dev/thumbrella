@@ -46,7 +46,7 @@ links and suggestions.
 
 Thumbrella provides tools to build a bundled static FFmpeg, or use an external
 build.  The build scripts write `.cargo/ffs.toml` (gitignored) with the
-install paths; `cargo build` picks them up automatically — no environment
+install paths; `cargo build` picks them up automatically, no environment
 variables needed.
 
 ### Linux / macOS

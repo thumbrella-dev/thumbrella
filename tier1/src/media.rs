@@ -1,4 +1,4 @@
-//! Media metadata — file intelligence types.
+//! Media metadata - file intelligence types.
 //!
 //! `FileKind` is the stable coarse classification returned to clients.
 //! Format-specific properties are returned as a `serde_json::Value` map
@@ -18,7 +18,7 @@
 //!   lossless  bool   True when the codec is losslessly compressed
 //!
 //! Animated images (GIF, APNG) are still classified as `Image`.  No
-//! animation-specific fields — looping makes duration meaningless and
+//! animation-specific fields - looping makes duration meaningless and
 //! the `kind` already signals the possibility to clients.
 //!
 //! Video
@@ -34,7 +34,7 @@
 //!   lossless  bool   Inferred from extension (flac, wav, aiff)
 //!
 //! Geometry, Vector, Document, Archive, Text, Binary, Unknown
-//!   — no properties for now.  Counts (pages, vertices, files) and
+//!   - no properties for now.  Counts (pages, vertices, files) and
 //!     metadata (author, encoding) require deep format parsing or are
 //!     unreliable from a header-only read.
 //! ```

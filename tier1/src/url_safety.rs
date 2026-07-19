@@ -67,8 +67,8 @@ pub fn is_safe_url(raw: &str, allow_localhost: bool, max_len: usize) -> bool {
 /// Returns `true` if the host of `url` is permitted by the given allowlist.
 ///
 /// Each entry in `allowed` is either:
-/// - An exact hostname (e.g. `"cdn.acme.com"`) — matches case-insensitively.
-/// - A `*.`-prefixed wildcard (e.g. `"*.acme.com"`) — matches any subdomain,
+/// - An exact hostname (e.g. `"cdn.acme.com"`) - matches case-insensitively.
+/// - A `*.`-prefixed wildcard (e.g. `"*.acme.com"`) - matches any subdomain,
 ///   but NOT the bare parent domain itself.
 ///
 /// An empty `allowed` slice permits all hosts (no restriction).

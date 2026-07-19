@@ -9,7 +9,7 @@
 //! enters streaming mode on the `HttpBuffer` and moves it out as a
 //! `Box<dyn ReadSeek + Send>`.  This reader is passed directly into
 //! `spawn_blocking` where libav's `AVIOContext` callbacks pull bytes through
-//! the paged cache on-demand — no full-file drain, no clone, no second request.
+//! the paged cache on-demand - no full-file drain, no clone, no second request.
 //!
 //! For common raster formats (JPEG, PNG, …) the image crate still needs all
 //! bytes, but the bytes arrive through the same streaming reader path; they
@@ -67,17 +67,17 @@ impl InProcessRenderer for Tier2Renderer {
 
             match kind {
                 Some(FileKind::Image) => {
-                    // Formats tier2's libav can't decode — return false
+                    // Formats tier2's libav can't decode - return false
                     // immediately so tier3's oiiotool / ffmpeg CLI can
                     // take over without the reader being consumed.
                     if !tier2_handles_image(&ext) {
-                        tbr_debug!("[tier2] unsupported image format {ext} — deferring to higher tier");
+                        tbr_debug!("[tier2] unsupported image format {ext} - deferring to higher tier");
                         return false;
                     }
                     // Early-exit for arithmetic JPEGs: libav's mjpeg decoder
                     // does not support SOF9/SOF10.
                     if is_jpeg_format(&ext) && is_arithmetic_peek(cook) {
-                        tbr_debug!("[tier2] arithmetic JPEG detected — deferring to higher tier");
+                        tbr_debug!("[tier2] arithmetic JPEG detected - deferring to higher tier");
                         return false;
                     }
                     render_image(cook, &ext, content_length).await
@@ -145,18 +145,18 @@ fn is_raw_format(ext: &str) -> bool {
     )
 }
 
-/// Returns `true` for JPEG XL — decoded by the pure-Rust `jxl-oxide` crate.
+/// Returns `true` for JPEG XL - decoded by the pure-Rust `jxl-oxide` crate.
 fn is_jxl_format(ext: &str) -> bool {
     ext == "jxl"
 }
 
-/// Returns `true` for JPEG — decoded by libav, with arithmetic-coding
+/// Returns `true` for JPEG - decoded by libav, with arithmetic-coding
 /// detection so tier 3 can take over for unsupported variants.
 fn is_jpeg_format(ext: &str) -> bool {
     matches!(ext, "jpeg" | "jpg")
 }
 
-/// Returns `true` for SVG — rendered by the pure-Rust `resvg` crate.
+/// Returns `true` for SVG - rendered by the pure-Rust `resvg` crate.
 fn is_svg_format(ext: &str) -> bool {
     ext == "svg"
 }
@@ -197,7 +197,7 @@ fn is_arithmetic_peek(cook: &dyn RenderCook) -> bool {
 /// Peek at the first bytes of a JPEG stream to detect arithmetic coding.
 ///
 /// Arithmetic-coded JPEGs use SOF9 (0xC9) or SOF10 (0xCA) markers.  Libav's
-/// built-in mjpeg decoder does not support these — it returns
+/// built-in mjpeg decoder does not support these - it returns
 /// "unsupported coding type (c9)".  When detected, tier 2 returns false
 /// so the cook can fall back to tier 3's ffmpeg CLI.
 ///
@@ -207,7 +207,7 @@ fn detect_arithmetic_jpeg(reader: &mut dyn ReadSeek) -> bool {
 
     let mut buf = [0u8; 512];
     let n = reader.read(&mut buf).unwrap_or(0);
-    // Always seek back — caller continues from the start regardless.
+    // Always seek back - caller continues from the start regardless.
     let _ = reader.seek(SeekFrom::Start(0));
 
     if n < 4 || buf[0] != 0xFF || buf[1] != 0xD8 {
@@ -224,9 +224,9 @@ fn detect_arithmetic_jpeg(reader: &mut dyn ReadSeek) -> bool {
                     continue;
                 } // stuffed byte or padding
                 0xC9 | 0xCA => return true, // SOF9/SOF10 = arithmetic
-                0xDA => break,              // SOS — scan data follows
+                0xDA => break,              // SOS - scan data follows
                 _ => {
-                    // Segment with a length field — skip past it.
+                    // Segment with a length field - skip past it.
                     let seg_len = ((buf[i + 2] as usize) << 8) | (buf[i + 3] as usize);
                     i += 2 + seg_len;
                     continue;
@@ -268,7 +268,7 @@ fn decode_jxl(reader: &mut dyn ReadSeek) -> Option<RenderOutput> {
             DynamicImage::ImageRgb8(image::RgbImage::from_raw(width, height, rgb)?)
         }
         _ => {
-            // 4 channels (RGBA) or more — just take first 3
+            // 4 channels (RGBA) or more - just take first 3
             let rgb: Vec<u8> = buf
                 .chunks(channels)
                 .flat_map(|px| px.iter().take(3).map(|&v| (v.clamp(0.0, 1.0) * 255.0) as u8))
@@ -308,7 +308,7 @@ fn render_svg(reader: &mut dyn ReadSeek) -> Option<RenderOutput> {
         return None;
     }
 
-    // Render at 500×400 — fit the SVG inside, preserving aspect ratio.
+    // Render at 500×400 - fit the SVG inside, preserving aspect ratio.
     const RENDER_W: u32 = 500;
     const RENDER_H: u32 = 400;
     let scale = (RENDER_W as f64 / svg_w).min(RENDER_H as f64 / svg_h).min(1.0);
@@ -340,7 +340,7 @@ fn render_svg(reader: &mut dyn ReadSeek) -> Option<RenderOutput> {
 // file offset of 100 KB–400 KB.
 //
 // Strategy: after taking the reader, do everything synchronously in
-// spawn_blocking — seek + read to each SubIFD table, find the best JPEG
+// spawn_blocking - seek + read to each SubIFD table, find the best JPEG
 // preview strip, seek + read the JPEG bytes, then decode.  No async or trait
 // plumbing needed; the ReadSeek reader issues Range requests on demand via
 // block_on internally.
@@ -356,7 +356,7 @@ fn extract_raw_preview(reader: Box<dyn ReadSeek + Send>) -> Result<RenderOutput,
     use image::GenericImageView;
     use std::io::{Read, SeekFrom};
 
-    // Read the TIFF header (first 32 KB — likely already cached).
+    // Read the TIFF header (first 32 KB - likely already cached).
     const HDR: usize = 32 * 1024;
     let mut header = vec![0u8; HDR];
     if reader.seek(SeekFrom::Start(0)).is_err() {
@@ -578,7 +578,7 @@ async fn render_image(cook: &mut dyn RenderCook, ext: &str, content_length: Opti
             match extract_raw_preview(reader) {
                 Ok(out) => (Some(out), 0u64),
                 Err(reader) => {
-                    // No extractable preview — some raw formats (e.g. CR3) use
+                    // No extractable preview - some raw formats (e.g. CR3) use
                     // a MOV/ISOBMFF container that libav can handle.
                     let mut reader = reader;
                     let rotation_hint = container_rotation_hint(&mut *reader);
@@ -620,7 +620,7 @@ async fn render_image(cook: &mut dyn RenderCook, ext: &str, content_length: Opti
         tokio::task::spawn_blocking(move || {
             let mut reader = reader;
             if detect_arithmetic_jpeg(&mut *reader) {
-                tbr_debug!("[tier2] arithmetic JPEG detected — deferring to tier 3");
+                tbr_debug!("[tier2] arithmetic JPEG detected - deferring to tier 3");
                 // Reader is dropped here.  The renderer returns false,
                 // which tells the cook the format was not handled.
                 // The cook marks the result as Unavailable and finishes.
@@ -778,7 +778,7 @@ async fn render_video(cook: &mut dyn RenderCook, ext: &str, content_length: Opti
 }
 
 /// Drain `reader` via `read_to_end`, then decode with the `image` crate.
-/// Runs inside `spawn_blocking` — blocking I/O is expected.
+/// Runs inside `spawn_blocking` - blocking I/O is expected.
 ///
 /// For JPEG sources, [`decode_jpeg_dct`] is tried first: it uses the
 /// `jpeg-decoder` crate's DCT-level power-of-two downscaling to avoid
@@ -796,7 +796,7 @@ fn collect_and_decode_image_crate(
     std::io::Read::read_to_end(&mut reader, &mut bytes).ok()?;
     tbr_debug!("[tier2] collect_and_decode_image_crate: {} bytes  ext={}", bytes.len(), ext);
 
-    // Read EXIF orientation before decoding — the `image` crate does not
+    // Read EXIF orientation before decoding - the `image` crate does not
     // apply it automatically.
     let orientation = exif_orientation(&bytes);
 
@@ -854,7 +854,7 @@ fn decode_jpeg_dct(bytes: &[u8], req_w: u16, req_h: u16) -> Option<(DynamicImage
     let depth = orig_info.pixel_format.pixel_bytes() as u32 * 8;
 
     // Only apply DCT scaling when the source is meaningfully larger than the
-    // target — if we're already within 2× in both axes the decoder overhead
+    // target - if we're already within 2× in both axes the decoder overhead
     // of scale() isn't worth it; fall back to the image crate path.
     if src_w <= req_w as u32 * 2 && src_h <= req_h as u32 * 2 {
         return None;
@@ -928,7 +928,7 @@ fn pre_scale(img: DynamicImage, target_w: u32, target_h: u32) -> DynamicImage {
     img.resize(new_w, new_h, FilterType::Lanczos3)
 }
 
-/// Fallback: fetch `url` — supports both `http(s)://` and `file://`.
+/// Fallback: fetch `url` - supports both `http(s)://` and `file://`.
 pub async fn fetch_url(url: &str) -> Option<Vec<u8>> {
     if let Some(path) = url.strip_prefix("file://") {
         return tokio::fs::read(path).await.ok();
@@ -1038,7 +1038,7 @@ fn read_u16_le_be(data: &[u8], off: usize, little: bool) -> Option<u16> {
 /// sRGB display.  Apply a simple gamma-2.2 curve so the deliver step works
 /// with perceptually-correct pixel data.
 ///
-/// This is intentionally a fast approximation — not a full colour pipeline.
+/// This is intentionally a fast approximation - not a full colour pipeline.
 /// Targeted at thumbnail-quality output where the primary goal is legibility.
 fn linear_to_srgb(img: image::DynamicImage) -> image::DynamicImage {
     /// sRGB transfer function (approximated as pure gamma 2.2).
@@ -1058,7 +1058,7 @@ fn linear_to_srgb(img: image::DynamicImage) -> image::DynamicImage {
             let srgb = linear.powf(GAMMA);
             p.0[c] = (srgb * 255.0).round() as u8;
         }
-        // Alpha is not colour — leave it alone.
+        // Alpha is not colour - leave it alone.
     }
 
     match img {

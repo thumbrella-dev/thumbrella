@@ -36,7 +36,7 @@
 //! ```
 //!
 //! The same SQL is stored verbatim in `readme.sql_template` with `?1`
-//! as the parameter placeholder — paste and substitute as needed.
+//! as the parameter placeholder - paste and substitute as needed.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -79,8 +79,8 @@ impl SqliteCacheBackend {
 
     /// Diagnostic check for a configured SQLite cache path.
     ///
-    /// Checks write access, free disk space, and — when the file already
-    /// exists — schema compatibility.  Never opens the database in write mode
+    /// Checks write access, free disk space, and - when the file already
+    /// exists - schema compatibility.  Never opens the database in write mode
     /// or runs migrations; safe to call at any time.
     pub fn check(path: &str) -> crate::check::FileCheck {
         let mut fc = crate::check::check_file_path(path);
@@ -175,7 +175,7 @@ fn evict_oldest(conn: &Connection, max_bytes: u64) {
     }
 
     // Delete oldest entries until the total fits.  Use a running sum to
-    // delete just enough entries — delete oldest first, cheaper first.
+    // delete just enough entries - delete oldest first, cheaper first.
     conn.execute_batch(&format!(
         "DELETE FROM thumbrella WHERE cache_key IN (
             SELECT cache_key FROM (
@@ -194,7 +194,7 @@ fn evict_oldest(conn: &Connection, max_bytes: u64) {
 
 //  Schema migrations
 
-/// Read-only schema validation — called from [`SqliteCacheBackend::check`].
+/// Read-only schema validation - called from [`SqliteCacheBackend::check`].
 ///
 /// Opens the file with `SQLITE_OPEN_READ_ONLY` so no writes or migrations
 /// are performed.  Returns [`Validation::not_configured`] when the file does
@@ -212,7 +212,7 @@ fn check_schema(path: &str) -> crate::check::Validation {
         Err(e) => return crate::check::Validation::error(format!("cannot open: {e}")),
     };
 
-    // Quick integrity check — catches truncated / non-SQLite files.
+    // Quick integrity check - catches truncated / non-SQLite files.
     let integrity: String = match conn.query_row("PRAGMA integrity_check(1);", [], |r| r.get(0)) {
         Ok(s) => s,
         Err(e) => return crate::check::Validation::error(format!("integrity_check failed: {e}")),
@@ -232,7 +232,7 @@ fn check_schema(path: &str) -> crate::check::Validation {
     };
 
     if cols.is_empty() {
-        return crate::check::Validation::error("table 'thumbrella' not found — may be a different database");
+        return crate::check::Validation::error("table 'thumbrella' not found - may be a different database");
     }
 
     let required = [
@@ -248,7 +248,7 @@ fn check_schema(path: &str) -> crate::check::Validation {
 
     if !missing.is_empty() {
         return crate::check::Validation::error(format!(
-            "schema mismatch — missing column(s): {}",
+            "schema mismatch - missing column(s): {}",
             missing.join(", ")
         ));
     }

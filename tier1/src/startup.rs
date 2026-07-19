@@ -1,4 +1,4 @@
-//! Server startup — one-time initialisation before the first request is served.
+//! Server startup - one-time initialisation before the first request is served.
 
 use std::sync::Arc;
 
@@ -31,7 +31,7 @@ pub async fn startup(cfg: &AppConfig) -> Arc<Runtime> {
             match cache::open_from_dsn(dsn) {
                 Ok(backend) => CacheStore::new(backend, STICKY_TTL_SECS),
                 Err(e) => {
-                    tracing::error!("cache: could not open {dsn}: {e} — running without cache");
+                    tracing::error!("cache: could not open {dsn}: {e} - running without cache");
                     CacheStore::none()
                 }
             }
@@ -55,7 +55,7 @@ pub async fn startup(cfg: &AppConfig) -> Arc<Runtime> {
             }
         }
     } else {
-        tracing::debug!("trace: no TBR_TRACE configured — trace logging disabled");
+        tracing::debug!("trace: no TBR_TRACE configured - trace logging disabled");
         TraceStore::none()
     };
 
@@ -72,7 +72,7 @@ pub async fn startup(cfg: &AppConfig) -> Arc<Runtime> {
     if background_image.is_some() {
         tracing::debug!("startup: background image loaded");
     } else {
-        tracing::warn!("startup: failed to decode background.png — transparency will use solid colour");
+        tracing::warn!("startup: failed to decode background.png - transparency will use solid colour");
     }
 
     Runtime::new(

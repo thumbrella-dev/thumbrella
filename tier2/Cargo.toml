@@ -9,7 +9,7 @@ publish = false
 tier1 = { path = "../tier1" }
 ffs-build = { path = "../ffs/ffs-build" }
 
-# FFmpeg — tier2 codes against these directly; ffs-build handles linking
+# FFmpeg - tier2 codes against these directly; ffs-build handles linking
 ffmpeg-next = "8"
 ffmpeg-sys-next = "8"
 

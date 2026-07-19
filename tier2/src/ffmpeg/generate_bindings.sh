@@ -41,7 +41,7 @@ fi
 
 # The 52 symbols we actually use, plus types they transitively need.
 # bindgen follows the type graph automatically, so we just list the
-# entry points — structs, functions, and constants we reference directly.
+# entry points - structs, functions, and constants we reference directly.
 bindgen \
     "${HEADER_DIR}/libavcodec/avcodec.h" \
     "${HEADER_DIR}/libavformat/avformat.h" \

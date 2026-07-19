@@ -1,4 +1,4 @@
-//! Tier 2 binary — starts tier 1's pipeline with the tier 2 renderer registered.
+//! Tier 2 binary - starts tier 1's pipeline with the tier 2 renderer registered.
 
 #[tokio::main]
 async fn main() {

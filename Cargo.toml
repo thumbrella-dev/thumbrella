@@ -30,7 +30,7 @@ members = ["ffs/ffs-check", "ffs/ffs-build", "tier1", "tier2", "tier3"]
 
 
 [profile.dev]
-opt-level = 0      # no optimizations — required for reliable variable inspection
+opt-level = 0      # no optimizations, required for reliable variable inspection
 debug = 2          # full debug info (variables, types, not just line tables)
 incremental = true
 codegen-units = 256

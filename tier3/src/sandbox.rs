@@ -1,4 +1,4 @@
-//! Subprocess sandbox — bubblewrap isolation and rlimit fallback.
+//! Subprocess sandbox - bubblewrap isolation and rlimit fallback.
 //!
 //! On Linux, every subprocess renderer is wrapped in `bwrap` (bubblewrap)
 //! for full filesystem and namespace isolation.  On other platforms, a
@@ -35,7 +35,7 @@ use std::os::unix::process::CommandExt;
 
 /// Limits applied to a subprocess before `exec`.
 ///
-/// All limits are best-effort — unsupported platforms silently ignore them.
+/// All limits are best-effort - unsupported platforms silently ignore them.
 /// Zero means "no limit".
 #[derive(Debug, Clone)]
 pub struct SandboxConfig {
@@ -56,7 +56,7 @@ pub struct SandboxConfig {
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
-            // 0 = no address space limit — needed for Python-based renderers
+            // 0 = no address space limit - needed for Python-based renderers
             // (usd-core) and FFmpeg that load large native libraries.
             max_memory: 0,
             max_fds: 64,
@@ -138,7 +138,7 @@ pub fn bwrap_available() -> bool {
 /// Create a sandboxed [`Command`].  Uses bubblewrap on Linux when
 /// available, falls back to pre_exec rlimits otherwise.
 ///
-/// `scratch_dir` is the arena root — the subprocess can only write here
+/// `scratch_dir` is the arena root - the subprocess can only write here
 /// when bwrap is active.
 pub fn sandboxed_command(scratch_dir: &Path, program: &str, args: &[&str]) -> Command {
     if bwrap_available() {
@@ -263,7 +263,7 @@ fn set_rlimit(resource: u32, soft: u64, hard: u64) -> std::io::Result<()> {
         rlim_max: hard,
     };
     let rc = unsafe { libc::setrlimit(resource, &rlim) };
-    // Silently ignore rlimit errors — the limits are best-effort and
+    // Silently ignore rlimit errors - the limits are best-effort and
     // may fail when the process already has tighter constraints.
     let _ = rc;
     Ok(())

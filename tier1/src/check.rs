@@ -1,4 +1,4 @@
-//! Server diagnostics — configuration report and service validation.
+//! Server diagnostics - configuration report and service validation.
 //!
 //! [`CheckReport`] is a structured snapshot of the server's configuration and
 //! the reachability / health of every external dependency (cache backends,
@@ -6,7 +6,7 @@
 //!
 //! # Exposure
 //!
-//! The report is intentionally **not** exposed on any HTTP endpoint — it
+//! The report is intentionally **not** exposed on any HTTP endpoint, it
 //! contains configuration values, handoff URLs, and account identifiers that
 //! must not leak to the public internet.  The only supported surface is the
 //! `tier1 check` CLI subcommand.  A future opt-in via a secret token may be
@@ -33,7 +33,7 @@ pub enum RuntimeMode {
     Wasm,
     /// Cloudflare Workers isolate (workers-rs build).
     Cloudflare,
-    /// Embedded as a library — no HTTP server, no runtime.
+    /// Embedded as a library - no HTTP server, no runtime.
     Library,
 }
 
@@ -43,7 +43,7 @@ pub enum RuntimeMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "status")]
 pub enum TierStatus {
-    /// Renderer is built into this binary — no external dependency.
+    /// Renderer is built into this binary - no external dependency.
     Builtin,
     /// Tier delegates to an external handoff server.
     Handoff,
@@ -60,7 +60,7 @@ pub enum TierStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ValidationStatus {
-    /// Validation passed — dependency is reachable and responding correctly.
+    /// Validation passed - dependency is reachable and responding correctly.
     Ok,
     /// Dependency is not configured; no check was performed.
     NotConfigured,
@@ -148,7 +148,7 @@ pub struct FileCheck {
 /// and prints all sections after the main tier1 report.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckSection {
-    /// Section heading (e.g. `"Tier 2 — Supported Formats"`).
+    /// Section heading (e.g. `"Tier 2 - Supported Formats"`).
     pub heading: String,
     /// One entry per line item.
     pub entries: Vec<CheckEntry>,
@@ -225,7 +225,7 @@ pub struct CheckReport {
     pub handshake_validation: Validation,
 
     //  Tier 1
-    /// Tier 1 is always builtin — this field is informational only.
+    /// Tier 1 is always builtin - this field is informational only.
     pub tier1: TierStatus,
     //  Tier 2
     pub tier2: TierStatus,
@@ -331,13 +331,13 @@ fn build_cache_summary(dsn: &str, _cfg: &crate::config::AppConfig) -> String {
 
 /// Collect a diagnostic report for the current process environment.
 ///
-/// All configuration is read from `AppConfig` — which itself was populated
+/// All configuration is read from `AppConfig` - which itself was populated
 /// from env vars at startup.  External connectivity checks (ping handoff
 /// servers, connect to cache) are stubbed as `Skipped` until those subsystems
 /// are wired up.
 #[cfg(feature = "native")]
 pub fn collect(cfg: &crate::config::AppConfig) -> CheckReport {
-    // Tier 2 — prefer builtin when the renderer is compiled in, otherwise
+    // Tier 2 - prefer builtin when the renderer is compiled in, otherwise
     // check for a handoff URL, otherwise missing.
     let (tier2, tier2_handoff, tier2_validation) = if TIER2_BUILTIN.load(std::sync::atomic::Ordering::Acquire)
     {
@@ -353,7 +353,7 @@ pub fn collect(cfg: &crate::config::AppConfig) -> CheckReport {
         }
     };
 
-    // Tier 3 — same logic: builtin > handoff > missing.
+    // Tier 3 - same logic: builtin > handoff > missing.
     let (tier3, tier3_handoff, tier3_validation) = if TIER3_BUILTIN.load(std::sync::atomic::Ordering::Acquire)
     {
         (TierStatus::Builtin, None, Validation::ok())
@@ -368,7 +368,7 @@ pub fn collect(cfg: &crate::config::AppConfig) -> CheckReport {
         }
     };
 
-    // Cache — build a descriptive summary line.
+    // Cache - build a descriptive summary line.
     let (cache_config, cache_validation, cache_file_check) = match cfg.cache_url.as_ref() {
         Some(dsn) => {
             let (validation, file_check) = crate::cache::validate_dsn(dsn);
@@ -399,7 +399,7 @@ pub fn collect(cfg: &crate::config::AppConfig) -> CheckReport {
     // Container / Docker image detection
     let container_image = detect_container_image();
 
-    // Handshake validation — flag values that look like auth tokens.
+    // Handshake validation - flag values that look like auth tokens.
     let handshake_validation = match cfg.handshake.as_deref() {
         None => Validation::not_configured(),
         Some(hs) if crate::connect::looks_like_auth_token(hs) => Validation::error(
@@ -455,7 +455,7 @@ pub fn collect(cfg: &crate::config::AppConfig) -> CheckReport {
 ///
 /// Uses `access(2)` to test write permission without opening or creating
 /// anything.  When the target file does not yet exist the parent directory
-/// is tested instead — that is where the file will ultimately be created.
+/// is tested instead, that is where the file will ultimately be created.
 /// Free space is queried via `statvfs(2)` on the deepest existing ancestor.
 ///
 /// Called by backend `check()` implementations in [`crate::cache`] and
@@ -494,7 +494,7 @@ pub(crate) fn check_file_path(path: &str) -> FileCheck {
     }
 }
 
-/// On Windows, the file-backed path check is simplified — no `access(2)`
+/// On Windows, the file-backed path check is simplified, no `access(2)`
 /// or `statvfs(2)` available.  We just verify the parent directory exists.
 #[cfg(all(feature = "native", not(unix)))]
 pub(crate) fn check_file_path(path: &str) -> FileCheck {
@@ -706,7 +706,7 @@ impl CheckReport {
     fn port_ok_label(&self) -> String {
         let ux = crate::ux::get();
         if self.server_port == 0 {
-            String::new() // OS-picked ephemeral port — can't check
+            String::new() // OS-picked ephemeral port, can't check
         } else if self.port_available {
             ux.green("available")
         } else {
@@ -804,7 +804,7 @@ fn print_tier_var(name: &str, status: &TierStatus, handoff: Option<&str>, valida
     }
 }
 
-/// Validate an external handoff target URL — connectivity check only.
+/// Validate an external handoff target URL, connectivity check only.
 ///
 /// Auth headers are optional for handoff; the tier may be open or use a
 /// shared secret.  We only check that the URL resolves and the port accepts
@@ -822,7 +822,7 @@ fn validate_handoff_target(url: &str, _headers: &std::collections::HashMap<Strin
     // Reject schemes that reqwest can't actually fetch.
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
         return Validation::error(format!(
-            "unsupported scheme ({}://) — must be http or https",
+            "unsupported scheme ({}://), must be http or https",
             parsed.scheme()
         ));
     }

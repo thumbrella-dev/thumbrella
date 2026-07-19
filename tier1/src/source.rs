@@ -80,10 +80,10 @@ pub fn canonical_url(raw: &str) -> Option<String> {
 /// storage key that is independent of URL shape.
 ///
 /// Priority (highest to lowest):
-/// 1. `x-amz-checksum-sha256` — AWS S3 / CloudFront SHA-256 (already a hash)
-/// 2. `content-md5`           — RFC 1864 base64-encoded MD5
-/// 3. Strong `etag`           — no `W/` prefix; S3/GCS use MD5 hex or SHA-256
-/// 4. `x-goog-hash`           — GCS `md5=<base64>` or `crc32c=<base64>` directive
+/// 1. `x-amz-checksum-sha256` - AWS S3 / CloudFront SHA-256 (already a hash)
+/// 2. `content-md5`           - RFC 1864 base64-encoded MD5
+/// 3. Strong `etag`           - no `W/` prefix; S3/GCS use MD5 hex or SHA-256
+/// 4. `x-goog-hash`           - GCS `md5=<base64>` or `crc32c=<base64>` directive
 ///
 /// Returns `None` when none of these headers are present or usable.
 pub fn content_hash_from_headers(
@@ -141,7 +141,7 @@ pub fn content_hash_from_headers(
 }
 /// Extract a freshness token from HTTP response headers.
 ///
-/// Prefers `ETag` over `Last-Modified`.  The returned string is opaque — its
+/// Prefers `ETag` over `Last-Modified`.  The returned string is opaque - its
 /// leading character encodes the kind so [`conditional_headers`] can reconstruct
 /// the right request header without the caller needing to track that separately:
 /// - `E…` → was an ETag
@@ -191,7 +191,7 @@ pub fn conditional_headers(etag: &str) -> Option<(&'static str, &str)> {
 /// # Server-side fast path
 ///
 /// When a client sends `hints` back and `is_fresh()` is true, the pipeline
-/// returns `NotModified` immediately — no upstream HTTP call, no cache lookup.
+/// returns `NotModified` immediately - no upstream HTTP call, no cache lookup.
 ///
 /// # Conditional requests
 ///
@@ -242,7 +242,7 @@ impl CacheHints {
     /// Parse freshness hints from HTTP response headers.
     ///
     /// Returns `None` when none of the recognised headers are present.
-    /// Note: returns `Some` even when `no-store` is set — callers should check
+    /// Note: returns `Some` even when `no-store` is set - callers should check
     /// [`disallow_caching()`](Self::disallow_caching) before storing.
     pub fn from_response_headers(headers: &std::collections::HashMap<String, String>) -> Option<Self> {
         let mut hints = Self::default();
@@ -300,7 +300,7 @@ impl CacheHints {
         }
 
         //  ETag / Last-Modified
-        // ETag is the authoritative validator (RFC 7232 §6 — servers must give
+        // ETag is the authoritative validator (RFC 7232 §6 - servers must give
         // it precedence over If-Modified-Since).  Only fall back to Last-Modified
         // when no ETag is available; storing both would be redundant dead weight.
         if let Some(v) = headers.get("etag") {
@@ -393,7 +393,7 @@ impl CacheHints {
     /// re-validate but SHOULD store the data for conditional requests.
     ///
     /// `default_ttl_secs` is used when no `expires_at` and no validators
-    /// are present — the result gets a short freshness window.
+    /// are present - the result gets a short freshness window.
     pub fn encode(&self, default_ttl_secs: u64) -> String {
         if self.no_store || self.private {
             return String::new();

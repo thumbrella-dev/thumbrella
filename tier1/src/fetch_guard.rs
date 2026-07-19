@@ -1,13 +1,13 @@
-//! Fetch-protection caches — URL failure debounce and origin back-off.
+//! Fetch-protection caches - URL failure debounce and origin back-off.
 //!
 //! Both types are cheaply cloneable (inner data is reference-counted) so they
 //! can live on [`crate::cook::Runtime`] and be shared across all concurrent
 //! cooks without extra allocation.
 //!
 //! # Platform split
-//! * **native** — backed by [`moka::future::Cache`]: bounded capacity,
+//! * **native** - backed by [`moka::future::Cache`]: bounded capacity,
 //!   thread-safe, background TTL eviction.
-//! * **wasm32** — backed by [`parking_lot::RwLock`] over a `HashMap`:
+//! * **wasm32** - backed by [`parking_lot::RwLock`] over a `HashMap`:
 //!   lazy TTL expiry on read, no background threads required.
 
 use std::sync::Arc;
@@ -79,7 +79,7 @@ impl UrlFailureCache {
 
 /// Rate-control cache for origins that returned 429 / 503.
 ///
-/// Keyed by `scheme://host[:port]`. TTL is variable — taken from the upstream
+/// Keyed by `scheme://host[:port]`. TTL is variable - taken from the upstream
 /// `Retry-After` header (integer seconds), falling back to
 /// `Runtime::backoff_default`. Value: the HTTP status code that triggered
 /// the back-off.

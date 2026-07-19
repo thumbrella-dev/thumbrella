@@ -1,4 +1,4 @@
-//! Higher-tier handoff — the data bundle forwarded to tier-2/3 renderers.
+//! Higher-tier handoff - the data bundle forwarded to tier-2/3 renderers.
 //!
 //! [`ThumbHandoff`] is the serialisable projection of the three portable
 //! sub-structs on [`crate::cook::ThumbCook`] that travel between tiers.  It is
@@ -7,19 +7,19 @@
 //! to reconstruct the cook state at the render entry point.
 //!
 //! What travels and why:
-//! - [`InputSpec`]      — original caller inputs; receiver needs url/etag.
-//! - [`MediaInfo`]      — sniffed type info; skips re-running connect+inspect.
-//! - [`SourceIdentity`] — cache key; tier-1 stores the result after receipt.
-//! - `first_page`       — head-start bytes; receiver parses without a new request.
+//! - [`InputSpec`]      - original caller inputs; receiver needs url/etag.
+//! - [`MediaInfo`]      - sniffed type info; skips re-running connect+inspect.
+//! - [`SourceIdentity`] - cache key; tier-1 stores the result after receipt.
+//! - `first_page`       - head-start bytes; receiver parses without a new request.
 //!
 //! What does NOT travel:
-//! - `runtime`       — each tier constructs its own.
-//! - `http_buf`      — live resource; moved via
+//! - `runtime`       - each tier constructs its own.
+//! - `http_buf`      - live resource; moved via
 //!   [`crate::cook::ThumbCook::http_take_reader`] on the in-process path,
 //!   reconnected fresh on the out-of-process (serialised) path.
-//! - `render_image`  — not yet populated at handoff time.
-//! - `tel_*`         — per-tier; each tier tracks its own timing.
-//! - `out_*`         — receiver populates fresh.
+//! - `render_image`  - not yet populated at handoff time.
+//! - `tel_*`         - per-tier; each tier tracks its own timing.
+//! - `out_*`         - receiver populates fresh.
 //!
 //! # Custom handoff implementations
 //!
@@ -89,7 +89,7 @@ static HANDOFF_IMPL: OnceLock<Box<HandoffFn>> = OnceLock::new();
 
 /// Register a custom handoff transport for the current process.
 ///
-/// Call once at startup from the host crate — e.g. in the Cloudflare Workers
+/// Call once at startup from the host crate - e.g. in the Cloudflare Workers
 /// `fetch` setup, or in a native server that needs a different transport.
 /// Subsequent calls are silently ignored (first writer wins, same as `OnceLock`).
 pub fn register_handoff_fn(f: Box<HandoffFn>) {
@@ -104,9 +104,9 @@ pub fn register_handoff_fn(f: Box<HandoffFn>) {
 /// (e.g. `x-tbr-handshake`, `Authorization`, custom auth keys).
 ///
 /// Dispatch priority:
-/// 1. `HANDOFF_IMPL` — injected fn registered at startup (e.g. Workers).
-/// 2. `native_post_handoff` — reqwest implementation for `feature = "native"`.
-/// 3. Error — non-native build with no registered implementation.
+/// 1. `HANDOFF_IMPL` - injected fn registered at startup (e.g. Workers).
+/// 2. `native_post_handoff` - reqwest implementation for `feature = "native"`.
+/// 3. Error - non-native build with no registered implementation.
 pub async fn post_handoff(
     base_url: &str,
     headers: &HashMap<String, String>,
@@ -118,7 +118,7 @@ pub async fn post_handoff(
     native_post_handoff(base_url, headers, payload).await
 }
 
-/// Reqwest-based handoff — used in native builds when no custom fn is registered.
+/// Reqwest-based handoff - used in native builds when no custom fn is registered.
 #[cfg(feature = "native")]
 async fn native_post_handoff(
     base_url: &str,
@@ -151,7 +151,7 @@ async fn native_post_handoff(
         .map_err(|e| format!("handoff response decode failed: {e}"))
 }
 
-/// Non-native stub — reached only when no implementation was registered.
+/// Non-native stub - reached only when no implementation was registered.
 #[cfg(not(feature = "native"))]
 async fn native_post_handoff(
     _base_url: &str,

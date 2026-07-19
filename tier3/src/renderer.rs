@@ -1,10 +1,10 @@
-//! Tier 3 in-process renderer — extends tier 2 with pluggable backends.
+//! Tier 3 in-process renderer - extends tier 2 with pluggable backends.
 //!
 //! # Architecture
 //!
 //! `Tier3Renderer` delegates all standard format rendering (Image, Video,
 //! Vector) to [`tier2::Tier2Renderer`].  This ensures tier 3 always matches
-//! tier 2 behaviour exactly — tier 2 continues to evolve independently and
+//! tier 2 behaviour exactly - tier 2 continues to evolve independently and
 //! tier 3 inherits every improvement automatically.
 //!
 //! Tier 3 adds its own backends for formats tier 2 does not handle:
@@ -20,8 +20,8 @@
 //! # Dispatch order
 //!
 //! For Document and Geometry, tier 3 tries backends in order:
-//! 1. Shared-library backends (dlopen) — fastest, in-process
-//! 2. Subprocess backends (CLI tools) — heavier, sandboxed
+//! 1. Shared-library backends (dlopen) - fastest, in-process
+//! 2. Subprocess backends (CLI tools) - heavier, sandboxed
 //!
 //! For Image, Video, and Vector, tier 3 delegates directly to tier 2.
 //!
@@ -41,10 +41,10 @@ use tier1::RenderCook;
 
 //  Embedded Python scripts
 
-/// Embedded `usd_extract.py` — extracts triangulated mesh from USD/USDZ → OBJ.
+/// Embedded `usd_extract.py` - extracts triangulated mesh from USD/USDZ → OBJ.
 const USD_EXTRACT_PY: &str = include_str!("usd_extract.py");
 
-/// Embedded `sanitize_glb.py` — strips images/textures/materials from GLB.
+/// Embedded `sanitize_glb.py` - strips images/textures/materials from GLB.
 const SANITIZE_GLB_PY: &str = include_str!("sanitize_glb.py");
 use tier1::media::FileKind;
 use tier1::renderer::{RenderOutput, apply_render_output};
@@ -65,7 +65,7 @@ macro_rules! tbr_debug {
 // Tier3Renderer
 // ============================================================================
 
-/// Tier 3 renderer — extends tier 2 with pluggable document/geometry backends.
+/// Tier 3 renderer - extends tier 2 with pluggable document/geometry backends.
 ///
 /// All standard format rendering (image, video, vector) is delegated to the
 /// inner [`Tier2Renderer`].  Tier-3-specific backends are registered based on
@@ -103,7 +103,7 @@ impl InProcessRenderer for Tier3Renderer {
             let cl = cook.content_length();
             tbr_debug!("[tier3] render: kind={kind:?}  ext={ext}  content_length={cl:?}");
 
-            // On a handoff, skip tier2 entirely — the lower tier already
+            // On a handoff, skip tier2 entirely - the lower tier already
             // tried and determined it needs tier3.  Go straight to
             // tier3-specific backends (geometry, document, arithmetic JPEGs).
             let is_handoff = cook.is_handoff();
@@ -355,7 +355,7 @@ fn is_oiio_format(ext: &str) -> bool {
 /// via ffprobe and power-of-2 downscaling.
 ///
 /// For video: seeks to 1 second, extracts one frame.  Only the first 10 MiB
-/// of the source are passed — ffmpeg can often extract frames from truncated
+/// of the source are passed - ffmpeg can often extract frames from truncated
 /// files.
 fn run_ffmpeg_decode(bytes: &[u8], ext: &str, is_video: bool) -> Result<RenderOutput, String> {
     use std::process::Command;
@@ -469,7 +469,7 @@ fn run_ffmpeg_decode(bytes: &[u8], ext: &str, is_video: bool) -> Result<RenderOu
     // Scene-linear formats come through ffmpeg as linear 8-bit PNGs.
     // Apply a gamma-1.8 curve to approximate an sRGB display transform.
     // (1.8 is used instead of 2.2 because 8-bit truncation loses
-    // highlight detail — a gentler curve compensates visually.)
+    // highlight detail - a gentler curve compensates visually.)
     if is_linear_format(ext) {
         img = linear_to_srgb_fast(img);
     }
@@ -508,7 +508,7 @@ fn build_video_properties(
     if let Some(d) = duration_secs {
         props["duration_seconds"] = serde_json::json!(d);
     }
-    // channel_count is always written — 0 means "known to be silent".
+    // channel_count is always written - 0 means "known to be silent".
     props["channel_count"] = serde_json::json!(channel_count);
     props
 }
@@ -557,7 +557,7 @@ fn pix_fmt_bits_per_pixel(pix_fmt: &str) -> u32 {
     if pix_fmt.starts_with("yuv444p12") {
         return 36;
     }
-    // RGB, BGR, GBR — 24 bits/pixel (8-bit) or more.
+    // RGB, BGR, GBR - 24 bits/pixel (8-bit) or more.
     if matches!(pix_fmt, "rgb24" | "bgr24" | "gbrp" | "gbrp9") {
         return 24;
     }
@@ -580,7 +580,7 @@ fn pix_fmt_bits_per_pixel(pix_fmt: &str) -> u32 {
     0
 }
 
-/// Tier-3 CLI fallback for image formats.  One tool per format — no
+/// Tier-3 CLI fallback for image formats.  One tool per format - no
 /// fallback chain within tier3.  Each format has a single best tool.
 ///
 /// | Extension | Tool |
@@ -650,7 +650,7 @@ async fn render_image_ffmpeg_fallback(cook: &mut dyn RenderCook, ext: &str) -> b
             }
         }
     } else {
-        // Reader was consumed by a prior tier — re-fetch.
+        // Reader was consumed by a prior tier - re-fetch.
         let bytes = match tier2::renderer::fetch_url(cook.input_url()).await {
             Some(b) => b,
             None => {
@@ -684,7 +684,7 @@ async fn render_image_ffmpeg_fallback(cook: &mut dyn RenderCook, ext: &str) -> b
     }
 }
 
-/// Tier-3 ffmpeg CLI fallback for video.  Reads only the first 10 MiB —
+/// Tier-3 ffmpeg CLI fallback for video.  Reads only the first 10 MiB -
 /// ffmpeg can often extract a keyframe from a truncated file.
 async fn render_video_ffmpeg_fallback(cook: &mut dyn RenderCook, ext: &str) -> bool {
     let report = crate::env_check::cached_report();
@@ -704,7 +704,7 @@ async fn render_video_ffmpeg_fallback(cook: &mut dyn RenderCook, ext: &str) -> b
     let result = tokio::task::spawn_blocking(move || {
         let mut buf = Vec::with_capacity(10 * 1024 * 1024);
         use std::io::Read;
-        // Read at most 10 MiB — ffmpeg works with truncated files.
+        // Read at most 10 MiB - ffmpeg works with truncated files.
         let mut chunk = [0u8; 8192];
         loop {
             let n = reader.read(&mut chunk).map_err(|e| format!("read: {e}"))?;
@@ -804,7 +804,7 @@ fn run_oiiotool_decode(bytes: &[u8], ext: &str) -> Result<RenderOutput, String> 
         .arg(&output_path)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
-    // No sandbox — oiiotool is a trusted system tool.
+    // No sandbox - oiiotool is a trusted system tool.
 
     let output = cmd.output().map_err(|e| format!("spawn oiiotool: {e}"))?;
     if !output.status.success() {
@@ -830,8 +830,8 @@ fn run_oiiotool_decode(bytes: &[u8], ext: &str) -> Result<RenderOutput, String> 
 /// Render a document via tier-3-specific backends.
 ///
 /// Dispatch order:
-/// 1. Shared-library backends (dlopen) — e.g. libpdfium.
-/// 2. Subprocess backends — e.g. libreoffice headless.
+/// 1. Shared-library backends (dlopen) - e.g. libpdfium.
+/// 2. Subprocess backends - e.g. libreoffice headless.
 async fn render_document_tier3(cook: &mut dyn RenderCook, ext: &str) -> bool {
     // Stub: document rendering will use dlopen (pdfium) or subprocess
     // (libreoffice --headless) to render the first page.
@@ -841,7 +841,7 @@ async fn render_document_tier3(cook: &mut dyn RenderCook, ext: &str) -> bool {
 
 /// Render 3D geometry via tier-3-specific backends.
 ///
-/// Dispatch is extension-based — each registered handler declares which
+/// Dispatch is extension-based - each registered handler declares which
 /// extensions it handles.  Unrecognised extensions fall through to a
 /// placeholder.
 ///
@@ -933,7 +933,7 @@ async fn render_geometry_tier3(cook: &mut dyn RenderCook, ext: &str) -> bool {
                 return true;
             }
             Ok(Err(msg)) => {
-                // Renderer ran but failed — log the message, fall through
+                // Renderer ran but failed - log the message, fall through
                 // to placeholder.
                 tbr_debug!("[tier3] {name}: {msg}");
                 cook.fail_cook(&format!("{name}: {msg}"));
@@ -1010,7 +1010,7 @@ fn run_subprocess_handler(
         .ok()
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
 
-    // Arena is dropped here — temp files cleaned up.
+    // Arena is dropped here - temp files cleaned up.
 
     Ok(RenderOutput {
         image: img,
@@ -1326,7 +1326,7 @@ fn is_linear_format(ext: &str) -> bool {
 fn linear_to_srgb_fast(img: image::DynamicImage) -> image::DynamicImage {
     // Apply gamma 2.2 to bring linear-light pixel data into approximate
     // sRGB perceptual space.  The ffmpeg CLI path converts HDR to 8-bit
-    // PNG first, so highlight detail is already clipped — this is a
+    // PNG first, so highlight detail is already clipped - this is a
     // best-effort correction, not a full colour pipeline.
     const GAMMA: f64 = 1.0 / 2.2;
 
@@ -1384,7 +1384,7 @@ fn autocrop_transparent(img: image::DynamicImage) -> image::DynamicImage {
         .unwrap_or(w - 1);
 
     if top >= bottom || left >= right {
-        return img; // fully transparent — passthrough
+        return img; // fully transparent - passthrough
     }
 
     // Back off by BORDER pixels, clamped to image bounds.

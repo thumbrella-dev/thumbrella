@@ -1,4 +1,4 @@
-# Thumbrella — self-hosted thumbnail server with persistent SQLite cache.
+# Thumbrella self-hosted thumbnail server with persistent SQLite cache.
 #
 # Start:  docker compose up -d
 # Stop:   docker compose down

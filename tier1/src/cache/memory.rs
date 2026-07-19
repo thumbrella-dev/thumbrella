@@ -6,10 +6,10 @@
 //! ## DSN format
 //!
 //! `mem:` with an optional size spec after `#`:
-//! - `mem:`           — default 100 MB
-//! - `mem:/#500`      — max 500 entries
-//! - `mem:/#200mb`    — max 200 MB
-//! - `mem:/#2gb`      — max 2 GB
+//! - `mem:`           - default 100 MB
+//! - `mem:/#500`      - max 500 entries
+//! - `mem:/#200mb`    - max 200 MB
+//! - `mem:/#2gb`      - max 2 GB
 
 use std::future::Future;
 use std::pin::Pin;
@@ -79,7 +79,7 @@ impl CacheBackend for MemoryCacheBackend {
             // cache's LRU eviction.  Expired entries are filtered in get().
             //
             // For active eviction we would need moka's future::Cache with
-            // expire_after, but sync::Cache is sufficient — the LRU policy
+            // expire_after, but sync::Cache is sufficient - the LRU policy
             // naturally churns old entries, and get() below filters stale ones.
             let _ = ttl; // TODO: moka per-entry expiry when available
             tokio::task::spawn_blocking(move || {
@@ -104,7 +104,7 @@ pub fn parse_mem_size(fragment: &str) -> Result<Option<(u64, &str)>, String> {
         let gb: f64 = num
             .trim()
             .parse()
-            .map_err(|_| format!("invalid size spec: '{spec}' — expected a number before 'gb'"))?;
+            .map_err(|_| format!("invalid size spec: '{spec}' - expected a number before 'gb'"))?;
         if gb <= 0.0 || gb > 1024.0 {
             return Err(format!("GB size must be between 0 and 1024, got {gb}"));
         }
@@ -115,7 +115,7 @@ pub fn parse_mem_size(fragment: &str) -> Result<Option<(u64, &str)>, String> {
         let mb: f64 = num
             .trim()
             .parse()
-            .map_err(|_| format!("invalid size spec: '{spec}' — expected a number before 'mb'"))?;
+            .map_err(|_| format!("invalid size spec: '{spec}' - expected a number before 'mb'"))?;
         if mb <= 0.0 || mb > (1024.0 * 1024.0) {
             return Err(format!("MB size must be between 0 and 1,048,576, got {mb}"));
         }
@@ -126,7 +126,7 @@ pub fn parse_mem_size(fragment: &str) -> Result<Option<(u64, &str)>, String> {
         let kb: f64 = num
             .trim()
             .parse()
-            .map_err(|_| format!("invalid size spec: '{spec}' — expected a number before 'kb'"))?;
+            .map_err(|_| format!("invalid size spec: '{spec}' - expected a number before 'kb'"))?;
         if kb <= 0.0 {
             return Err(format!("KB size must be positive, got {kb}"));
         }
@@ -136,7 +136,7 @@ pub fn parse_mem_size(fragment: &str) -> Result<Option<(u64, &str)>, String> {
     let count: u64 = spec
         .trim()
         .parse()
-        .map_err(|_| format!("invalid size spec: '{spec}' — expected a number, or number+unit (mb/gb/kb)"))?;
+        .map_err(|_| format!("invalid size spec: '{spec}' - expected a number, or number+unit (mb/gb/kb)"))?;
     if count < 10 {
         return Err(format!("entry count must be at least 10, got {count}"));
     }

@@ -5,16 +5,16 @@
 //! via [`AfterResponse`] and drain them after the response is sent, using the
 //! platform's post-response mechanism:
 //!
-//! - **Native (tokio)**: `tokio::spawn` — tasks are independent of the handler
+//! - **Native (tokio)**: `tokio::spawn` - tasks are independent of the handler
 //!   and run after it returns.
-//! - **Cloudflare Workers**: `ctx.wait_until(future)` — the Workers runtime
+//! - **Cloudflare Workers**: `ctx.wait_until(future)` - the Workers runtime
 //!   keeps the isolate alive until all registered futures settle.
 //!
-//! The `ThumbCook` does not hold an `AfterResponse` directly — pipeline steps
+//! The `ThumbCook` does not hold an `AfterResponse` directly - pipeline steps
 //! return or schedule work through it explicitly.  Entry points pass it into
 //! the pipeline where needed and drain it at the end.
 //!
-//! # Example — native
+//! # Example - native
 //!
 //! ```rust,ignore
 //! let mut after = AfterResponse::new();
@@ -24,7 +24,7 @@
 //! // response already being sent concurrently by axum
 //! ```
 //!
-//! # Example — Workers
+//! # Example - Workers
 //!
 //! ```rust,ignore
 //! let mut after = AfterResponse::new();

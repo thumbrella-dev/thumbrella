@@ -11,11 +11,11 @@
 //! | `TBR_PORT`                 | 3114    | HTTP listener port                               |
 //! | `TBR_ALLOW_LOCAL`          | false   | Accept `file://` URLs, bare paths, and localhost |
 //! | `TBR_SCRATCH`              | $TMPDIR/thumbrella | Scratch root for tier3 CLI tool staging   |
-//! | `TBR_TIER2`                | —       | Tier-2 connect string (URL + optional headers)   |
-//! | `TBR_TIER3`                | —       | Tier-3 connect string (URL + optional headers)   |
-//! | `TBR_HANDSHAKE`            | —       | Shared secret required on all endpoints          |
-//! | `TBR_CACHE`                | —       | Cache backend DSN — `sqlite:<path>`, …           |
-//! | `TBR_TRACE`                | —       | Trace sink DSN — `ndjson:<path>`, …              |
+//! | `TBR_TIER2`                | -       | Tier-2 connect string (URL + optional headers)   |
+//! | `TBR_TIER3`                | -       | Tier-3 connect string (URL + optional headers)   |
+//! | `TBR_HANDSHAKE`            | -       | Shared secret required on all endpoints          |
+//! | `TBR_CACHE`                | -       | Cache backend DSN - `sqlite:<path>`, …           |
+//! | `TBR_TRACE`                | -       | Trace sink DSN - `ndjson:<path>`, …              |
 //! | `TBR_LOG`                  | standard| Output level: `standard`, `minimal`, `full`      |
 //!
 //! # Connect-string syntax
@@ -57,7 +57,7 @@ pub struct AppConfig {
     ///
     /// When `true`, callers may pass `file:///path/to/file`, bare absolute
     /// paths, or `localhost` / private-IP URLs.  **Only enable in trusted
-    /// environments** — any caller can read any file the server process has
+    /// environments** - any caller can read any file the server process has
     /// permission to open.
     pub allow_local: bool,
     /// Root directory for temporary scratch space used by tier3 CLI tool
@@ -89,7 +89,7 @@ pub struct AppConfig {
     /// `ndjson:<path>`, etc.  `None` disables trace logging.
     pub trace_url: Option<String>,
 
-    //  Fetch protection (hardcoded defaults — not exposed as env vars)
+    //  Fetch protection (hardcoded defaults - not exposed as env vars)
     /// URL failure debounce window in seconds.
     pub failure_ttl: u32,
     /// Default origin back-off TTL when no `Retry-After` header is present.
@@ -136,7 +136,7 @@ impl AppConfig {
             cache_max_ttl_secs: env_opt_u32("TBR_CACHE_MAX_TTL").unwrap_or(604_800) as u64,
             cache_default_ttl_secs: env_opt_u32("TBR_CACHE_DEFAULT_TTL").unwrap_or(3_600) as u64,
             trace_url: std::env::var("TBR_TRACE").ok(),
-            // Hardcoded — not exposed as env vars.
+            // Hardcoded - not exposed as env vars.
             failure_ttl: 5,
             backoff_default: 60,
             backoff_ceiling: 3_600,

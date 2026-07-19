@@ -17,7 +17,7 @@ required-features = ["native"]
 # Default: full native HTTP server with threading and async runtime.
 default = ["native"]
 
-# native — enables the tokio runtime, axum HTTP server, reqwest outbound
+# native - enables the tokio runtime, axum HTTP server, reqwest outbound
 # fetch, and all other OS/thread-dependent plumbing.  Disable this feature
 # when targeting wasm32 (the workers build lives in a downstream crate that
 # provides its own runtime and HTTP bindings via workers-rs).
@@ -35,7 +35,7 @@ native = [
 ]
 
 [dependencies]
-#  Core — always available, WASM-compatible
+#  Core - always available, WASM-compatible
 serde       = { version = "1", features = ["derive"] }
 serde_json  = { version = "1", features = ["preserve_order"] }
 tracing     = "0.1"
@@ -46,7 +46,7 @@ infer       = "0.19"
 mozjpeg-rs  = "0.9"
 kamadak-exif = "0.6"
 
-# Image decode/encode — pure-Rust decoders used here are WASM-compatible.
+# Image decode/encode - pure-Rust decoders used here are WASM-compatible.
 # heavy native decoders (e.g. mozjpeg) belong in a higher tier or a
 # native-only feature so they don't block the wasm32 target.
 image = { version = "0.25", default-features = false, features = [
@@ -56,11 +56,11 @@ image = { version = "0.25", default-features = false, features = [
 # for DCT-level power-of-two downscaling in the progressive JPEG shortcut path.
 jpeg-decoder = { version = "0.3", default-features = false }
 
-# flate2 — DeflateDecoder for raw ZIP method-8 decompression used by the
+# flate2 - DeflateDecoder for raw ZIP method-8 decompression used by the
 # hand-rolled ZIP parser in pipeline/shortcut.rs.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
-# Bytes — zero-copy buffer primitive.  WASM-compatible; used by the native
+# Bytes - zero-copy buffer primitive.  WASM-compatible; used by the native
 # streaming handler and transitively by tokio/axum/reqwest.
 bytes = "1"
 url = "2"
