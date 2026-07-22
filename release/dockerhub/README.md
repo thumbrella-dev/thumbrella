@@ -14,7 +14,7 @@ Example:
 
 ```bash
 cd release/dockerhub
-./build.sh v0.5.1 --push
+./build.sh v1.0.0 --push
 ```
 
 If you already downloaded the archive manually, set `ARCHIVE_PATH` instead.

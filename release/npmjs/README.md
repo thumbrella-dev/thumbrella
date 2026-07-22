@@ -21,7 +21,7 @@ From this directory (`release/npmjs`):
   - Copy `README.release.md` into `packages/server/README.md`.
 - `npm run stage:from-local`
   - Stage binaries from local build outputs in `target/`.
-- `npm run stage:from-release -- --tag vX.Y.Z`
+- `npm run stage:from-release -- --tag v1.0.0`
   - Stage binaries from GitHub release assets.
 - `npm run pack:all`
   - Run `npm pack --dry-run` for linux, windows, and meta packages.

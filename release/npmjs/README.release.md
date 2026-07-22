@@ -49,7 +49,7 @@ If those commands are unavailable, Thumbrella returns a placeholder thumbnail.
 Thumbrella server is available from multiple channels:
 
 - Docker: `docker run -p 3114:3114 -it --rm thumbrella/server`
-- uvx: `uvx thumbrella-server serve`
+
 
 Or build from source:
 

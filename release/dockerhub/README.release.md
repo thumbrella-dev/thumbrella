@@ -48,8 +48,7 @@ convenient starting point for your environment and tools. The server
 executable is available on Windows and Linux. 
 (macOS still in development)
 
-- npx `npx thumbrella/server serve`
-- uvx `uvx thumbrella-server serve`
+- npx `npx @thumbrella/server serve`
 
 Or fetch the Rust source and build your own server.
 - `git clone https://github.com/thumbrella-dev/thumbrella && cd thumbrella`

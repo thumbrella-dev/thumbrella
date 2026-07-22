@@ -27,20 +27,19 @@ Use one of these commands to get a server running locally.
 
 ```bash
 docker run --rm -it --name tbr --publish 3114:3114 thumbrella/server
-npx thumbrella/server
-uvx thumbrella/server
+npx @thumbrella/server
 ```
 
 The server is configured through environment variables, like `TBR_PORT=3114`
-and `TBR_LOG=full`. This simple server doesn't configure a persistent cache, 
-which is an important feature for any production release. 
+and `TBR_LOG=full`. This simple server doesn't configure a persistent cache,
+which is an important feature for any production release.
 
-Clients need a connection string to define the server (and potential authentication).
-For this simple server the url is the only value needed. All clients read from
-the environment variable, `TBR_CONNECT=http://localhost:3114`
+Clients need a connection string to define the server (and authentication).
+For this simple server the URL is the only value needed. All clients read from
+the environment variable `TBR_CONNECT=http://localhost:3114`.
 
-The server has clean and helpful output that should help further onboarding
-links and suggestions.
+The server prints helpful output with onboarding links and suggestions
+at startup.
 
 ## Build
 
@@ -53,7 +52,7 @@ variables needed.
 
 ```bash
 # 1. Install prerequisites (one-time)
-#    - Rust: https://rustup.rs
+#    - Rust >= 1.85: https://rustup.rs
 #    - Build tools: gcc, make, curl, pkg-config
 #      (Ubuntu/Debian: apt install build-essential curl pkg-config)
 
@@ -70,19 +69,18 @@ When you are ready to assemble a GitHub draft release from already-built
 Linux and Windows binaries, use:
 
 ```bash
-scripts/release.sh --tag v0.5.1 --open
+scripts/release.sh --tag v1.0.0 --open
 ```
 
 The script expects both git trees to be clean, exactly on the release tag,
 and to already contain `target/release/thumbrella` plus
-`target/release/thumbrella.exe`. It packages:
+`target/release/thumbrella.exe`. It uses `release/README.release.md` for
+the archive README when present, falling back to the project `README.md`.
+If a working tree is slightly dirty during prerelease work, the script
+will warn and continue.
 
-It uses `release/README.release.md` for the archive README when that file is
-present, and falls back to the project `README.md` otherwise. If a working tree
-is slightly dirty during prerelease work, the script will warn and continue.
-
-- `thumbrella-v0.5.1-linux-x86_64.tar.gz`
-- `thumbrella-v0.5.1-windows-x86_64.zip`
+- `thumbrella-v1.0.0-linux-x86_64.tar.gz`
+- `thumbrella-v1.0.0-windows-x86_64.zip`
 
 Each archive includes the binary, `README.md`, and `LICENSE`.
 
@@ -106,24 +104,22 @@ cargo build --release -p tier3
 
 ## Project Structure
 
-The server is partitioned into three individual crates. Most users will simply
-use the highest level (tier3) crate as the project. But it is also possible to
-create a standalone server based on the lower level "tier1" and "tier2" 
-crates with reduced functionality.
+The server is organized into three tiers of increasing capability:
 
-- `tier1/` lowest level of the project which defines most of the common data
-  structures and most simple format handling. This level of the project is able
-  to build and run with wasm.
-- `tier2/` adds support for formats with additional static dependencies. The
-  tier2 server builds a completely staatic and standalone executable. The most
-  notable dependency is a static, minimal  `ffmpeg` built with no external dependencies.
-- `tier3/` is the fully functional server. It uses optional external applications
-  and libraries, discovered at startup time. The server will work without these
-  optional dependencies, enabling support for whatever formats it can discover.
-- `docker/` builds an easy to maintain and share docker image based on the
-  tier3 binary and a prebuilt media docker image. This does not enable full
-  support for all Thumbrella formats, but makes an easy to maintain starting
-  point for anyone needing a mostly-featured server.
+- `tier1/` — Core data structures and basic format handling. Compiles to
+  WASM for Cloudflare Workers deployment. Handles cache, routing, and
+  light decode work.
+- `tier2/` — Adds formats with native dependencies: video keyframes,
+  audio waveforms, HDR images, SVG rendering, and camera raw formats.
+  Links a minimal static FFmpeg with no external dependencies.
+- `tier3/` — The fully functional server. Adds subprocess-based renderers
+  for 3D geometry (F3D), USDZ extraction, advanced document formats
+  (libreoffice, pdfium), and arithmetic JPEG support (ImageMagick).
+  Backends are discovered at startup and compiled-in Python scripts
+  handle data sanitization.
+
+The binary output (from any tier) is always named `thumbrella`.
+Build with `cargo build -p tier3` for a full-featured server.
 
 ## Cloud
 

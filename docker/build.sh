@@ -36,7 +36,6 @@ fi
 
 WORKSPACE=".."
 VERSION="${VERSION:-$(sed -n 's/^version = "\(.*\)".*/\1/p' "${WORKSPACE}/Cargo.toml" | head -1)}"
-#TARGET="${TARGET:-x86_64-unknown-linux-gnu}"
 
 DOCKPATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -47,9 +46,8 @@ IMAGE="${IMAGE:-thumbrella/server}"
 # Compile and update release executable
 #
 
-BINARY="${BINARY:-${WORKSPACE}/target/release/tier3}"
+BINARY="${BINARY:-${WORKSPACE}/target/release/thumbrella}"
 (cd "${WORKSPACE}" && cargo build --release --package tier3)
-#(cd "${WORKSPACE}" && cargo build --target ${TARGET} --release --package tier3)
 cp "${BINARY}" "${DOCKPATH}/thumbrella"
 
 
@@ -63,15 +61,14 @@ ${DOCKER} build --format docker --pull --build-arg "VERSION=${VERSION}" -t "${DE
 #
 
 if [ "${1:-}" = "--push" ]; then
-    # Good place for a `cargo test`
-    podman tag "${DEVIMAGE}" "${IMAGE}:${VERSION}"
-    podman push "${IMAGE}:${VERSION}"
+    ${DOCKER} tag "${DEVIMAGE}" "${IMAGE}:${VERSION}"
+    ${DOCKER} push "${IMAGE}:${VERSION}"
 fi
 
 
 # Push 'latest' tagged image
 if [ "${1:-}" = "--local" ]; then
-    podman tag "${IMAGE}:${VERSION}" "${IMAGE}:latest"
-    podman push "${IMAGE}:latest"
+    ${DOCKER} tag "${IMAGE}:${VERSION}" "${IMAGE}:latest"
+    ${DOCKER} push "${IMAGE}:latest"
 fi
 

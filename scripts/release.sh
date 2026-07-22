@@ -9,7 +9,7 @@ tag_arg=""
 
 usage() {
   cat <<'EOF'
-Usage: scripts/release.sh [--tag v0.5.1] [--linux-repo PATH] [--windows-repo PATH] [--open]
+Usage: scripts/release.sh [--tag v1.0.0] [--linux-repo PATH] [--windows-repo PATH] [--open]
 
 Creates release archives from tagged, clean Linux and Windows git trees, then
 creates or updates a draft GitHub release and uploads the archives.

@@ -42,8 +42,7 @@ executable is available on Windows and Linux.
 (MacOS still in development)
 
 - Docker `docker run -p 3114:3114 -it --rm thumbrella/server`
-- Npx `npx thumbrella/server serve`
-- Uvs `uvx thumbrella-server serve`
+- Npx `npx @thumbrella/server serve`
 
 Or fetch the Rust source and build your own server.
 - `git clone https://github.com/thumbrella-dev/thumbrella && cd thumbrella`

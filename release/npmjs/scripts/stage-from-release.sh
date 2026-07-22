@@ -37,7 +37,7 @@ Usage: stage-from-release.sh --tag vX.Y.Z [options]
 Stages npm package binaries directly from GitHub release assets.
 
 Options:
-  --tag TAG              Release tag (for example: v0.5.1)
+  --tag TAG              Release tag (for example: v1.0.0)
   --repo OWNER/REPO      GitHub repo (default: thumbrella-dev/thumbrella)
   --keep-workdir         Keep temporary extraction directory
   -h, --help             Show this help
@@ -84,7 +84,7 @@ if [[ -z "$TAG" ]]; then
   TAG="$(git -C "$ROOT_DIR" describe --tags --exact-match 2>/dev/null || true)"
 fi
 
-[[ -n "$TAG" ]] || die "pass --tag (for example: --tag v0.5.1)"
+[[ -n "$TAG" ]] || die "pass --tag (for example: --tag v1.0.0)"
 
 LINUX_ARCHIVE_NAME="thumbrella-${TAG}-linux-x86_64.tar.gz"
 WINDOWS_ARCHIVE_NAME="thumbrella-${TAG}-windows-x86_64.zip"
