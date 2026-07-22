@@ -404,11 +404,8 @@ pub async fn batch(
         let (tx, rx) = mpsc::unbounded_channel::<Bytes>();
         let batch_runtime = Arc::clone(&runtime);
         tokio::spawn(async move {
-            let _ = tx.send(as_ndjson_line(json!({ "type": "batch.started", "count": count })));
-
             let mut pending = JoinSet::new();
             for (idx, spec) in jobs {
-                let _ = tx.send(as_ndjson_line(json!({ "type": "item.accepted", "index": idx })));
                 let item_runtime = Arc::clone(&batch_runtime);
                 let item_tx = tx.clone();
                 pending.spawn(async move {
@@ -432,7 +429,6 @@ pub async fn batch(
                 });
             }
             while pending.join_next().await.is_some() {}
-            let _ = tx.send(as_ndjson_line(json!({ "type": "batch.complete" })));
         });
 
         let stream = stream::unfold(rx, |mut rx| async move {

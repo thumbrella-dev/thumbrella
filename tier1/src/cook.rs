@@ -956,22 +956,23 @@ impl<S: HttpStream> ThumbCook<S> {
         }
 
         //  cache key derivation
+        // Key on the canonical URL only.  Content-identity headers (ETag,
+        // Content-MD5, x-amz-checksum-sha256) are not used here — they are
+        // freshness validators stored *inside* the cached record and checked
+        // on retrieval via CacheHints.  Using them in the key would cause
+        // cross-URL contamination when multiple resources share the same
+        // ETag (e.g. fake-etag demo files, CDN hour-bucketed responses).
         {
-            use crate::source::content_hash_from_headers;
             use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
             use sha2::{Digest, Sha256};
 
-            let (identity, source) = content_hash_from_headers(&self.http_headers)
-                .map(|(hash, src)| (hash, src.to_string()))
-                .unwrap_or_else(|| {
-                    let url = self
-                        .src
-                        .final_url
-                        .as_deref()
-                        .or(self.src.canonical_url.as_deref())
-                        .unwrap_or(self.input.url.as_str());
-                    (url.to_string(), "url".to_string())
-                });
+            let identity = self
+                .src
+                .canonical_url
+                .clone()
+                .or_else(|| self.src.final_url.clone())
+                .or_else(|| crate::source::canonical_url(&self.input.url))
+                .unwrap_or_else(|| self.input.url.clone());
 
             let key_input = format!(
                 "v{}:{}:{identity}",
@@ -981,7 +982,7 @@ impl<S: HttpStream> ThumbCook<S> {
             let url_hash = URL_SAFE_NO_PAD.encode(Sha256::digest(key_input.as_bytes()));
             let account_id = self.ctx_customer_id.as_deref().unwrap_or("_");
             self.src.cache_key = Some(format!("{account_id}/{url_hash}"));
-            self.src.cache_key_source = Some(source);
+            self.src.cache_key_source = Some("url".to_string());
         }
 
         //  cache check
@@ -1142,6 +1143,13 @@ impl<S: HttpStream> ThumbCook<S> {
         // connection so the renderer can stream from the live HttpBuffer.
         #[cfg(feature = "native")]
         if let Some(renderer) = self.runtime.renderer.clone() {
+            // Emit intermediate progress before the async render gap.
+            if !self.ctx_handoff
+                && let Some(ref mut progress) = on_progress
+            {
+                progress(self.to_progress_result(t0.elapsed().as_secs_f64()));
+            }
+
             // Coerce &mut ThumbCook<S> → &mut dyn RenderCook.  Valid because
             // impl<S: HttpStream + Send + 'static> RenderCook for ThumbCook<S>
             // and run() requires S: Send + 'static.
@@ -1185,7 +1193,9 @@ impl<S: HttpStream> ThumbCook<S> {
             // Contract: the renderer did not call take_reader(), so the
             // connection is still open.  Fall through to out-of-process
             // handoff - a higher tier may still be able to handle this.
+            // Intermediate already emitted above; don't re-emit in handoff chain.
             self.placeholder_source = Some(ResultSource::Fallback);
+            on_progress = None;
         }
 
         //  handoff fallback chain
