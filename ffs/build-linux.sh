@@ -59,13 +59,9 @@ echo "[ffmpeg-static] Configuring..."
     --disable-network \
     \
     --disable-everything \
-    \
-    --enable-zlib \
-    --enable-bzlib \
-    --enable-lzma \
-    \
     --disable-autodetect \
     \
+    --enable-zlib \
     --enable-decoder=h264,hevc,vp8,vp9,av1,mpeg1video,mpeg2video,mpeg4,\
 msmpeg4v1,msmpeg4v2,msmpeg4v3,h263,h263p,flv1,wmv1,wmv2,wmv3,vc1,\
 mjpeg,jpeg2000,png,gif,bmp,tiff,webp,theora,dirac,dnxhd,dnxhr,prores,\

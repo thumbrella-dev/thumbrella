@@ -11,9 +11,7 @@ fn main() {
         // Ensure static archives from distro dev packages are discoverable.
         println!("cargo:rustc-link-search=native={triplet_lib}");
         println!("cargo:rustc-link-search=native={triplet_lib_alt}");
-
+        println!("cargo:rustc-link-search=native=/usr/lib64");
         println!("cargo:rustc-link-lib=static=z");
-        println!("cargo:rustc-link-lib=static=lzma");
-        println!("cargo:rustc-link-lib=static=bz2");
     }
 }
