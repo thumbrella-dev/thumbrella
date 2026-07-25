@@ -1,1 +1,2 @@
-./build.sh --push --image thumbrella/server --version 1.0.0 --channel-tag prerelease
+podman login --username pete@thumbrella.dev
+./build.sh --push --version 1.0.0 
