@@ -17,7 +17,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::after::{AfterResponse, DeferredFuture};
-use crate::result::ThumbResult;
+use crate::result::{ResultSource, ThumbResult};
 
 #[cfg(feature = "native")]
 pub mod sqlite;
@@ -185,8 +185,9 @@ impl CacheStore {
         //  1. Sticky cache (native only)
         #[cfg(feature = "native")]
         if let Some(ref fe) = self.frontend
-            && let Some(result) = fe.sticky_check(key)
+            && let Some(mut result) = fe.sticky_check(key)
         {
+            result.source = Some(ResultSource::Cache);
             return Some((result, "sticky"));
         }
 
@@ -201,7 +202,11 @@ impl CacheStore {
                     let result = tokio::time::timeout(std::time::Duration::from_secs(30), rx).await;
 
                     match result {
-                        Ok(Ok(arc)) => return Some(((*arc).clone(), "sticky")),
+                        Ok(Ok(arc)) => {
+                            let mut result = (*arc).clone();
+                            result.source = Some(ResultSource::Cache);
+                            return Some((result, "sticky"));
+                        }
                         _ => {
                             // Leader failed or timed out - clean up and become
                             // the new leader.
@@ -219,8 +224,9 @@ impl CacheStore {
         //  3. Check durable backend
         if let Some(ref backend) = self.backend
             && let Some(json) = backend.get(key).await
-            && let Ok(result) = serde_json::from_str(&json)
+            && let Ok(mut result) = serde_json::from_str::<ThumbResult>(&json)
         {
+            result.source = Some(ResultSource::Cache);
             #[cfg(feature = "native")]
             if let Some(ref fe) = self.frontend {
                 fe.sticky_store(key, &result);

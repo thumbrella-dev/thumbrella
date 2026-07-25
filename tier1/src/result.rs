@@ -193,6 +193,10 @@ pub struct ThumbTrace {
     /// How the thumbnail was produced (render, shortcut, cache, fallback, …).
     /// `None` on total failure where no classification was possible.
     pub source: Option<ResultSource>,
+    /// HTTP status returned by the upstream source, if an HTTP request was made.
+    /// Mirrors [`ThumbResult::http_status`].
+    #[serde(default)]
+    pub http_status: Option<u16>,
     /// Media kind detected (mirrors [`ThumbMedia::kind`]).
     pub kind: Option<FileKind>,
     /// File extension detected (mirrors [`ThumbMedia::extension`]).

@@ -24,14 +24,34 @@
 //!
 //! # Platform notes
 //!
-//! On Linux, the arena lives under `$TMPDIR` (or `/tmp`).  Future
-//! enhancements may use `O_TMPFILE` on Linux for unlinked temp files, but
-//! the current implementation uses regular files in a temp dir - portable
-//! and sufficient for all targets.
+//! The arena is created under `$TBR_SCRATCH` when set, falling back to
+//! `$TMPDIR` (or `/tmp`).  This lets operators (Modal, Docker, Kubernetes)
+//! control where CLI tool staging files land.
+//!
+//! Future enhancements may use `O_TMPFILE` on Linux for unlinked temp files,
+//! but the current implementation uses regular files in a temp dir -
+//! portable and sufficient for all targets.
 
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+//  Scratch root
+
+/// Return the root directory for scratch arenas.
+///
+/// Checks `TBR_SCRATCH` first (the canonical Thumbrella env var for tier3
+/// scratch space).  Falls back to the system temp directory (`$TMPDIR`,
+/// `$TMP`, `$TEMP`, or `/tmp`).
+pub fn scratch_root() -> PathBuf {
+    if let Ok(v) = std::env::var("TBR_SCRATCH") {
+        let v = v.trim();
+        if !v.is_empty() {
+            return PathBuf::from(v);
+        }
+    }
+    std::env::temp_dir()
+}
 
 //  ScratchArena
 
@@ -53,10 +73,32 @@ pub struct ScratchArena {
 impl ScratchArena {
     /// Create a new scratch arena with the given byte limit.
     ///
-    /// The arena is created under the system temp directory (respects
-    /// `$TMPDIR`).  `max_bytes` of 0 disables the limit.
+    /// The arena directory is created under [`scratch_root`]
+    /// (`$TBR_SCRATCH`, falling back to the system temp directory).
+    /// `max_bytes` of 0 disables the limit.
     pub fn new(max_bytes: u64) -> io::Result<Self> {
-        let dir = tempfile::TempDir::with_prefix("thumbrella-tier3-")?;
+        use tempfile::Builder as TmpBuilder;
+        let root = scratch_root();
+        std::fs::create_dir_all(&root)?;
+        let dir = TmpBuilder::new()
+            .prefix("thumbrella-tier3-")
+            .tempdir_in(&root)?;
+        Ok(Self {
+            dir,
+            max_bytes,
+            current_bytes: AtomicU64::new(0),
+        })
+    }
+
+    /// Create a scratch arena in an explicit directory.
+    ///
+    /// Useful when callers need to override the process-global
+    /// [`scratch_root`].  `max_bytes` of 0 disables the limit.
+    pub fn new_in(root: &Path, max_bytes: u64) -> io::Result<Self> {
+        use tempfile::Builder as TmpBuilder;
+        let dir = TmpBuilder::new()
+            .prefix("thumbrella-tier3-")
+            .tempdir_in(root)?;
         Ok(Self {
             dir,
             max_bytes,

@@ -183,7 +183,7 @@ fn register_tier3_check(env: &tier3::env_check::EnvReport) {
     // General tools section - backends not tied to specific extensions.
     {
         let general: &[&str] =
-            &["f3d", "python3", "ffmpeg_cli", "magick", "oiiotool", "bwrap", "display_server"];
+            &["f3d", "python3", "ffmpeg_cli", "magick", "oiiotool", "display_server"];
         let entries: Vec<tier1::check::CheckEntry> = general
             .iter()
             .filter_map(|name| {

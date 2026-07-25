@@ -61,6 +61,22 @@ macro_rules! tbr_debug {
     };
 }
 
+/// Dump a subprocess stdout/stderr when TBR_LOG=full.
+fn dump_subprocess(label: &str, status: &std::process::ExitStatus, stdout: &[u8], stderr: &[u8]) {
+    if !tier1::ux::show_raw_logs() {
+        return;
+    }
+    let out = String::from_utf8_lossy(stdout);
+    let err = String::from_utf8_lossy(stderr);
+    eprintln!("[{label}] exit={status}");
+    if !out.is_empty() {
+        eprintln!("[{label}] stdout: {out}");
+    }
+    if !err.is_empty() {
+        eprintln!("[{label}] stderr: {err}");
+    }
+}
+
 // ============================================================================
 // Tier3Renderer
 // ============================================================================
@@ -257,6 +273,8 @@ fn run_magick_image_decode(bytes: &[u8], ext: &str) -> Result<RenderOutput, Stri
             .output()
             .map_err(|e| format!("spawn gm identify: {e}"))?;
 
+        dump_subprocess("gm identify", &output.status, &output.stdout, &output.stderr);
+
         if !output.status.success() {
             return Err(format!("gm identify exited with {}", output.status));
         }
@@ -379,6 +397,8 @@ fn run_ffmpeg_decode(bytes: &[u8], ext: &str, is_video: bool) -> Result<RenderOu
             .output()
             .map_err(|e| format!("spawn ffprobe: {e}"))?;
 
+        dump_subprocess("ffprobe", &output.status, &output.stdout, &output.stderr);
+
         let json: serde_json::Value =
             serde_json::from_slice(&output.stdout).map_err(|e| format!("ffprobe json: {e}"))?;
         let streams = json["streams"].as_array().ok_or_else(|| "ffprobe: no streams".to_string())?;
@@ -457,6 +477,7 @@ fn run_ffmpeg_decode(bytes: &[u8], ext: &str, is_video: bool) -> Result<RenderOu
     crate::sandbox::apply(&mut cmd, &crate::sandbox::default_strict());
 
     let output = cmd.output().map_err(|e| format!("spawn ffmpeg: {e}"))?;
+    dump_subprocess("ffmpeg", &output.status, &output.stdout, &output.stderr);
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let first_line = stderr.lines().next().unwrap_or("(no output)");
@@ -637,6 +658,7 @@ async fn render_image_ffmpeg_fallback(cook: &mut dyn RenderCook, ext: &str) -> b
 
         match result {
             Ok(Ok(out)) => {
+                cook.clear_message();
                 apply_render_output(cook, out);
                 true
             }
@@ -669,6 +691,7 @@ async fn render_image_ffmpeg_fallback(cook: &mut dyn RenderCook, ext: &str) -> b
 
         match result {
             Ok(Ok(out)) => {
+                cook.clear_message();
                 apply_render_output(cook, out);
                 true
             }
@@ -756,6 +779,8 @@ fn run_oiiotool_decode(bytes: &[u8], ext: &str) -> Result<RenderOutput, String> 
             .output()
             .map_err(|e| format!("spawn oiiotool: {e}"))?;
 
+        dump_subprocess("oiiotool --info", &output.status, &output.stdout, &output.stderr);
+
         let text = String::from_utf8_lossy(&output.stdout);
         // Parse "filename : 1262 x  860, ..." from the second line.
         let mut w = 0u32;
@@ -807,6 +832,7 @@ fn run_oiiotool_decode(bytes: &[u8], ext: &str) -> Result<RenderOutput, String> 
     // No sandbox - oiiotool is a trusted system tool.
 
     let output = cmd.output().map_err(|e| format!("spawn oiiotool: {e}"))?;
+    dump_subprocess("oiiotool", &output.status, &output.stdout, &output.stderr);
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let first_line = stderr.lines().next().unwrap_or("(no output)");
@@ -1177,8 +1203,8 @@ fn run_f3d_geometry_handler(reader: &mut dyn tier1::ReadSeek, ext: &str) -> Resu
 
     cmd.stdout(Stdio::null()).stderr(Stdio::piped());
 
-    // Do not apply the strict sandbox here: F3D rendering under Xvfb requires
-    // GL/X11 process setup that may be terminated by the default bwrap profile.
+    // F3D requires GL/X11 setup (Xvfb) which may conflict with strict
+    // sandboxing.  Capability and rlimit restrictions are skipped here.
 
     let output = cmd.output().map_err(|e| format!("spawn f3d: {e}"))?;
 

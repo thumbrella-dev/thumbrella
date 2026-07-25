@@ -259,13 +259,6 @@ fn probe_executables(report: &mut EnvReport) {
             "--version",
             "OpenImageIO (EXR, HDR, DPX, studio formats)",
         ),
-        (
-            "bwrap",
-            "runtime",
-            "bwrap",
-            "--version",
-            "Bubblewrap sandbox (subprocess isolation)",
-        ),
     ];
 
     for (name, category, binary, check_arg, desc) in candidates {

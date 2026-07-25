@@ -298,8 +298,8 @@ pub struct ThumbCook<S: HttpStream> {
     //  HTTP connection metadata
     /// Response headers captured on `connect`.
     pub http_headers: HashMap<String, String>,
-    /// HTTP status code of the response.
-    pub http_status: u16,
+    /// HTTP status code of the response, if an HTTP request was made.
+    pub http_status: Option<u16>,
     /// Whether the server supports byte-range requests.
     pub http_accepts_ranges: bool,
     // Live connection - access via the http_* methods below.
@@ -407,7 +407,7 @@ impl<S: HttpStream> ThumbCook<S> {
             media: MediaInfo::default(),
             src: SourceIdentity::default(),
             http_headers: HashMap::new(),
-            http_status: 0,
+            http_status: None,
             http_accepts_ranges: false,
             http_buf: None,
             render_image: None,
@@ -631,7 +631,7 @@ impl<S: HttpStream> ThumbCook<S> {
             duration: self.out_duration,
             download_size: self.out_download_bytes,
             message: if self.out_message.is_empty() { None } else { Some(self.out_message.clone()) },
-            http_status: if self.http_status > 0 { Some(self.http_status) } else { None },
+            http_status: self.http_status,
             source: if self.status == CookStatus::Fresh {
                 Some(ResultSource::NotModified)
             } else if let Some(ps) = self.placeholder_source {
@@ -680,7 +680,7 @@ impl<S: HttpStream> ThumbCook<S> {
             duration,
             download_size: self.out_download_bytes.max(self.http_bytes_fetched()),
             message: None,
-            http_status: if self.http_status > 0 { Some(self.http_status) } else { None },
+            http_status: self.http_status,
             source: None,
             media: Some(ThumbMedia {
                 url: self.input.url.clone(),
@@ -740,6 +740,7 @@ impl<S: HttpStream> ThumbCook<S> {
             } else {
                 Some(ResultSource::Render)
             },
+            http_status: self.http_status,
             kind: self.media.kind,
             extension: self.media.extension.as_deref().map(crate::pipeline::canonical_extension),
             canonical_url: self.src.canonical_url.clone(),
@@ -1486,6 +1487,9 @@ impl<S: HttpStream + Send + 'static> crate::renderer::RenderCook for ThumbCook<S
     }
     fn fail_cook(&mut self, msg: &str) {
         self.fail(msg);
+    }
+    fn clear_message(&mut self) {
+        self.out_message.clear();
     }
     fn set_bytes_consumed(&mut self, n: u64) {
         self.render_bytes_consumed = Some(n);

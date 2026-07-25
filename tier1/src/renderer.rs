@@ -109,6 +109,9 @@ pub trait RenderCook: Send {
     fn set_media_properties(&mut self, props: serde_json::Value);
     /// Mark the cook as failed with a human-readable message.
     fn fail_cook(&mut self, msg: &str);
+    /// Clear any previously set failure message.  Used when a higher-tier
+    /// renderer successfully produces output after a lower tier failed.
+    fn clear_message(&mut self);
     /// Report the actual bytes consumed by the renderer (e.g. AVIO bytes from
     /// libav).  When set, this value is preferred over the `file_size` fallback
     /// in the download counter, enabling accurate reporting for formats that

@@ -1,31 +1,13 @@
-//! Subprocess sandbox - bubblewrap isolation and rlimit fallback.
+//! Subprocess sandbox - rlimit and capability restrictions.
 //!
-//! On Linux, every subprocess renderer is wrapped in `bwrap` (bubblewrap)
-//! for full filesystem and namespace isolation.  On other platforms, a
-//! `pre_exec`-based rlimit/capability sandbox is used as fallback.
-//!
-//! # Platform support
+//! Every subprocess renderer gets `pre_exec` restrictions:
 //!
 //! | Platform | Mechanism |
 //! |----------|-----------|
-//! | Linux + bwrap | `bwrap --unshare-all` + selective bind mounts |
-//! | Linux (no bwrap) | `pre_exec`: prctl + setrlimit |
-//! | macOS | `pre_exec`: setrlimit only |
+//! | Linux | prctl (NO_NEW_PRIVS + drop_capabilities) + setrlimit |
+//! | macOS | setrlimit only |
 //! | Other | no-op |
-//!
-//! # Bubblewrap isolation
-//!
-//! The bwrap sandbox unshares all namespaces (mount, PID, IPC, UTS, cgroup,
-//! network) then selectively re-enables what the subprocess needs:
-//!
-//! - **Read-only**: /usr, /lib, /lib64, /bin, /etc, /opt
-//! - **Writable**: the scratch arena directory only
-//! - **Devices**: /dev/null, /dev/zero, /dev/random
-//! - **Proc**: /proc for self-inspection
-//! - **No network**: `--unshare-net` (overridable via `needs_networking`)
-//! - **Private /tmp**: tmpfs
 
-use std::path::Path;
 use std::process::Command;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -40,17 +22,13 @@ use std::os::unix::process::CommandExt;
 #[derive(Debug, Clone)]
 pub struct SandboxConfig {
     /// Maximum address space in bytes (RLIMIT_AS).  0 = no limit.
-    /// Only used by the pre_exec fallback, not by bwrap.
     pub max_memory: u64,
     /// Maximum number of open file descriptors (RLIMIT_NOFILE).  0 = no limit.
     pub max_fds: u64,
     /// Allow the subprocess to produce core dumps.
     pub allow_core_dumps: bool,
-    /// Drop all ambient capabilities (Linux pre_exec fallback only).
+    /// Drop all ambient capabilities (Linux only).
     pub drop_capabilities: bool,
-    /// Tool needs outbound network access (unshares network namespace
-    /// in bwrap, but re-enables via --share-net).
-    pub needs_networking: bool,
 }
 
 impl Default for SandboxConfig {
@@ -62,7 +40,6 @@ impl Default for SandboxConfig {
             max_fds: 64,
             allow_core_dumps: false,
             drop_capabilities: true,
-            needs_networking: false,
         }
     }
 }
@@ -71,92 +48,9 @@ pub fn default_strict() -> SandboxConfig {
     SandboxConfig::default()
 }
 
-//  bwrap wrapper (Linux, preferred)
-
-/// Wrap a command in bubblewrap for filesystem and namespace isolation.
-///
-/// `scratch_dir` is the only directory the subprocess can write to.
-/// `program` and `args` are the command to run inside the sandbox.
-///
-/// Returns a [`Command`] that invokes `bwrap` with the appropriate
-/// isolation flags, then runs `program` with `args`.
-pub fn bwrap_command(scratch_dir: &Path, program: &str, args: &[&str], config: &SandboxConfig) -> Command {
-    let mut cmd = Command::new("bwrap");
-
-    //  Namespace isolation
-    cmd.arg("--unshare-all");
-    if config.needs_networking {
-        cmd.arg("--share-net");
-    }
-    cmd.arg("--die-with-parent");
-    cmd.arg("--new-session");
-
-    //  Read-only system mounts
-    for dir in &["/usr", "/lib", "/lib64", "/bin", "/etc", "/opt"] {
-        if Path::new(dir).exists() {
-            cmd.arg("--ro-bind").arg(dir).arg(dir);
-        }
-    }
-
-    //  Writable scratch directory
-    cmd.arg("--bind").arg(scratch_dir).arg(scratch_dir);
-
-    //  Minimal /dev
-    cmd.arg("--dev").arg("/dev");
-
-    //  /proc for self-inspection
-    cmd.arg("--proc").arg("/proc");
-
-    //  Private /tmp
-    cmd.arg("--tmpfs").arg("/tmp");
-
-    //  No setuid, lock ASLR
-    cmd.arg("--no-new-session");
-
-    //  Separator + target command
-    cmd.arg("--");
-    cmd.arg(program);
-    for a in args {
-        cmd.arg(a);
-    }
-
-    cmd
-}
-
-/// Check if bubblewrap is available.  Call once at startup to decide
-/// which sandbox path to use.
-pub fn bwrap_available() -> bool {
-    std::process::Command::new("bwrap")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// Create a sandboxed [`Command`].  Uses bubblewrap on Linux when
-/// available, falls back to pre_exec rlimits otherwise.
-///
-/// `scratch_dir` is the arena root - the subprocess can only write here
-/// when bwrap is active.
-pub fn sandboxed_command(scratch_dir: &Path, program: &str, args: &[&str]) -> Command {
-    if bwrap_available() {
-        bwrap_command(scratch_dir, program, args, &SandboxConfig::default())
-    } else {
-        let mut cmd = Command::new(program);
-        for a in args {
-            cmd.arg(a);
-        }
-        apply(&mut cmd, &SandboxConfig::default());
-        cmd
-    }
-}
-
-//  pre_exec fallback (Linux / macOS, no bwrap)
+//  pre_exec sandbox
 
 /// Apply sandbox restrictions via `pre_exec` (rlimits, capabilities).
-/// Used as fallback when bubblewrap is not available.
 ///
 /// Only meaningful on Unix; no-op on Windows.
 #[cfg(unix)]

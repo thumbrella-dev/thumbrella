@@ -54,14 +54,14 @@ pub async fn connect<S: HttpStream>(cook: &mut ThumbCook<S>) {
     // Short-circuit on back-off'd origins (429 / 503 rate-limiting window).
     let origin = origin_of(&cook.input.url);
     if let Some(cached_status) = cook.runtime.origin_backoff.check(origin).await {
-        cook.http_status = cached_status;
+        cook.http_status = Some(cached_status);
         cook.status = CookStatus::Overloaded;
         return;
     }
 
     // Short-circuit on recently-failed URLs (5 s debounce window).
     if let Some((cached_status, msg)) = cook.runtime.url_failures.check(&cook.input.url).await {
-        cook.http_status = cached_status;
+        cook.http_status = Some(cached_status);
         cook.fail(msg.as_ref());
         return;
     }
@@ -74,7 +74,7 @@ pub async fn connect<S: HttpStream>(cook: &mut ThumbCook<S>) {
         }
     };
 
-    cook.http_status = buf.status;
+    cook.http_status = Some(buf.status);
     cook.http_headers = buf.headers.clone();
     cook.http_accepts_ranges = buf.accepts_ranges;
     cook.media.file_size = buf.content_length;
