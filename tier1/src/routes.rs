@@ -405,16 +405,16 @@ pub async fn batch(
         let batch_runtime = Arc::clone(&runtime);
         tokio::spawn(async move {
             let mut pending = JoinSet::new();
-            for (idx, spec) in jobs {
+            for (_idx, spec) in jobs {
                 let item_runtime = Arc::clone(&batch_runtime);
                 let item_tx = tx.clone();
                 pending.spawn(async move {
                     let t_item = Instant::now();
                     let progress_tx = item_tx.clone();
                     let progress = Box::new(move |result| {
-                        let _ = progress_tx.send(as_ndjson_line(json!({
-                            "type": "item.intermediate", "index": idx, "result": result,
-                        })));
+                        let _ = progress_tx.send(as_ndjson_line(
+                            serde_json::to_value(&result).unwrap_or_default(),
+                        ));
                     });
                     let (result, _trace, mut after) =
                         ThumbCook::<PlatformStream>::from_input(spec, item_runtime)
@@ -423,9 +423,9 @@ pub async fn batch(
                     after.drain_spawn();
                     let dur = t_item.elapsed().as_millis() as u64;
                     log_result(&result, dur);
-                    let _ = item_tx.send(as_ndjson_line(json!({
-                        "type": "item.result", "index": idx, "result": result,
-                    })));
+                    let _ = item_tx.send(as_ndjson_line(
+                        serde_json::to_value(&result).unwrap_or_default(),
+                    ));
                 });
             }
             while pending.join_next().await.is_some() {}

@@ -2,6 +2,7 @@
 
 ## Development
 
+- Streamed results are not encapsulated in extra object  /tier1  /break
 - Ensure ThumbResult `source` uses `cache` for cached lookups  /tier1
 - Empty ThumbResult `http_status` uses `null` instead of `0`  /tier1
 - Full subprocess output shown when `$TBR_LOG=full`  /tier3
