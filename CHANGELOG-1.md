@@ -2,6 +2,8 @@
 
 ## Development
 
+## 1.1.0 - 2026/06/26
+
 - Streamed results are not encapsulated in extra object  /tier1  /break
 - Ensure ThumbResult `source` uses `cache` for cached lookups  /tier1
 - Empty ThumbResult `http_status` uses `null` instead of `0`  /tier1
