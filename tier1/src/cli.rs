@@ -176,6 +176,7 @@ async fn run_server(runtime: Arc<Runtime>) {
     use crate::{config::AppConfig, routes};
     use axum::{
         Router,
+        extract::DefaultBodyLimit,
         routing::{get, post},
     };
     use std::net::SocketAddr;
@@ -192,7 +193,11 @@ async fn run_server(runtime: Arc<Runtime>) {
                 .route("/thumb.jpeg", get(routes::thumb))
                 .route("/thumb", get(routes::thumb))
                 .route("/handoff", post(routes::handoff))
-                .route("/batch", post(routes::batch))
+                .route(
+                    "/batch",
+                    post(routes::batch)
+                        .layer(DefaultBodyLimit::max(routes::BATCH_MAX_BODY_BYTES)),
+                )
                 .fallback(routes::not_found)
                 .layer(axum::middleware::from_fn_with_state(runtime.clone(), routes::require_handshake)),
         )

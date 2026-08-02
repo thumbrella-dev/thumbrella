@@ -674,6 +674,7 @@ impl<S: HttpStream> ThumbCook<S> {
     /// after inspect/shortcut and before render or handoff begins.
     pub fn to_progress_result(&self, duration: f64) -> ThumbResult {
         let kind = self.media.kind.unwrap_or(FileKind::Unknown);
+        let slug = kind_slug(kind);
         ThumbResult {
             url: self.input.url.clone(),
             status: ResultStatus::Intermediate,
@@ -696,7 +697,7 @@ impl<S: HttpStream> ThumbCook<S> {
                     .properties
                     .clone()
                     .unwrap_or_else(|| Value::Object(Default::default())),
-                placeholder: self.out_placeholder.clone().unwrap_or_default(),
+                placeholder: slug.to_string(),
                 cache: self
                     .src
                     .cache_hints
@@ -1425,6 +1426,7 @@ fn cook_status_from_job(status: ResultStatus) -> CookStatus {
         ResultStatus::Failed => CookStatus::Failed,
         ResultStatus::Overloaded => CookStatus::Overloaded,
         ResultStatus::Intermediate => CookStatus::Intermediate,
+        ResultStatus::BatchLimit => CookStatus::Failed,
     }
 }
 

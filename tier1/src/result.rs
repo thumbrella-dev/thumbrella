@@ -46,6 +46,9 @@ pub enum ResultStatus {
     /// Server is at capacity; client should retry later.
     Overloaded,
     Intermediate,
+    /// Item was not processed because the batch exceeded the per-request limit.
+    /// Clients should resend in a smaller batch (max 12 items per request).
+    BatchLimit,
 }
 
 //  Source
@@ -169,6 +172,24 @@ impl Default for ThumbResult {
             url: String::new(),
             status: ResultStatus::Failed,
             message: None,
+            source: None,
+            duration: 0.0,
+            download_size: 0,
+            http_status: None,
+            media: None,
+        }
+    }
+}
+
+impl ThumbResult {
+    /// Create a `batchlimit` result for an item that exceeded the per-request limit.
+    pub fn batch_limit(url: String, limit: usize) -> Self {
+        Self {
+            url,
+            status: ResultStatus::BatchLimit,
+            message: Some(format!(
+                "batch limited to {limit} items per request"
+            )),
             source: None,
             duration: 0.0,
             download_size: 0,

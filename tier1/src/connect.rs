@@ -13,13 +13,11 @@
 //! - **URL + key=value headers:** `http://tier2:8000,x-custom=hdr`
 //! - **URL + auth token:** `http://tier2:8000,tbr_s_AbCd...`
 //!   Tokens starting with `tbr_[a-z]_` are recognised as Bearer auth.
-//! - **URL + handshake:** `http://tier2:8000,mysecret`
-//!   Any bare value that does *not* look like an auth token is treated as
-//!   an `x-tbr-handshake` header - a shorthand for the common case.
-//! - **Backward-compat `#` fragment:** `http://tier2:8000#secret`
-//!   (converted to `x-tbr-handshake: secret`)
-//! - **Bare token:** `tbr_s_AbCd...` → `Authorization: Bearer`
-//!   `mysecret` → `x-tbr-handshake: mysecret` (no URL)
+//! - **URL + handshake:** `http://tier2:8000,x-tbr-handshake=mysecret`
+//! - **Bare auth token:** `tbr_e_3QnzBcWx7KpRmYT2000example` → `Authorization: Bearer`
+//!
+//! Bare values that are **not** auth tokens are invalid - there is no such
+//! thing as a connect string without a URL using a handshake value.
 
 use std::collections::HashMap;
 
@@ -45,21 +43,21 @@ pub struct ConnectTarget {
 ///
 /// Bare tokens without a `://` URL:
 /// - Auth token (`tbr_[a-z]_` prefix) → `Authorization: Bearer <token>`, `url: None`
-/// - Otherwise → `x-tbr-handshake: <value>`, `url: None`
+/// - Otherwise → invalid; returns a default (not-configured) target
 pub fn parse_connect_target(raw: Option<String>) -> ConnectTarget {
     let Some(raw) = raw else {
         return ConnectTarget::default();
     };
 
-    // Bare value (no scheme) - either an auth token or a handshake.
+    // Bare value (no scheme) - only auth tokens are valid without a URL.
     if !raw.contains("://") {
-        let mut headers = HashMap::new();
         if looks_like_auth_token(&raw) {
+            let mut headers = HashMap::new();
             headers.insert("Authorization".to_string(), format!("Bearer {raw}"));
-        } else {
-            headers.insert("x-tbr-handshake".to_string(), raw.to_string());
+            return ConnectTarget { url: None, headers };
         }
-        return ConnectTarget { url: None, headers };
+        // Bare handshake / unknown values are not valid connect strings.
+        return ConnectTarget::default();
     }
 
     // Split on first comma to separate URL from optional header suffix.
@@ -108,8 +106,7 @@ pub fn parse_connect_target(raw: Option<String>) -> ConnectTarget {
 
 /// Check if a value looks like a Thumbrella auth token.
 ///
-/// Auth tokens follow the pattern `tbr_[a-z]_` + base64url body (e.g.
-/// `tbr_s_...` for secret, `tbr_p_...` for publishable).  If a handshake
+/// Auth tokens follow the pattern `tbr_[a-z]_` + base64url body. If a handshake
 /// value matches this prefix, it was almost certainly set by mistake.
 pub(crate) fn looks_like_auth_token(value: &str) -> bool {
     let b = value.as_bytes();

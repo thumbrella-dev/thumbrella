@@ -37,9 +37,17 @@ use crate::handoff::{HANDSHAKE_HEADER, HandoffResponse, ThumbHandoff};
 use crate::http_buf::PlatformStream;
 use crate::media::FileKind;
 use crate::request::CallRequest;
-use crate::result::ResultSource;
+use crate::result::{ResultSource, ThumbResult};
 use crate::tracelog::TraceStore;
 use crate::ux;
+
+/// Maximum number of items accepted in a single `/batch` request.
+/// Items beyond this limit are returned with `batchlimit` status.
+const BATCH_MAX_ITEMS: usize = 12;
+
+/// Maximum POST body size in bytes for the `/batch` endpoint.
+/// Covers 12 items with generous URL, cache-string, and id fields.
+pub const BATCH_MAX_BODY_BYTES: usize = 256 * 1024; // 256 KB
 
 //  Helpers
 
@@ -93,6 +101,7 @@ fn log_result(result: &crate::ThumbResult, duration_ms: u64) {
         crate::result::ResultStatus::Failed => 500,
         crate::result::ResultStatus::Overloaded => 503,
         crate::result::ResultStatus::Intermediate => 102,
+        crate::result::ResultStatus::BatchLimit => 422,
     });
     ux.log_thumb_result(
         &result.url,
@@ -388,13 +397,24 @@ pub async fn batch(
         jobs.push((
             idx,
             InputSpec {
-                url,
+                url: url.clone(),
                 cache,
                 allow_local: runtime.allow_local,
             },
         ));
     }
-    let count = jobs.len();
+
+    // Enforce per-request batch limit.  Items beyond the limit are returned
+    // with `batchlimit` status so clients can retry them in a smaller batch.
+    let overflow: Vec<ThumbResult> = if jobs.len() > BATCH_MAX_ITEMS {
+        jobs.split_off(BATCH_MAX_ITEMS)
+            .into_iter()
+            .map(|(_, spec)| ThumbResult::batch_limit(spec.url, BATCH_MAX_ITEMS))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let count = jobs.len() + overflow.len();
 
     // Log batch start.
     ux::get().log_batch_start("POST", "/batch", count, ip.as_deref());
@@ -403,6 +423,12 @@ pub async fn batch(
         // Streaming path: results logged from client side; server log is minimal.
         let (tx, rx) = mpsc::unbounded_channel::<Bytes>();
         let batch_runtime = Arc::clone(&runtime);
+        // Emit overflow batchlimit results immediately.
+        for result in &overflow {
+            let _ = tx.send(as_ndjson_line(
+                serde_json::to_value(result).unwrap_or_default(),
+            ));
+        }
         tokio::spawn(async move {
             let mut pending = JoinSet::new();
             for (_idx, spec) in jobs {
@@ -459,6 +485,8 @@ pub async fn batch(
     }
 
     let mut items = Vec::with_capacity(count);
+    // Prepend batchlimit overflow results.
+    items.extend(overflow);
     while let Some((_idx, result, _trace, mut after, dur)) = pool.next().await {
         after.drain_spawn();
         log_result(&result, dur);
