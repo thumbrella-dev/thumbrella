@@ -2,11 +2,16 @@
 
 ## Development
 
+
+## 1.2.0 - 2026/08/01
+
+Small consistency improvements for demo projects and clients.
+
 - Batch size limited to 12 requests
 - Streamed intermediates use proper placeholder
 
 
-## 1.1.0 - 2026/06/26
+## 1.1.0 - 2026/07/26
 
 The major note is that this fixes a bug on the standalone server with the ndjson streaming data. This now matches what was already served (properly) from Thumbrella Cloud. Also continue cleanup of the Result fields.
 
