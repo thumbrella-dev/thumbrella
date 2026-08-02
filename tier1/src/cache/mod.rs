@@ -297,7 +297,7 @@ pub fn render_cost_from_secs(render_secs: f64) -> u8 {
 /// Supported schemes:
 /// - `mem:<size>` - in-memory LRU cache (e.g. `mem:200mb`, `mem:`, default 100 MB)
 /// - `sqlite:<path>[#<size>]` - persistent SQLite cache (e.g. `sqlite:cache.db#1gb`)
-/// - `cloud:<token>` - cloud-service cache (e.g. `cloud:tbr_s_AbCd...`)
+/// - `cloud:<token>` - cloud-service cache (e.g. `cloud:tbr_e_3QnzBcWx7KpRmYT2000example`)
 /// - `none:` - disable caching
 #[cfg(feature = "native")]
 pub fn open_from_dsn(dsn: &str) -> Result<Arc<dyn CacheBackend>, String> {

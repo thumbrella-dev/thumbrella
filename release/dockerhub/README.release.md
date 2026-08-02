@@ -66,8 +66,9 @@ payment info required.
 The server can easily be used with direct http calls.
 
 ```bash
-curl --output thumb.jpeg \
-http://localhost:3114/thumb.jpeg?url=https://demo.thumbrella.dev/media/math-guide.odt
+curl http://localhost:3114/thumb.jpeg \
+  --data-urlencode "url=https://demo.thumbrella.dev/media/harbor-trucks.mp4" \
+  --output thumb.jpeg 
 ```
 
 The best and easiest functionality comes from using one of the 
@@ -75,6 +76,3 @@ The best and easiest functionality comes from using one of the
 [Javascript](https://npmjs.com/thumbrella/client),
 [Python](https://pypi.org/thumbrella-client), or
 [Rust](https://crates.io/thumbrella-client). 
-There are also higher level component libraries for
-[React](https://npmjs.com/thumbrella/react) and
-[Astro](https://npmjs.com/thumbrella/astro).

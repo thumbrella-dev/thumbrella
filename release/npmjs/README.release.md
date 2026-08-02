@@ -67,7 +67,9 @@ with usable free tiers.
 Direct HTTP use:
 
 ```bash
-curl http://localhost:3114/thumb.jpeg?url=https://demo.thumbrella.dev/media/math-guide.odt --output thumb.jpeg
+curl http://localhost:3114/thumb.jpeg \
+  --data-urlencode "url=https://demo.thumbrella.dev/media/harbor-trucks.mp4" \
+  --output thumb.jpeg
 ```
 
 See [Client Libraries](https://thumbrella.dev/docs/client/) for:
@@ -75,5 +77,4 @@ See [Client Libraries](https://thumbrella.dev/docs/client/) for:
 - [Javascript](https://npmjs.com/thumbrella/client)
 - [Python](https://pypi.org/thumbrella-client)
 - [Rust](https://crates.io/thumbrella-client)
-- [React](https://npmjs.com/thumbrella/react)
-- [Astro](https://npmjs.com/thumbrella/astro)
+

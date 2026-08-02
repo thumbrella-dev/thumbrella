@@ -30,10 +30,8 @@
 //! - URL with handshake shorthand: `http://tier2:8000,mysecret`
 //!   Any bare value that does *not* match the auth-token prefix is treated as
 //!   an `x-tbr-handshake` header.
-//! - Bare auth token without URL: `tbr_s_AbCd...` → `Authorization: Bearer`
-//! - Bare handshake without URL: `mysecret` → `x-tbr-handshake: mysecret`
-//! - Backward-compat `#` fragment: `http://tier2:8000#secret`
-//!   (The fragment is treated as an `x-tbr-handshake` header value.)
+//! - Bare auth token without URL: `tbr_e_3QnzBcWx7KpRmYT2000example` → `Authorization: Bearer`
+//! - A bare value without a URL that is **not** an auth token is invalid.
 
 //  AppConfig
 

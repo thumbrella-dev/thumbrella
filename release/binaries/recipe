@@ -3,3 +3,4 @@ git push origin v1.0.0
 # on windows, pull tag and build (cargo build -r)
 # on linux, build (cargo build -r)
 ./release.sh  --open
+# copy top of CHANGELOG

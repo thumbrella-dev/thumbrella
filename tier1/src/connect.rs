@@ -38,14 +38,10 @@ pub struct ConnectTarget {
 ///
 /// Follows the same grammar as `parseConnect()` in the TypeScript client:
 ///
-/// - Plain URL: `http://tier2:8000`
-/// - URL with `key=value` headers: `http://tier2:8000,x-tbr-handshake=s3cret`
+/// - Plain URL: `http://localhost:8000`
+/// - URL with `key=value` headers: `http://localhost:8000,x-tbr-handshake=s3cret`
 /// - URL with auth token (recognised by `tbr_[a-z]_` prefix):
-///   `http://tier2:8000,tbr_s_AbCd...` → `Authorization: Bearer`
-/// - URL with bare handshake value: `http://tier2:8000,mysecret`
-///   → `x-tbr-handshake: mysecret`
-/// - Backward-compat `#` fragment: `http://tier2:8000#secret`
-///   (fragment is converted to `x-tbr-handshake: secret` header)
+///   `http://tier2:8000,tbr_e_3QnzBcWx7KpRmYT2000example` → `Authorization: Bearer`
 ///
 /// Bare tokens without a `://` URL:
 /// - Auth token (`tbr_[a-z]_` prefix) → `Authorization: Bearer <token>`, `url: None`
