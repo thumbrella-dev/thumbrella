@@ -59,31 +59,27 @@ impl CacheBackend for MemoryCacheBackend {
         "memory"
     }
 
-    fn get<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = Option<String>> + Send + 'a>> {
+    fn get<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = Option<crate::result::ThumbMedia>> + Send + 'a>> {
         let cache = self.cache.clone();
         let key = key.to_string();
-        Box::pin(async move { tokio::task::spawn_blocking(move || cache.get(&key)).await.ok().flatten() })
+        Box::pin(async move {
+            let json = tokio::task::spawn_blocking(move || cache.get(&key)).await.ok().flatten()?;
+            serde_json::from_str(&json).ok()
+        })
     }
 
-    fn put(&self, key: String, value: String, _cost: u8, expires_at: u64) -> DeferredFuture {
+    fn put(&self, key: String, media: crate::result::ThumbMedia, _cost: u8, expires_at: u64) -> DeferredFuture {
         let cache = self.cache.clone();
         Box::pin(async move {
-            // Compute the remaining TTL; if already expired, skip.
             let now = unix_now_secs();
             if expires_at <= now {
                 return;
             }
+            let Ok(json) = serde_json::to_string(&media) else { return };
             let ttl = Duration::from_secs(expires_at - now);
-            // moka doesn't support per-entry TTL on sync::Cache, so we use
-            // a policy-aware insert: we store the entry and rely on the
-            // cache's LRU eviction.  Expired entries are filtered in get().
-            //
-            // For active eviction we would need moka's future::Cache with
-            // expire_after, but sync::Cache is sufficient - the LRU policy
-            // naturally churns old entries, and get() below filters stale ones.
-            let _ = ttl; // TODO: moka per-entry expiry when available
+            let _ = ttl;
             tokio::task::spawn_blocking(move || {
-                cache.insert(key, value);
+                cache.insert(key, json);
             })
             .await
             .ok();

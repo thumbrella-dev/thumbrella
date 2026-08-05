@@ -94,13 +94,12 @@ impl CacheBackend for SqliteCacheBackend {
         "sqlite"
     }
 
-    fn get<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = Option<String>> + Send + 'a>> {
+    fn get<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = Option<crate::result::ThumbMedia>> + Send + 'a>> {
         let conn = Arc::clone(&self.conn);
         let key = key.to_string();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
+            let json = tokio::task::spawn_blocking(move || {
                 let conn = conn.lock().unwrap();
-                // RETURNING requires SQLite ≥ 3.35; bundled rusqlite 0.32 ships 3.46.
                 conn.query_row(
                     "UPDATE thumbrella
                         SET last_accessed_at = unixepoch(),
@@ -114,14 +113,16 @@ impl CacheBackend for SqliteCacheBackend {
             })
             .await
             .ok()
-            .flatten()
+            .flatten()?;
+            serde_json::from_str(&json).ok()
         })
     }
 
-    fn put(&self, key: String, value: String, cost: u8, expires_at: u64) -> DeferredFuture {
+    fn put(&self, key: String, media: crate::result::ThumbMedia, cost: u8, expires_at: u64) -> DeferredFuture {
         let conn = Arc::clone(&self.conn);
         let max_bytes = self.max_bytes;
         Box::pin(async move {
+            let Ok(value) = serde_json::to_string(&media) else { return };
             tokio::task::spawn_blocking(move || {
                 let size = value.len() as i64;
                 let expires = expires_at as i64;

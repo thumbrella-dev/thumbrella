@@ -309,6 +309,57 @@ impl Ux {
         format!("{prefix}{stars}")
     }
 
+    /// Mask secrets in a connect string for display.
+    ///
+    /// Connect strings have the form `url,header...`.  Each segment is masked:
+    /// - URL (first segment) — left visible
+    /// - Auth tokens (`tbr_[a-z]_` prefix) — keep prefix, mask body
+    /// - `key=value` headers — mask the value
+    /// - Bare values — mask fully (handshake shorthand)
+    pub fn mask_connect_string(value: &str) -> String {
+        let segments: Vec<&str> = value.split(',').collect();
+        if segments.is_empty() {
+            return Self::mask_handshake(value);
+        }
+
+        // Bare token / no URL: the whole value is a single segment with
+        // no comma — mask it as an auth token when recognised.
+        if segments.len() == 1 && !segments[0].contains("://") {
+            let seg = segments[0];
+            if seg.as_bytes().len() >= 6
+                && seg.as_bytes().starts_with(b"tbr_")
+                && seg.as_bytes()[4].is_ascii_lowercase()
+                && seg.as_bytes()[5] == b'_'
+            {
+                let prefix = &seg[..6];
+                let rest = &seg[6..];
+                return format!("{prefix}{}", Self::mask_handshake(rest));
+            }
+            return Self::mask_handshake(value);
+        }
+
+        let mut out = segments[0].to_string(); // URL — visible
+        for seg in &segments[1..] {
+            let masked = if let Some((k, v)) = seg.split_once('=') {
+                format!("{k}={}", Self::mask_handshake(v))
+            } else if seg.as_bytes().len() >= 6
+                && seg.as_bytes().starts_with(b"tbr_")
+                && seg.as_bytes()[4].is_ascii_lowercase()
+                && seg.as_bytes()[5] == b'_'
+            {
+                // Auth token: keep tbr_x_ prefix, mask body
+                let prefix = &seg[..6];
+                let rest = &seg[6..];
+                format!("{prefix}{}", Self::mask_handshake(rest))
+            } else {
+                Self::mask_handshake(seg)
+            };
+            out.push(',');
+            out.push_str(&masked);
+        }
+        out
+    }
+
     //  Request logging
 
     /// Log the start of a batch request.  Returns a token for per-item logging.

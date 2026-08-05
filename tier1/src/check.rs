@@ -321,7 +321,7 @@ fn build_cache_summary(dsn: &str, _cfg: &crate::config::AppConfig) -> String {
             }
         }
         "cloud" => {
-            let masked = crate::ux::Ux::mask_handshake(rest);
+            let masked = crate::ux::Ux::mask_connect_string(rest);
             format!("cloud:{masked}")
         }
         "none" => "none: (cache disabled)".to_string(),
@@ -338,7 +338,8 @@ fn build_cache_summary(dsn: &str, _cfg: &crate::config::AppConfig) -> String {
 #[cfg(feature = "native")]
 pub fn collect(cfg: &crate::config::AppConfig) -> CheckReport {
     // Tier 2 - prefer builtin when the renderer is compiled in, otherwise
-    // check for a handoff URL, otherwise missing.
+    // check for a handoff URL, otherwise missing.  Bare auth tokens (no URL)
+    // are treated as handoff with a default cloud endpoint.
     let (tier2, tier2_handoff, tier2_validation) = if TIER2_BUILTIN.load(std::sync::atomic::Ordering::Acquire)
     {
         (TierStatus::Builtin, None, Validation::ok())
@@ -349,11 +350,16 @@ pub fn collect(cfg: &crate::config::AppConfig) -> CheckReport {
                 Some(url.clone()),
                 validate_handoff_target(url, &cfg.tier2.headers),
             ),
+            None if cfg.tier2.headers.contains_key("Authorization") => (
+                TierStatus::Handoff,
+                None,
+                Validation::skipped(),
+            ),
             None => (TierStatus::Missing, None, Validation::not_configured()),
         }
     };
 
-    // Tier 3 - same logic: builtin > handoff > missing.
+    // Tier 3 - same logic: builtin > handoff (URL or bare token) > missing.
     let (tier3, tier3_handoff, tier3_validation) = if TIER3_BUILTIN.load(std::sync::atomic::Ordering::Acquire)
     {
         (TierStatus::Builtin, None, Validation::ok())
@@ -363,6 +369,11 @@ pub fn collect(cfg: &crate::config::AppConfig) -> CheckReport {
                 TierStatus::Handoff,
                 Some(url.clone()),
                 validate_handoff_target(url, &cfg.tier3.headers),
+            ),
+            None if cfg.tier3.headers.contains_key("Authorization") => (
+                TierStatus::Handoff,
+                None,
+                Validation::skipped(),
             ),
             None => (TierStatus::Missing, None, Validation::not_configured()),
         }
@@ -692,10 +703,10 @@ impl CheckReport {
         print_dsn_var("TBR_CACHE", &self.cache_config, &self.cache_validation, &self.cache_file_check);
 
         // TBR_TIER2
-        print_tier_var("TBR_TIER2", &self.tier2, self.tier2_handoff.as_deref(), &self.tier2_validation);
+        print_tier_var("TBR_TIER2", &self.tier2, &self.tier2_validation);
 
         // TBR_TIER3
-        print_tier_var("TBR_TIER3", &self.tier3, self.tier3_handoff.as_deref(), &self.tier3_validation);
+        print_tier_var("TBR_TIER3", &self.tier3, &self.tier3_validation);
 
         //  Status
         println!();
@@ -772,7 +783,7 @@ fn print_dsn_var(name: &str, dsn: &Option<String>, validation: &Validation, file
 }
 
 /// Print a tier env var line (TBR_TIER2, TBR_TIER3).
-fn print_tier_var(name: &str, status: &TierStatus, handoff: Option<&str>, validation: &Validation) {
+fn print_tier_var(name: &str, status: &TierStatus, validation: &Validation) {
     let ux = crate::ux::get();
 
     match status {
@@ -785,17 +796,25 @@ fn print_tier_var(name: &str, status: &TierStatus, handoff: Option<&str>, valida
             }
         }
         TierStatus::Missing => {
-            println!("{name}: not set");
+            if env_is_set(name) {
+                let raw = std::env::var(name).unwrap_or_default();
+                let masked = crate::ux::Ux::mask_connect_string(&raw);
+                let bold_name = ux.bold(name);
+                println!("{bold_name}: {masked}");
+            } else {
+                println!("{name}: not set");
+            }
         }
         TierStatus::Error => {
             println!("{name}: {}", ux.red("error"));
         }
         TierStatus::Handoff => {
-            let url = handoff.unwrap_or("?");
+            let raw = std::env::var(name).unwrap_or_default();
+            let masked = crate::ux::Ux::mask_connect_string(&raw);
             let bold_name = if env_is_set(name) { ux.bold(name) } else { name.to_string() };
             let ok = !matches!(validation.status, ValidationStatus::Error | ValidationStatus::Warn);
             let label = if ok { ux.green("ok") } else { ux.red("failed") };
-            println!("{bold_name}: {url} ({label})");
+            println!("{bold_name}: {masked} ({label})");
             if !ok {
                 let msg = validation.message.as_deref().unwrap_or("validation failed");
                 println!("  {}: {msg}", ux.red("error"));
@@ -836,16 +855,23 @@ fn validate_handoff_target(url: &str, _headers: &std::collections::HashMap<Strin
         None => return Validation::error("URL has no usable port"),
     };
 
-    let addr: SocketAddr = match (host, port).to_socket_addrs() {
-        Ok(mut addrs) => match addrs.next() {
-            Some(a) => a,
-            None => return Validation::error("host resolved to no addresses"),
-        },
+    let addrs: Vec<SocketAddr> = match (host, port).to_socket_addrs() {
+        Ok(addrs) => addrs.collect(),
         Err(e) => return Validation::error(format!("DNS resolve failed: {e}")),
     };
 
-    match TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
-        Ok(_) => Validation::ok(),
-        Err(e) => Validation::error(format!("unreachable ({host}:{port}): {e}")),
+    if addrs.is_empty() {
+        return Validation::error("host resolved to no addresses");
     }
+
+    // Try each resolved address in order (may include both IPv6 and IPv4).
+    // Some servers (e.g. wrangler dev) only bind IPv4, so `localhost` which
+    // resolves to `::1` first would fail if we only tried the first address.
+    for addr in &addrs {
+        if TcpStream::connect_timeout(addr, Duration::from_secs(2)).is_ok() {
+            return Validation::ok();
+        }
+    }
+
+    Validation::error(format!("unreachable ({host}:{port}): connection refused on all addresses"))
 }

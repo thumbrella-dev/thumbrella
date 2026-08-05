@@ -2,13 +2,26 @@
 //!
 //! At startup the environment is probed for available backends (F3D, usd-core,
 //! etc.).  The `tier3 check` command prints a detailed capability report.
+//!
+//! When `TBR_TIER2` or `TBR_TIER3` is set, the corresponding in-process
+//! renderer is skipped so the server delegates to an external handoff target
+//! (e.g. the cloud service) instead.
 
 #[tokio::main]
 async fn main() {
+    let tier2_env = std::env::var("TBR_TIER2").ok().filter(|s| !s.is_empty());
+    let tier3_env = std::env::var("TBR_TIER3").ok().filter(|s| !s.is_empty());
+
     //  Mark tiers as builtin
-    // Tier 3 includes tier 2 functionality, so both are builtin.
-    tier1::check::mark_tier2_builtin();
-    tier1::check::mark_tier3_builtin();
+    // Tier 3 includes tier 2 functionality.  When the corresponding env var
+    // is set we skip the builtin mark so the check command reports Handoff
+    // instead of Builtin and the handoff URL is actually used.
+    if tier2_env.is_none() {
+        tier1::check::mark_tier2_builtin();
+    }
+    if tier3_env.is_none() {
+        tier1::check::mark_tier3_builtin();
+    }
 
     //  Register subprocess handlers
     // These are probed at startup.  Only handlers whose command exists and is
@@ -46,7 +59,11 @@ async fn main() {
     // Collect all extensions from handlers whose backend executable was found
     // at startup.  The fallback dispatch chain in tier 1 uses this to decide
     // whether it should try tier 3 for a given format.
-    {
+    //
+    // When TBR_TIER3 is set we skip this — the external server decides what
+    // it can handle; tier3_can_handle() returns true for all extensions when
+    // the registry is unpopulated.
+    if tier3_env.is_none() {
         let handlers = tier3::env_check::registered_handlers();
         let mut available: std::collections::HashSet<String> = std::collections::HashSet::new();
         for h in &handlers {
@@ -85,8 +102,16 @@ async fn main() {
     register_tier3_check(&env_report);
 
     tier1::cli::run_with_hook(3, |rt| async move {
-        let rt = tier1::with_renderer(rt, tier3::Tier3Renderer::shared());
-        tier1::with_shortcut_limits(rt, tier1::ShortcutLimits::TIER2)
+        let rt = if tier3_env.is_none() {
+            tier1::with_renderer(rt, tier3::Tier3Renderer::shared())
+        } else {
+            rt
+        };
+        if tier2_env.is_none() {
+            tier1::with_shortcut_limits(rt, tier1::ShortcutLimits::TIER2)
+        } else {
+            rt
+        }
     })
     .await;
 }

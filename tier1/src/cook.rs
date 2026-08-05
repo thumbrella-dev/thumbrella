@@ -626,13 +626,15 @@ impl<S: HttpStream> ThumbCook<S> {
             CookStatus::Intermediate => ResultStatus::Intermediate,
         };
         ThumbResult {
-            url: self.input.url.clone(),
+            url: self.src.canonical_url.clone().unwrap_or_else(|| self.input.url.clone()),
             status,
             duration: self.out_duration,
             download_size: self.out_download_bytes,
             message: if self.out_message.is_empty() { None } else { Some(self.out_message.clone()) },
             http_status: self.http_status,
-            source: if self.status == CookStatus::Fresh {
+            source: if self.cache_hit.is_some() {
+                Some(ResultSource::Cache)
+            } else if self.status == CookStatus::Fresh {
                 Some(ResultSource::NotModified)
             } else if let Some(ps) = self.placeholder_source {
                 Some(ps)
@@ -644,7 +646,7 @@ impl<S: HttpStream> ThumbCook<S> {
                 Some(ResultSource::Render)
             },
             media: Some(ThumbMedia {
-                url: self.input.url.clone(),
+                url: crate::source::canonical_url(&self.input.url).unwrap_or_else(|| self.input.url.clone()),
                 thumbnail: self.out_thumbnail.clone(),
                 mime: self.media.mime.clone().unwrap_or_default(),
                 file_size: self.media.file_size.unwrap_or(0),
@@ -870,25 +872,28 @@ impl<S: HttpStream> ThumbCook<S> {
             return true;
         }
 
-        //  Pre-connect cache check
+        //  Pre-connect cache check — always runs (handoffs skip via ctx_handoff).
+        // Sets pre_cached and pre_cache_backend for the post-connect path.
+        // Also computes the canonical cache key (stored in self.src.cache_key)
+        // before connect may change src.canonical_url due to redirects.
         let mut pre_cached: Option<ThumbResult> = None;
         let mut pre_cache_backend: Option<String> = None;
-        if !self.ctx_handoff && self.input.cache.is_none() {
+        if !self.ctx_handoff {
             use crate::source::canonical_url;
-            use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-            use sha2::{Digest, Sha256};
 
             let identity = canonical_url(&self.input.url).unwrap_or_else(|| self.input.url.clone());
-            let key_input = format!(
-                "v{}:{}:{identity}",
-                crate::TBR_CACHE_VERSION,
-                self.ctx_customer_id.as_deref().unwrap_or("")
-            );
-            let url_hash = URL_SAFE_NO_PAD.encode(Sha256::digest(key_input.as_bytes()));
-            let account_id = self.ctx_customer_id.as_deref().unwrap_or("_");
-            let pre_key = format!("{account_id}/{url_hash}");
+            let cache_key = if let Some(ref account_id) = self.ctx_customer_id {
+                use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+                use sha2::{Digest, Sha256};
+                let input = format!("v{}:{account_id}:{identity}", crate::TBR_CACHE_VERSION);
+                let hash = URL_SAFE_NO_PAD.encode(Sha256::digest(input.as_bytes()));
+                format!("{account_id}/{hash}")
+            } else {
+                identity.clone()
+            };
+            self.src.cache_key = Some(cache_key.clone());
 
-            if let Some((cached, backend_name)) = self.runtime.cache.check(&pre_key).await {
+            if let Some((cached, backend_name)) = self.runtime.cache.check(&cache_key).await {
                 let decoded = cached
                     .media
                     .as_ref()
@@ -896,6 +901,7 @@ impl<S: HttpStream> ThumbCook<S> {
                     .map(|m| m.cache.as_str())
                     .and_then(CacheHints::decode);
                 if decoded.as_ref().is_some_and(|h| h.is_fresh()) {
+                    // Cache hints are fresh — return immediately.
                     self.http_close().await;
                     if let Some(ref media) = cached.media {
                         self.out_thumbnail = media.thumbnail.clone();
@@ -917,7 +923,11 @@ impl<S: HttpStream> ThumbCook<S> {
                     return true;
                 }
 
-                self.input.cache = decoded;
+                // Not fresh — keep for post-connect check.
+                // Merge decoded hints with any client-supplied hints.
+                if self.input.cache.is_none() {
+                    self.input.cache = decoded;
+                }
                 pre_cached = Some(cached);
                 pre_cache_backend = Some(backend_name.to_string());
             }
@@ -957,40 +967,15 @@ impl<S: HttpStream> ThumbCook<S> {
             return true;
         }
 
-        //  cache key derivation
-        // Key on the canonical URL only.  Content-identity headers (ETag,
-        // Content-MD5, x-amz-checksum-sha256) are not used here — they are
-        // freshness validators stored *inside* the cached record and checked
-        // on retrieval via CacheHints.  Using them in the key would cause
-        // cross-URL contamination when multiple resources share the same
-        // ETag (e.g. fake-etag demo files, CDN hour-bucketed responses).
-        {
-            use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-            use sha2::{Digest, Sha256};
-
-            let identity = self
-                .src
-                .canonical_url
-                .clone()
-                .or_else(|| self.src.final_url.clone())
-                .or_else(|| crate::source::canonical_url(&self.input.url))
-                .unwrap_or_else(|| self.input.url.clone());
-
-            let key_input = format!(
-                "v{}:{}:{identity}",
-                crate::TBR_CACHE_VERSION,
-                self.ctx_customer_id.as_deref().unwrap_or("")
-            );
-            let url_hash = URL_SAFE_NO_PAD.encode(Sha256::digest(key_input.as_bytes()));
-            let account_id = self.ctx_customer_id.as_deref().unwrap_or("_");
-            self.src.cache_key = Some(format!("{account_id}/{url_hash}"));
-            self.src.cache_key_source = Some("url".to_string());
-        }
-
-        //  cache check
+        //  Post-connect cache resolution — reuse pre_cached from above.
+        // If headers confirm the cached data is still valid, return it.
+        // Otherwise fall through to the full pipeline.
+        //
+        // cache_key was already set during pre-connect above; connect may
+        // have changed src.canonical_url (redirects) but the key is stable.
         if !self.ctx_handoff
-            && let Some(ref key) = self.src.cache_key.clone()
-            && let Some((cached, backend_name)) = self.runtime.cache.check(key).await
+            && let Some(ref cached) = pre_cached
+            && self.src.cache_hints.as_ref().is_some_and(|h| h.is_fresh())
         {
             self.http_close().await;
             if let Some(ref media) = cached.media {
@@ -1001,19 +986,13 @@ impl<S: HttpStream> ThumbCook<S> {
                 self.media.extension = Some(media.extension.clone());
                 self.media.properties = Some(media.properties.clone());
             }
-            self.out_message = cached.message.unwrap_or_default();
+            self.out_message = cached.message.clone().unwrap_or_default();
             self.out_placeholder = cached
                 .media
                 .as_ref()
                 .and_then(|m| if m.placeholder.is_empty() { None } else { Some(m.placeholder.clone()) });
             self.out_download_bytes = cached.download_size;
-            self.src.cache_hints = cached
-                .media
-                .as_ref()
-                .filter(|m| !m.cache.is_empty())
-                .map(|m| m.cache.as_str())
-                .and_then(CacheHints::decode);
-            self.cache_hit = Some(backend_name.to_string());
+            self.cache_hit = pre_cache_backend.clone();
             self.status = CookStatus::Complete;
             self.out_duration = t0.elapsed().as_secs_f64();
             return true;
@@ -1295,6 +1274,17 @@ impl<S: HttpStream> ThumbCook<S> {
                         self.apply_handoff_response(remote, attempt_tier, local_bytes);
                         if self.status == CookStatus::Complete {
                             self.out_duration = t0.elapsed().as_secs_f64();
+                            // Cache the handoff result.  The entry tier is the
+                            // cache authority; handoffs from a higher tier are
+                            // skipped (ctx_handoff = true).
+                            if !self.ctx_handoff
+                                && let Some(ref key) = self.src.cache_key.clone()
+                            {
+                                let result = self.to_result();
+                                let cost = render_cost_from_secs(self.out_duration);
+                                let expires = self.cache_expires_at();
+                                self.runtime.cache.store(key, &result, cost, expires, &mut after);
+                            }
                             return self.finish(after);
                         }
                         // Remote tier returned a non-OK status - escalate.

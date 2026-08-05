@@ -6,12 +6,21 @@
 //!
 //! ## DSN format
 //!
-//! `cloud:<auth-token>` - uses the default cloud host (`cloud.thumbrella.dev`).
-//! The auth token is sent as `Authorization: Bearer <token>` on every request.
+//! `cloud:<connect-string>` — same grammar as `TBR_CONNECT` / `TBR_TIER2`:
+//! - `cloud:tbr_e_xxx` — bare auth token, uses default cloud host
+//! - `cloud:https://cloud.thumbrella.dev,tbr_e_xxx` — explicit host + token
+//! - `cloud:http://localhost:8787,tbr_s_xxx` — local / beta server
+//!
+//! ## Key model
+//!
+//! The cloud derives cache keys from the source URL + the auth token's
+//! account_id.  This backend sends the URL and lets the cloud own the key
+//! namespace — the standalone server never sees or supplies account-scoped
+//! keys.
 //!
 //! ## Health check
 //!
-//! [`ping_cloud_token`] sends a dummy `/cache/lookup` to verify the token
+//! [`ping_cloud_backend`] sends a dummy `/cache/lookup` to verify the token
 //! and endpoint.  Called by the `tier1 check` subcommand, NOT at server
 //! startup - construction never blocks on network I/O.
 
@@ -21,6 +30,7 @@ use std::time::Duration;
 
 use crate::after::DeferredFuture;
 use crate::cache::CacheBackend;
+use crate::connect::ConnectTarget;
 
 /// Default cloud service host.
 const DEFAULT_CLOUD_HOST: &str = "https://cloud.thumbrella.dev";
@@ -28,20 +38,29 @@ const DEFAULT_CLOUD_HOST: &str = "https://cloud.thumbrella.dev";
 /// Cache backend that delegates to the Thumbrella cloud service.
 pub struct CloudCacheBackend {
     base_url: String,
-    auth_token: String,
+    auth_header: String,
     client: reqwest::Client,
 }
 
 impl CloudCacheBackend {
-    /// Create a new cloud cache backend.  Does NOT perform a health check -
-    /// use [`ping_cloud_token`] for upfront validation.
-    pub fn new(auth_token: &str) -> Result<Self, String> {
-        let token = auth_token.trim().to_string();
-        if token.is_empty() {
-            return Err("cloud cache: auth token is empty".to_string());
+    /// Create a new cloud cache backend from a parsed [`ConnectTarget`].
+    /// Does NOT perform a health check - use [`ping_cloud_backend`] for
+    /// upfront validation.
+    pub fn new(target: ConnectTarget) -> Result<Self, String> {
+        let base_url = target.url.unwrap_or_else(|| DEFAULT_CLOUD_HOST.to_string());
+        if base_url.is_empty() {
+            return Err("cloud cache: URL is empty".to_string());
         }
 
-        let base_url = DEFAULT_CLOUD_HOST.to_string();
+        let auth_header = target
+            .headers
+            .get("Authorization")
+            .cloned()
+            .unwrap_or_default();
+        if auth_header.is_empty() {
+            return Err("cloud cache: no Authorization header found in connect string".to_string());
+        }
+
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
@@ -49,7 +68,7 @@ impl CloudCacheBackend {
 
         Ok(Self {
             base_url,
-            auth_token: token,
+            auth_header,
             client,
         })
     }
@@ -60,10 +79,10 @@ impl CacheBackend for CloudCacheBackend {
         "cloud"
     }
 
-    fn get<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = Option<String>> + Send + 'a>> {
+    fn get<'a>(&'a self, source_url: &'a str) -> Pin<Box<dyn Future<Output = Option<crate::result::ThumbMedia>> + Send + 'a>> {
         let url = format!("{}/cache/lookup", self.base_url);
-        let auth = format!("Bearer {}", self.auth_token);
-        let body = serde_json::json!({"url": key}).to_string();
+        let auth = self.auth_header.clone();
+        let body = serde_json::json!({"url": source_url}).to_string();
         let client = self.client.clone();
         Box::pin(async move {
             let resp = client
@@ -85,20 +104,25 @@ impl CacheBackend for CloudCacheBackend {
                 return None;
             }
 
-            Some(json.to_string())
+            serde_json::from_value::<crate::result::ThumbMedia>(json).ok()
         })
     }
 
-    fn put(&self, _key: String, value: String, _cost: u8, _expires_at: u64) -> DeferredFuture {
+    fn put(&self, _key: String, media: crate::result::ThumbMedia, _cost: u8, _expires_at: u64) -> DeferredFuture {
         let url = format!("{}/cache/store", self.base_url);
-        let auth = format!("Bearer {}", self.auth_token);
+        let auth = self.auth_header.clone();
         let client = self.client.clone();
+
+        let Ok(body) = serde_json::to_string(&media) else {
+            return Box::pin(async {});
+        };
+
         Box::pin(async move {
             let _ = client
                 .post(&url)
                 .header("Authorization", &auth)
                 .header("Content-Type", "application/json")
-                .body(value)
+                .body(body)
                 .send()
                 .await;
         })
@@ -110,16 +134,26 @@ impl CacheBackend for CloudCacheBackend {
 /// Returns `Ok(())` when the service responds with `{"status":"miss"}`.
 /// Returns `Err(...)` on network errors, HTTP errors, or unexpected
 /// responses.
-pub async fn ping_cloud_token(token: &str) -> Result<(), String> {
+pub async fn ping_cloud_backend(target: &ConnectTarget) -> Result<(), String> {
+    let base_url = target.url.as_deref().unwrap_or(DEFAULT_CLOUD_HOST);
+    let auth_header = target
+        .headers
+        .get("Authorization")
+        .cloned()
+        .unwrap_or_default();
+    if auth_header.is_empty() {
+        return Err("no Authorization header in connect string".to_string());
+    }
+
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| format!("failed to create HTTP client: {e}"))?;
 
-    let url = format!("{DEFAULT_CLOUD_HOST}/cache/lookup");
+    let url = format!("{base_url}/cache/lookup");
     let resp = client
         .post(&url)
-        .header("Authorization", format!("Bearer {}", token.trim()))
+        .header("Authorization", &auth_header)
         .header("Content-Type", "application/json")
         .body(r#"{"url":"https://thumbrella.dev/ping"}"#)
         .send()

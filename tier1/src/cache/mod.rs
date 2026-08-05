@@ -17,7 +17,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::after::{AfterResponse, DeferredFuture};
-use crate::result::{ResultSource, ThumbResult};
+use crate::result::{ResultSource, ResultStatus, ThumbResult};
 
 #[cfg(feature = "native")]
 pub mod sqlite;
@@ -36,10 +36,10 @@ pub trait CacheBackend: Send + Sync {
     /// Human-readable name used in logs (e.g. `"sqlite"`, `"memory"`).
     fn name(&self) -> &'static str;
 
-    /// Async lookup.  Returns the stored JSON string on hit, `None` on miss.
-    fn get<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = Option<String>> + Send + 'a>>;
+    /// Async lookup.  Returns the deserialized [`ThumbMedia`] on hit, `None` on miss.
+    fn get<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = Option<crate::result::ThumbMedia>> + Send + 'a>>;
 
-    /// Return a `'static + Send` future that writes `value` under `key`.
+    /// Return a `'static + Send` future that writes `media` under `key`.
     ///
     /// `cost` is a normalized render-complexity weight (0 = trivial,
     /// 100 = >= 1 s render).  Backends use it to favour retaining expensive
@@ -50,15 +50,15 @@ pub trait CacheBackend: Send + Sync {
     ///
     /// The future is owned and can be handed to [`AfterResponse`] so the
     /// write runs after the HTTP response.  Errors should be swallowed inside.
-    fn put(&self, key: String, value: String, cost: u8, expires_at: u64) -> DeferredFuture;
+    fn put(&self, key: String, media: crate::result::ThumbMedia, cost: u8, expires_at: u64) -> DeferredFuture;
 }
 
 /// A single cache storage backend for single-threaded wasm targets.
 #[cfg(not(feature = "native"))]
 pub trait CacheBackend {
     fn name(&self) -> &'static str;
-    fn get<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = Option<String>> + 'a>>;
-    fn put(&self, key: String, value: String, cost: u8, expires_at: u64) -> DeferredFuture;
+    fn get<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = Option<crate::result::ThumbMedia>> + 'a>>;
+    fn put(&self, key: String, media: crate::result::ThumbMedia, cost: u8, expires_at: u64) -> DeferredFuture;
 }
 
 //  Cache frontend (sticky + inflight)
@@ -223,10 +223,15 @@ impl CacheStore {
 
         //  3. Check durable backend
         if let Some(ref backend) = self.backend
-            && let Some(json) = backend.get(key).await
-            && let Ok(mut result) = serde_json::from_str::<ThumbResult>(&json)
+            && let Some(media) = backend.get(key).await
         {
-            result.source = Some(ResultSource::Cache);
+            let result = ThumbResult {
+                url: media.url.clone(),
+                status: ResultStatus::Success,
+                source: Some(ResultSource::Cache),
+                media: Some(media),
+                ..Default::default()
+            };
             #[cfg(feature = "native")]
             if let Some(ref fe) = self.frontend {
                 fe.sticky_store(key, &result);
@@ -241,6 +246,18 @@ impl CacheStore {
             fe.cancel(key);
         }
 
+        None
+    }
+
+    /// Check the cache for raw [`ThumbMedia`] — no ThumbResult wrapper.
+    ///
+    /// Used by cloud cache endpoints that need the stored format directly.
+    pub async fn check_media(&self, key: &str) -> Option<(crate::result::ThumbMedia, &'static str)> {
+        if let Some(ref backend) = self.backend
+            && let Some(media) = backend.get(key).await
+        {
+            return Some((media, backend.name()));
+        }
         None
     }
 
@@ -269,10 +286,8 @@ impl CacheStore {
             return;
         }
         if let Some(ref backend) = self.backend {
-            let Ok(json) = serde_json::to_string(result) else {
-                return;
-            };
-            after.push(backend.put(key.to_string(), json, cost, expires_at));
+            let Some(ref media) = result.media else { return };
+            after.push(backend.put(key.to_string(), media.clone(), cost, expires_at));
         }
     }
 
@@ -341,7 +356,10 @@ pub fn open_from_dsn(dsn: &str) -> Result<Arc<dyn CacheBackend>, String> {
                 .map_err(|e| format!("sqlite cache: {e}"))?;
             Ok(Arc::new(backend))
         }
-        "cloud" => cloud::CloudCacheBackend::new(rest).map(|b| Arc::new(b) as Arc<dyn CacheBackend>),
+        "cloud" => {
+            let target = crate::connect::parse_connect_target(Some(rest.to_string()));
+            cloud::CloudCacheBackend::new(target).map(|b| Arc::new(b) as Arc<dyn CacheBackend>)
+        }
         other => Err(format!(
             "unsupported cache scheme '{other}' - supported: mem:, sqlite:, cloud:, none:"
         )),
