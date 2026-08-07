@@ -2,6 +2,10 @@
 
 ## Development
 
+## 1.3.0 - 2026/08/06
+
+Hybrid self hosted servers extended by Thumbrella Cloud
+
 - TBR_TIER2 and TBR_TIER3 can override server builtin handling
 - TBR_CACHE can set `cloud:` with a connect string to cache to cloud service
 - Caches only store the 'media' instead of full 'result'
