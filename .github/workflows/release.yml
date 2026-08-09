@@ -1,0 +1,226 @@
+name: Release
+
+# Build attested binaries and publish a GitHub release.
+#
+# Triggered manually or by pushing a version tag (v1.4.0).
+# The tag must already exist -- version bumping and changelog
+# rolling is done locally by platform/scripts/ci/prepare-release.py.
+#
+# Attestation: each binary is attested via actions/attest-build-provenance.
+# Anyone can verify with:
+#   gh attestation verify thumbrella --repo thumbrella-dev/thumbrella
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v1.4.0)'
+        required: true
+        type: string
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+
+permissions:
+  contents: write          # create release + upload assets
+  id-token: write          # attest-build-provenance needs OIDC
+  attestations: write      # push attestations to sigstore
+
+jobs:
+  # ---- derive version from the triggering ref or input ----------------------
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - name: Determine tag
+        id: tag
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          # Strip leading 'v' for the version number.
+          VERSION="${TAG#v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Releasing tag=${TAG} version=${VERSION}"
+
+  # ---- Linux x86_64 build + attest ------------------------------------------
+  build-linux:
+    needs: version
+    runs-on: ubuntu-latest
+    outputs:
+      binary-path: ${{ steps.build.outputs.binary-path }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+
+      - name: Cache static FFmpeg
+        id: cache-ffmpeg-linux
+        uses: actions/cache@v4
+        with:
+          path: |
+            ffs/build/
+            .cargo/ffs.toml
+          key: ffmpeg-linux-v1-${{ hashFiles('ffs/build-linux.sh') }}
+
+      - name: Build static FFmpeg
+        if: steps.cache-ffmpeg-linux.outputs.cache-hit != 'true'
+        run: bash ffs/build-linux.sh
+
+      - name: Build thumbrella (release)
+        id: build
+        run: |
+          cargo build --release -p tier3
+          BINARY="target/release/thumbrella"
+          echo "binary-path=${BINARY}" >> "$GITHUB_OUTPUT"
+          # Sanity check
+          file "${BINARY}"
+          "${BINARY}" version || true
+
+      - name: Attest binary
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ steps.build.outputs.binary-path }}
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: thumbrella-linux-x86_64
+          path: ${{ steps.build.outputs.binary-path }}
+          if-no-files-found: error
+
+      - name: Package release archive
+        run: |
+          mkdir -p release-assets
+          cp target/release/thumbrella release-assets/
+          cp LICENSE release-assets/
+          cp release/README.release.md release-assets/README.md 2>/dev/null || cp README.md release-assets/README.md
+          tar -C release-assets -czf thumbrella-${{ needs.version.outputs.tag }}-linux-x86_64.tar.gz thumbrella LICENSE README.md
+
+      - name: Upload archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: thumbrella-${{ needs.version.outputs.tag }}-linux-x86_64.tar.gz
+          path: thumbrella-${{ needs.version.outputs.tag }}-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  # ---- Windows x86_64 build + attest ----------------------------------------
+  build-windows:
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+
+      - name: Cache static FFmpeg (vcpkg)
+        id: cache-ffmpeg-windows
+        uses: actions/cache@v4
+        with:
+          path: |
+            ffs/vcpkg/
+            .cargo/ffs.toml
+          key: ffmpeg-windows-v1-${{ hashFiles('ffs/build-windows.ps1') }}
+
+      - name: Build static FFmpeg (vcpkg)
+        if: steps.cache-ffmpeg-windows.outputs.cache-hit != 'true'
+        run: powershell -File ffs/build-windows.ps1
+
+      - name: Build thumbrella (release)
+        id: build
+        run: |
+          cargo build --release -p tier3
+          $binary = "target/release/thumbrella.exe"
+          echo "binary-path=$binary" >> $env:GITHUB_OUTPUT
+          # Sanity check
+          & $binary version
+
+      - name: Attest binary
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ steps.build.outputs.binary-path }}
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: thumbrella-windows-x86_64
+          path: ${{ steps.build.outputs.binary-path }}
+          if-no-files-found: error
+
+      - name: Package release archive
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          cp target/release/thumbrella.exe release-assets/
+          cp LICENSE release-assets/
+          cp release/README.release.md release-assets/README.md 2>/dev/null || cp README.md release-assets/README.md
+          (cd release-assets && zip -9 -r ../thumbrella-${{ needs.version.outputs.tag }}-windows-x86_64.zip . >/dev/null)
+
+      - name: Upload archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: thumbrella-${{ needs.version.outputs.tag }}-windows-x86_64.zip
+          path: thumbrella-${{ needs.version.outputs.tag }}-windows-x86_64.zip
+          if-no-files-found: error
+
+  # ---- Extract changelog section for release notes --------------------------
+  release-notes:
+    needs: version
+    runs-on: ubuntu-latest
+    outputs:
+      body: ${{ steps.notes.outputs.body }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+
+      - name: Extract changelog section
+        id: notes
+        run: |
+          VERSION="${{ needs.version.outputs.version }}"
+          # Extract everything between "## {version} - " and the next "## " header.
+          # Uses awk for multi-line extraction.
+          BODY=$(awk -v ver="${VERSION}" '
+            BEGIN { in_section=0 }
+            $0 ~ "^## " ver " - " { in_section=1; next }
+            $0 ~ "^## " && in_section { exit }
+            in_section { print }
+          ' CHANGELOG-1.md)
+          # Write to file to avoid newline issues with GITHUB_OUTPUT
+          echo "${BODY}" > /tmp/release-notes.md
+          # Use EOF delimiter for multi-line output
+          {
+            echo 'body<<RELEASE_NOTES_EOF'
+            cat /tmp/release-notes.md
+            echo 'RELEASE_NOTES_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+  # ---- Create GitHub release -------------------------------------------------
+  release:
+    needs: [version, build-linux, build-windows, release-notes]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Linux archive
+        uses: actions/download-artifact@v4
+        with:
+          name: thumbrella-${{ needs.version.outputs.tag }}-linux-x86_64.tar.gz
+
+      - name: Download Windows archive
+        uses: actions/download-artifact@v4
+        with:
+          name: thumbrella-${{ needs.version.outputs.tag }}-windows-x86_64.zip
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ needs.version.outputs.tag }}"
+          NOTES="${{ needs.release-notes.outputs.body }}"
+
+          gh release create "${TAG}" \
+            --title "${TAG}" \
+            --notes "${NOTES}" \
+            --draft \
+            thumbrella-${TAG}-linux-x86_64.tar.gz \
+            thumbrella-${TAG}-windows-x86_64.zip
