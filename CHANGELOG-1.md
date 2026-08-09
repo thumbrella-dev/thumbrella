@@ -2,6 +2,8 @@
 
 ## Development
 
+- Small refinement on tier 3 handoff failure handling
+
 ## 1.3.0 - 2026/08/06
 
 Hybrid self hosted servers extended by Thumbrella Cloud
@@ -18,7 +20,6 @@ Small consistency improvements for demo projects and clients.
 - Batch size limited to 12 requests
 - Streamed intermediates use proper placeholder
 
-
 ## 1.1.0 - 2026/07/26
 
 The major note is that this fixes a bug on the standalone server with the ndjson streaming data. This now matches what was already served (properly) from Thumbrella Cloud. Also continue cleanup of the Result fields.
@@ -30,7 +31,6 @@ The major note is that this fixes a bug on the standalone server with the ndjson
 - Apply `$TBR_SCRATCH` more consistently  /tier3
 - Remove unused code around Bubblewrap (`bwrap`) sandboxing  /tier3
 - Dispatch `av1` and `exr` media to tier3, not tier2  /tier1
-
 
 ## 1.0.0 - 2026/07/22
 

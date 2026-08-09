@@ -1212,7 +1212,13 @@ impl<S: HttpStream> ThumbCook<S> {
 
                 // Tier 3 gate: check the dynamic availability registry.
                 // External tier 3 servers are assumed full-capability.
-                if attempt_tier == 3 && !crate::dispatch::tier3_can_handle(&ext) {
+                // Skip this gate when tier 3 is built-in: the in-process
+                // renderer already tried and failed; blocking the handoff
+                // chain here would suppress the correct fallback path.
+                if attempt_tier == 3
+                    && !crate::check::TIER3_BUILTIN.load(std::sync::atomic::Ordering::Acquire)
+                    && !crate::dispatch::tier3_can_handle(&ext)
+                {
                     continue;
                 }
 
