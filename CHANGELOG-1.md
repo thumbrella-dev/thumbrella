@@ -2,6 +2,11 @@
 
 ## Development
 
+
+## 1.3.1 - 2026/08/09
+
+Initial steps towards recreatable and attestable server builds
+
 - Small refinement on tier 3 handoff failure handling
 
 ## 1.3.0 - 2026/08/06

@@ -1,49 +1,87 @@
-# npmjs Release Workspace
+<img src="https://thumbrella.dev/thumbrella.png" alt="Thumbrella Logo" width="224" height="224" align="right" />
 
-This directory is for maintainers building and publishing Thumbrella npm
-packages.
+# [Thumbrella](https://thumbrella.dev)
 
-User-facing package documentation lives in `README.release.md` and is mirrored
-into `packages/server/README.md` for npm.
+`@thumbrella/server` is the npm launcher package for the Thumbrella server
+binary.
 
-## Package Structure
+[Thumbrella](https://thumbrella.dev) brings fast, beautiful thumbnails to any
+online gallery, with support for 100+ formats: photos, video, documents, 3D
+models, and other media.
 
-- `packages/server` - meta package (`@thumbrella/server`)
-- `packages/server-linux-x64-gnu` - Linux x64 glibc binary package
-- `packages/server-win32-x64-msvc` - Windows x64 binary package
-- `scripts/` - staging and release helper scripts
+Run the open-source server with one command, zero config, and all the features
+and functionality. Then connect with 
+[client packages](https://thumbrella.dev/docs/client/) for the browser or any 
+of the other supported languages. 
 
-## Scripts
+Also check out the [Thumbrella Cloud](https://thumbrella.dev/docs/cloud/) for a
+distributed server and caching system. This genuine free tier is built for real
+every day projects; connected in two clicks.
 
-From this directory (`release/npmjs`):
+## Quickstart
 
-- `npm run readme:sync`
-  - Copy `README.release.md` into `packages/server/README.md`.
-- `npm run stage:from-local`
-  - Stage binaries from local build outputs in `target/`.
-- `npm run stage:from-release -- --tag v1.0.0`
-  - Stage binaries from GitHub release assets.
-- `npm run pack:all`
-  - Run `npm pack --dry-run` for linux, windows, and meta packages.
-- `npm run readme:sync`
-  - Copy `README.release.md` into `packages/server/README.md`.
+Install globally:
 
-## Provenance-First Manual Flow
+```bash
+npm install -g @thumbrella/server
+thumbrella serve
+```
 
-1. Stage from a published GitHub release:
-   - `npm run stage:from-release -- --tag v0.5.1`
-2. Sync package README from user-facing release README:
-   - `npm run readme:sync`
-3. Validate package contents:
-   - `npm run pack:all`
-4. Publish in order, `npm publish --access public:
-   - `packages/server-linux-x64-gnu`
-   - `packages/server-win32-x64-msvc`
-   - `packages/server`
+The no-install `npx`/`npm exec` path for scoped launcher packages can be
+inconsistent across npm versions. For this prerelease, global install is the
+recommended path.
 
-## Notes
+Users can also run `thumbrella check` for quick configuration feedback.
 
-- Keep versions aligned across all package.json files.
-- First publish of scoped public packages requires `--access public`.
-- If a binary is missing, target package dry-run pack may still succeed,
-  but that package should not be published.
+By default the server listens on port `3114`.
+Set `TBR_PORT` to choose a different port.
+
+See the [Server Documentation](https://thumbrella.dev/docs/server/) for full
+commands and configuration.
+
+## Formats
+
+The server executable includes many formats built in statically. You can view
+available support with:
+
+```bash
+thumbrella formats
+```
+
+Some advanced formats use external applications from your environment.
+If those commands are unavailable, Thumbrella returns a placeholder thumbnail.
+
+## Alternates
+
+Thumbrella server is available from multiple channels:
+
+- Docker: `docker run -p 3114:3114 -it --rm thumbrella/server`
+
+
+Or build from source:
+
+- `git clone https://github.com/thumbrella-dev/thumbrella && cd thumbrella`
+- `bash ffs/build-linux.sh` (or `build-windows.ps1`, or set your own `FFMPEG_DIR`)
+- `cargo run --release`
+
+### Cloud Server
+
+Thumbrella also provides a [Cloud Server](https://thumbrella.dev/docs/cloud/)
+with usable free tiers.
+
+## Clients
+
+Direct HTTP use:
+
+```bash
+curl http://localhost:3114/thumb.jpeg \
+  --data-urlencode "url=https://demo.thumbrella.dev/media/harbor-trucks.mp4" \
+  --output thumb.jpeg
+```
+
+See [Client Libraries](https://thumbrella.dev/docs/client/) for:
+
+- [Javascript](https://npmjs.com/thumbrella/client)
+- [Python](https://pypi.org/thumbrella-client)
+- [Rust](https://crates.io/thumbrella-client)
+
