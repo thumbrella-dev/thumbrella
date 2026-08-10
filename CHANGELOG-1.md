@@ -2,6 +2,11 @@
 
 ## Development
 
+## 1.3.2 - 2026/08/10
+
+Build and release process now attestable on Github Actions
+
+- Initial steps of build process and actions
 
 ## 1.3.1 - 2026/08/09
 
