@@ -17,9 +17,6 @@ on:
         description: 'Tag to release (e.g. v1.4.0)'
         required: true
         type: string
-  push:
-    tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+*'
 
 permissions:
   contents: write          # create release + upload assets
@@ -64,12 +61,23 @@ jobs:
             .cargo/ffs.toml
           key: ffmpeg-linux-v1-${{ hashFiles('ffs/build-linux.sh') }}
 
+      - name: Install FFmpeg build dependencies
+        if: steps.cache-ffmpeg-linux.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nasm pkg-config clang lld
+
       - name: Build static FFmpeg
         if: steps.cache-ffmpeg-linux.outputs.cache-hit != 'true'
         run: bash ffs/build-linux.sh
 
       - name: Build thumbrella (release)
         id: build
+        env:
+          # Use clang + lld instead of gcc.  gcc's collect2 wrapper cannot
+          # resolve 'ld' when -fuse-ld=lld is set because Ubuntu packages
+          # lld as a versioned binary (lld-18).  clang has no such issue.
+          RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=lld -C link-arg=-Wl,-u,ff_image_psd_pipe_demuxer"
         run: |
           cargo build --release -p tier3
           BINARY="target/release/thumbrella"
@@ -77,11 +85,6 @@ jobs:
           # Sanity check
           file "${BINARY}"
           "${BINARY}" version || true
-
-      - name: Attest binary
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-path: ${{ steps.build.outputs.binary-path }}
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
@@ -95,8 +98,18 @@ jobs:
           mkdir -p release-assets
           cp target/release/thumbrella release-assets/
           cp LICENSE release-assets/
+          cp thumbrella.png release-assets/
           cp release/README.release.md release-assets/README.md 2>/dev/null || cp README.md release-assets/README.md
-          tar -C release-assets -czf thumbrella-${{ needs.version.outputs.tag }}-linux-x86_64.tar.gz thumbrella LICENSE README.md
+          tar -C release-assets -czf thumbrella-${{ needs.version.outputs.tag }}-linux-x86_64.tar.gz thumbrella LICENSE thumbrella.png README.md
+          echo "archive=thumbrella-${{ needs.version.outputs.tag }}-linux-x86_64.tar.gz" >> "$GITHUB_OUTPUT"
+        id: package
+
+      - name: Attest binary + archive
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            ${{ steps.build.outputs.binary-path }}
+            ${{ steps.package.outputs.archive }}
 
       - name: Upload archive artifact
         uses: actions/upload-artifact@v4
@@ -129,17 +142,16 @@ jobs:
 
       - name: Build thumbrella (release)
         id: build
+        env:
+          # FFmpeg's vcpkg build links schannel (tls), Media Foundation (mfenc),
+          # and DXVA2 (hwcontext) but doesn't pull in their system lib deps.
+          RUSTFLAGS: "-C target-feature=+crt-static -C link-arg=Secur32.lib -C link-arg=Mfuuid.lib -C link-arg=Strmiids.lib -C link-arg=Ole32.lib -C link-arg=User32.lib"
         run: |
           cargo build --release -p tier3
           $binary = "target/release/thumbrella.exe"
           echo "binary-path=$binary" >> $env:GITHUB_OUTPUT
           # Sanity check
           & $binary version
-
-      - name: Attest binary
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-path: ${{ steps.build.outputs.binary-path }}
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
@@ -149,13 +161,33 @@ jobs:
           if-no-files-found: error
 
       - name: Package release archive
-        shell: bash
+        id: package
+        shell: pwsh
         run: |
-          mkdir -p release-assets
-          cp target/release/thumbrella.exe release-assets/
-          cp LICENSE release-assets/
-          cp release/README.release.md release-assets/README.md 2>/dev/null || cp README.md release-assets/README.md
-          (cd release-assets && zip -9 -r ../thumbrella-${{ needs.version.outputs.tag }}-windows-x86_64.zip . >/dev/null)
+          $tag = "${{ needs.version.outputs.tag }}"
+          $staging = "release-assets"
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          Copy-Item target/release/thumbrella.exe "$staging/"
+          Copy-Item LICENSE "$staging/"
+          Copy-Item thumbrella.png "$staging/"
+          if (Test-Path release/README.release.md) {
+            Copy-Item release/README.release.md "$staging/README.md"
+          } else {
+            Copy-Item README.md "$staging/README.md"
+          }
+          $archive = "thumbrella-${tag}-windows-x86_64.zip"
+          # Compress from inside staging so files are at the zip root.
+          Push-Location $staging
+          Compress-Archive -Path * -DestinationPath "..\$archive" -CompressionLevel Optimal
+          Pop-Location
+          echo "archive=$archive" >> $env:GITHUB_OUTPUT
+
+      - name: Attest binary + archive
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            ${{ steps.build.outputs.binary-path }}
+            ${{ steps.package.outputs.archive }}
 
       - name: Upload archive artifact
         uses: actions/upload-artifact@v4
@@ -201,6 +233,9 @@ jobs:
     needs: [version, build-linux, build-windows, release-notes]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        # gh release create needs a git repo context.
+
       - name: Download Linux archive
         uses: actions/download-artifact@v4
         with:

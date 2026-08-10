@@ -121,6 +121,33 @@ fn validate() -> String {
 
 #[cfg(windows)]
 fn check_msvc() {
+    // Try vswhere first (ships with VS, finds any edition).
+    if let Ok(output) = Command::new(
+        r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe",
+    )
+    .args([
+        "-latest",
+        "-products",
+        "*",
+        "-requires",
+        "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+        "-property",
+        "installationPath",
+    ])
+    .output()
+    {
+        if output.status.success() {
+            let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !root.is_empty() {
+                let msvc = std::path::Path::new(&root).join("VC").join("Tools").join("MSVC");
+                if msvc.exists() {
+                    return;
+                }
+            }
+        }
+    }
+
+    // Fallback: check known installation paths.
     let vs_paths = [
         r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC",
         r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC",
@@ -132,7 +159,7 @@ fn check_msvc() {
         banner(concat!(
             "MSVC Build Tools (Visual Studio 2022) were not found.\n\n",
             "Install:  winget install Microsoft.VisualStudio.2022.BuildTools \\\n",
-            "  --override \"--wait --add Microsoft.VisualStudio.Workload.VCTools\"\n\n",
+            "  --override \"--wait --add Microsoft.VisualStudio.Workflow.VCTools\"\n\n",
             "Then open a new terminal and try again.",
         ));
     }
