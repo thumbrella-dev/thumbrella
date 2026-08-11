@@ -2,6 +2,11 @@
 
 ## Development
 
+
+## 1.3.3 - 2026/08/11
+
+Linux build action supports older linux for compatibility
+
 - Linux build action on Rocky 8 for glibc 2.28
 
 ## 1.3.2 - 2026/08/10
