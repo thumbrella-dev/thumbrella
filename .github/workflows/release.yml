@@ -41,16 +41,28 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Releasing tag=${TAG} version=${VERSION}"
 
-  # ---- Linux x86_64 build + attest ------------------------------------------
+  # ---- Linux x86_64 build + attest (Rocky 8 glibc 2.28 target) -------------
   build-linux:
     needs: version
     runs-on: ubuntu-latest
+    container:
+      image: rockylinux:8
     outputs:
       binary-path: ${{ steps.build.outputs.binary-path }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.version.outputs.tag }}
+
+      - name: Install build dependencies
+        run: |
+          dnf install -y epel-release
+          dnf config-manager --set-enabled powertools
+          dnf groupinstall -y 'Development Tools'
+          dnf install -y nasm pkgconfig clang lld zlib-devel zlib-static
+          # Install Rust via rustup (no pre-installed toolchain in Rocky 8)
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Cache static FFmpeg
         id: cache-ffmpeg-linux
@@ -59,13 +71,7 @@ jobs:
           path: |
             ffs/build/
             .cargo/ffs.toml
-          key: ffmpeg-linux-v1-${{ hashFiles('ffs/build-linux.sh') }}
-
-      - name: Install FFmpeg build dependencies
-        if: steps.cache-ffmpeg-linux.outputs.cache-hit != 'true'
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq nasm pkg-config clang lld
+          key: ffmpeg-linux-rocky8-v1-${{ hashFiles('ffs/build-linux.sh') }}
 
       - name: Build static FFmpeg
         if: steps.cache-ffmpeg-linux.outputs.cache-hit != 'true'
@@ -74,9 +80,6 @@ jobs:
       - name: Build thumbrella (release)
         id: build
         env:
-          # Use clang + lld instead of gcc.  gcc's collect2 wrapper cannot
-          # resolve 'ld' when -fuse-ld=lld is set because Ubuntu packages
-          # lld as a versioned binary (lld-18).  clang has no such issue.
           RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=lld -C link-arg=-Wl,-u,ff_image_psd_pipe_demuxer"
         run: |
           cargo build --release -p tier3

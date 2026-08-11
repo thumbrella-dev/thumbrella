@@ -2,6 +2,8 @@
 
 ## Development
 
+- Linux build action on Rocky 8 for glibc 2.28
+
 ## 1.3.2 - 2026/08/10
 
 Build and release process now attestable on Github Actions
