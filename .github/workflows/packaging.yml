@@ -34,6 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      npm_tag: ${{ steps.version.outputs.npm_tag }}
     steps:
       - id: version
         env:
@@ -46,6 +47,11 @@ jobs:
             exit 1
           }
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [[ "$VERSION" == *-* ]]; then
+            echo "npm_tag=next" >> "$GITHUB_OUTPUT"
+          else
+            echo "npm_tag=latest" >> "$GITHUB_OUTPUT"
+          fi
 
   package-docker:
     needs: version
@@ -152,6 +158,6 @@ jobs:
       - name: Publish npm packages
         working-directory: release/npmjs
         run: |
-          npm publish ./dist/thumbrella-server-linux-x64-gnu-${{ needs.version.outputs.version }}.tgz --access public
-          npm publish ./dist/thumbrella-server-win32-x64-msvc-${{ needs.version.outputs.version }}.tgz --access public
-          npm publish ./dist/thumbrella-server-${{ needs.version.outputs.version }}.tgz --access public
+          npm publish ./dist/thumbrella-server-linux-x64-gnu-${{ needs.version.outputs.version }}.tgz --access public --tag ${{ needs.version.outputs.npm_tag }}
+          npm publish ./dist/thumbrella-server-win32-x64-msvc-${{ needs.version.outputs.version }}.tgz --access public --tag ${{ needs.version.outputs.npm_tag }}
+          npm publish ./dist/thumbrella-server-${{ needs.version.outputs.version }}.tgz --access public --tag ${{ needs.version.outputs.npm_tag }}
