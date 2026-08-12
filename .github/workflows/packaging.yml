@@ -1,0 +1,138 @@
+name: Package Release
+
+# Publish Docker Hub and npm artifacts from an existing, attested GitHub Release.
+# This workflow intentionally does not build the server binary; it verifies and
+# repackages release assets created by release.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing GitHub Release tag to package (e.g. v1.4.0)"
+        required: true
+        type: string
+      publish_latest:
+        description: "Also update thumbrella/server:latest"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read # download the GitHub Release assets
+  id-token: write # sign build provenance
+  attestations: write # publish GitHub attestations
+
+env:
+  IMAGE_NAME: thumbrella/server
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - id: version
+        env:
+          TAG: ${{ inputs.tag }}
+        run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+  package-docker:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Download and verify Linux release archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          ARCHIVE="thumbrella-${TAG}-linux-x86_64.tar.gz"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$ARCHIVE"
+          gh attestation verify "$ARCHIVE" --repo "$GITHUB_REPOSITORY"
+          mkdir docker-context
+          tar -xzf "$ARCHIVE" -C docker-context
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: docker-context
+          file: release/dockerhub/Dockerfile
+          push: true
+          build-args: VERSION=${{ needs.version.outputs.version }}
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ needs.version.outputs.version }}
+            ${{ inputs.publish_latest && format('{0}:latest', env.IMAGE_NAME) || '' }}
+
+      - name: Attest Docker image
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: index.docker.io/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  package-npm:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Download and verify release archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          for ARCHIVE in \
+            "thumbrella-${TAG}-linux-x86_64.tar.gz" \
+            "thumbrella-${TAG}-windows-x86_64.zip"; do
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$ARCHIVE"
+            gh attestation verify "$ARCHIVE" --repo "$GITHUB_REPOSITORY"
+          done
+
+      - name: Set package versions and stage binaries
+        working-directory: release/npmjs
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          LINUX_ARCHIVE_PATH: ${{ github.workspace }}/thumbrella-${{ inputs.tag }}-linux-x86_64.tar.gz
+          WINDOWS_ARCHIVE_PATH: ${{ github.workspace }}/thumbrella-${{ inputs.tag }}-windows-x86_64.zip
+        run: |
+          for PACKAGE in server server-linux-x64-gnu server-win32-x64-msvc; do
+            npm pkg set version="$VERSION" --prefix "packages/$PACKAGE"
+          done
+          npm pkg set "optionalDependencies.@thumbrella/server-linux-x64-gnu=$VERSION" --prefix packages/server
+          npm pkg set "optionalDependencies.@thumbrella/server-win32-x64-msvc=$VERSION" --prefix packages/server
+          npm run stage:from-release -- --tag "${{ inputs.tag }}"
+
+      - name: Validate and pack npm packages
+        working-directory: release/npmjs
+        run: |
+          npm run pack:all
+          mkdir dist
+          for PACKAGE in server-linux-x64-gnu server-win32-x64-msvc server; do
+            (cd "packages/$PACKAGE" && npm pack --pack-destination ../../dist)
+          done
+
+      - name: Attest npm package tarballs
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: release/npmjs/dist/*.tgz
+
+      - name: Publish npm packages
+        working-directory: release/npmjs
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm publish dist/thumbrella-server-linux-x64-gnu-*.tgz --access public
+          npm publish dist/thumbrella-server-win32-x64-msvc-*.tgz --access public
+          npm publish dist/thumbrella-server-*.tgz --access public
