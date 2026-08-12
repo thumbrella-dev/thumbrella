@@ -56,29 +56,28 @@ jobs:
           tar -xzf "$ARCHIVE" -C docker-context
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
       - name: Build and push Docker image
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
+          push: true
+          sbom: true
+          provenance: true
           context: docker-context
           file: release/dockerhub/Dockerfile
-          push: true
           build-args: VERSION=${{ needs.version.outputs.version }}
           tags: |
             ${{ env.IMAGE_NAME }}:${{ needs.version.outputs.version }}
             ${{ inputs.publish_latest && format('{0}:latest', env.IMAGE_NAME) || '' }}
 
-      - name: Attest Docker image
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-name: index.docker.io/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.build.outputs.digest }}
-          push-to-registry: true
 
   package-npm:
     needs: version
