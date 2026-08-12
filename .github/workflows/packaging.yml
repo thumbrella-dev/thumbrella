@@ -67,7 +67,11 @@ jobs:
           TAG: ${{ inputs.tag }}
         run: |
           ARCHIVE="thumbrella-${TAG}-linux-x86_64.tar.gz"
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$ARCHIVE"
+          for attempt in 1 2 3; do
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$ARCHIVE" && break
+            [[ "$attempt" -eq 3 ]] && exit 1
+            sleep $((attempt * 5))
+          done
           gh attestation verify "$ARCHIVE" --repo "$GITHUB_REPOSITORY"
           mkdir docker-context
           tar -xzf "$ARCHIVE" -C docker-context
@@ -123,7 +127,11 @@ jobs:
           for ARCHIVE in \
             "thumbrella-${TAG}-linux-x86_64.tar.gz" \
             "thumbrella-${TAG}-windows-x86_64.zip"; do
-            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$ARCHIVE"
+            for attempt in 1 2 3; do
+              gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$ARCHIVE" && break
+              [[ "$attempt" -eq 3 ]] && exit 1
+              sleep $((attempt * 5))
+            done
             gh attestation verify "$ARCHIVE" --repo "$GITHUB_REPOSITORY"
           done
 
