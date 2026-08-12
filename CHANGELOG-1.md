@@ -2,6 +2,11 @@
 
 ## Development
 
+## 1.3.4 - 2026/08/12
+
+Server packacing moved to actions with attestation
+
+- Fix npmjs packaing for npx
 
 ## 1.3.3 - 2026/08/11
 
