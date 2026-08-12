@@ -15,6 +15,10 @@ on:
         description: "Docker and npm version to publish; defaults to the release tag without v (e.g. 1.4.0-test.1)"
         required: false
         type: string
+      source_ref:
+        description: "Git ref containing packaging files; defaults to the release tag"
+        required: false
+        type: string
       publish_latest:
         description: "Also update thumbrella/server:latest"
         required: true
@@ -59,7 +63,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ inputs.source_ref || inputs.tag }}
 
       - name: Download and verify Linux release archive
         env:
@@ -105,7 +109,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ inputs.source_ref || inputs.tag }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v6

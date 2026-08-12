@@ -23,13 +23,11 @@ every day projects; connected in two clicks.
 Install globally:
 
 ```bash
-npm install -g @thumbrella/server
-thumbrella serve
+npx @thumbrella/server serve
 ```
 
-The no-install `npx`/`npm exec` path for scoped launcher packages can be
-inconsistent across npm versions. For this prerelease, global install is the
-recommended path.
+To keep the server installed, use `npm install -g @thumbrella/server` and then
+run `thumbrella serve`.
 
 Users can also run `thumbrella check` for quick configuration feedback.
 

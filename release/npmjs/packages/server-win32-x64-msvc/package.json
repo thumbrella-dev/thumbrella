@@ -17,8 +17,5 @@
   "files": [
     "bin/thumbrella.exe",
     "README.md"
-  ],
-  "bin": {
-    "thumbrella": "bin/thumbrella.exe"
-  }
+  ]
 }
