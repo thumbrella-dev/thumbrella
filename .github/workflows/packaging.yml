@@ -104,6 +104,11 @@ jobs:
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
 
+      - name: Install npm for trusted publishing
+        run: |
+          npm install --global npm@11.5.1
+          npm --version
+
       - name: Download and verify release archives
         env:
           GH_TOKEN: ${{ github.token }}
@@ -147,6 +152,6 @@ jobs:
       - name: Publish npm packages
         working-directory: release/npmjs
         run: |
-          npm publish dist/thumbrella-server-linux-x64-gnu-*.tgz --access public
-          npm publish dist/thumbrella-server-win32-x64-msvc-*.tgz --access public
-          npm publish dist/thumbrella-server-*.tgz --access public
+          npm publish ./dist/thumbrella-server-linux-x64-gnu-${{ needs.version.outputs.version }}.tgz --access public
+          npm publish ./dist/thumbrella-server-win32-x64-msvc-${{ needs.version.outputs.version }}.tgz --access public
+          npm publish ./dist/thumbrella-server-${{ needs.version.outputs.version }}.tgz --access public
