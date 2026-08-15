@@ -2,6 +2,11 @@
 
 ## Development
 
+
+## 1.3.5 - 2026/08/15
+
+[summary: describe the key changes in this release]
+
 - Cleanup the media properties for 3d geometries (now empty)
 - Simplify User-Agent to 'thumbrella/major.minor'
 
