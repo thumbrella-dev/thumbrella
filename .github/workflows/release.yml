@@ -50,7 +50,11 @@ jobs:
     outputs:
       binary-path: ${{ steps.build.outputs.binary-path }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Install git
+        run: dnf install -y git
+
+      - name: Check out release tag
+        uses: actions/checkout@v4
         with:
           ref: ${{ needs.version.outputs.tag }}
 
