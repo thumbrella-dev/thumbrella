@@ -200,7 +200,11 @@ impl Runtime {
             handshake,
             allow_local,
             shortcut_limits: ShortcutLimits::TIER1,
-            user_agent: format!("Thumbrella/{}", env!("CARGO_PKG_VERSION")),
+            user_agent: format!(
+                "thumbrella/{}.{}",
+                env!("CARGO_PKG_VERSION_MAJOR"),
+                env!("CARGO_PKG_VERSION_MINOR"),
+            ),
             url_failures: UrlFailureCache::new(failure_ttl),
             origin_backoff: OriginBackoffCache::new(backoff_ceiling),
             backoff_default,
@@ -616,6 +620,23 @@ impl<S: HttpStream> ThumbCook<S> {
 
     //  Output views
 
+    /// Properties to surface to the client.
+    ///
+    /// Geometry media currently reports no properties - the earlier schema
+    /// (thumbnail dimensions, camera angles, base color) was arbitrary and
+    /// inconsistent across formats.  This is the single enforcement point, so
+    /// geometry never leaks properties regardless of how they were set
+    /// (renderer output, handoff response, or cache hit).
+    fn client_properties(&self) -> Value {
+        if self.media.kind == Some(FileKind::Geometry) {
+            return Value::Object(Default::default());
+        }
+        self.media
+            .properties
+            .clone()
+            .unwrap_or_else(|| Value::Object(Default::default()))
+    }
+
     /// Materialise the client-facing [`ThumbResult`].  Called once at end of `run()`.
     pub fn to_result(&self) -> ThumbResult {
         let status = match self.status {
@@ -654,11 +675,7 @@ impl<S: HttpStream> ThumbCook<S> {
                 extension: crate::pipeline::canonical_extension(
                     &self.media.extension.clone().unwrap_or_default(),
                 ),
-                properties: self
-                    .media
-                    .properties
-                    .clone()
-                    .unwrap_or_else(|| Value::Object(Default::default())),
+                properties: self.client_properties(),
                 placeholder: self.out_placeholder.clone().unwrap_or_default(),
                 cache: self
                     .src
@@ -694,11 +711,7 @@ impl<S: HttpStream> ThumbCook<S> {
                 extension: crate::pipeline::canonical_extension(
                     &self.media.extension.clone().unwrap_or_default(),
                 ),
-                properties: self
-                    .media
-                    .properties
-                    .clone()
-                    .unwrap_or_else(|| Value::Object(Default::default())),
+                properties: self.client_properties(),
                 placeholder: slug.to_string(),
                 cache: self
                     .src
@@ -1216,7 +1229,7 @@ impl<S: HttpStream> ThumbCook<S> {
                 // renderer already tried and failed; blocking the handoff
                 // chain here would suppress the correct fallback path.
                 if attempt_tier == 3
-                    && !crate::check::TIER3_BUILTIN.load(std::sync::atomic::Ordering::Acquire)
+                    && !crate::dispatch::TIER3_BUILTIN.load(std::sync::atomic::Ordering::Acquire)
                     && !crate::dispatch::tier3_can_handle(&ext)
                 {
                     continue;

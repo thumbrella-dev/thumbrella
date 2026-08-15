@@ -91,6 +91,19 @@ fn sniff(bytes: &[u8], url: &str, content_type: Option<&str>) -> (FileKind, Stri
             return (FileKind::Vector, "image/svg+xml".to_string(), "svg".to_string());
         }
 
+        // 3D model files (FBX, glTF, …) commonly embed a JPEG preview thumbnail
+        // at the head of the file.  When magic bytes identify a raster image but
+        // the URL names a known geometry format, prefer the geometry kind so the
+        // embedded preview never drives the media definition (kind, extension,
+        // mime, or properties).
+        if matches!(infer_kind, FileKind::Image)
+            && let Some(ext) = &url_ext
+            && ext_to_kind(ext) == FileKind::Geometry
+        {
+            let mime = ext_to_mime(ext).to_string();
+            return (FileKind::Geometry, mime, ext.clone());
+        }
+
         // When magic bytes identify a generic container, prefer a more
         // specific kind from the URL extension (e.g. USDZ, DOCX are ZIP).
         if matches!(infer_kind, FileKind::Archive | FileKind::Binary | FileKind::Unknown)

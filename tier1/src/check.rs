@@ -273,30 +273,12 @@ pub struct CheckReport {
 
 //  Collector
 
-/// Whether tier 2 is compiled into this binary (set at startup by tier2/tier3).
-pub static TIER2_BUILTIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Whether tier 3 is compiled into this binary (set at startup by tier3).
-pub static TIER3_BUILTIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Signal that tier 2 is built into this binary.  Call at startup from
-/// `tier2` or `tier3` binaries.
-pub fn mark_tier2_builtin() {
-    TIER2_BUILTIN.store(true, std::sync::atomic::Ordering::Release);
-}
-
-/// Signal that tier 3 is built into this binary.  Call at startup from
-/// `tier3` binaries.
-pub fn mark_tier3_builtin() {
-    TIER3_BUILTIN.store(true, std::sync::atomic::Ordering::Release);
-}
-
-/// True when at least one higher-tier renderer is compiled into this binary.
-/// Used by the UX layer to suppress "no higher tiers configured" hints.
-pub fn has_builtin_renderer() -> bool {
-    TIER2_BUILTIN.load(std::sync::atomic::Ordering::Acquire)
-        || TIER3_BUILTIN.load(std::sync::atomic::Ordering::Acquire)
-}
+// Tier builtin flags live in the always-compiled `dispatch` module so the
+// `cook` handoff chain can read them on wasm targets.  Re-export them here
+// for the native `tier1 check` path and the tier2/tier3 startup hooks.
+pub use crate::dispatch::{
+    TIER2_BUILTIN, TIER3_BUILTIN, has_builtin_renderer, mark_tier2_builtin, mark_tier3_builtin,
+};
 
 /// Build a one-line human-readable cache-config summary for `tier1 check`.
 #[cfg(feature = "native")]

@@ -1240,21 +1240,15 @@ fn run_f3d_geometry_handler(reader: &mut dyn tier1::ReadSeek, ext: &str) -> Resu
     // bounding box before resizing to the canonical thumbnail size.
     let img = autocrop_transparent(img);
 
-    let props = serde_json::json!({
-        "width": img.width(),
-        "height": img.height(),
-        "up_axis": up_axis,
-        "camera_azimuth_deg": -30,
-        "camera_elevation_deg": 20,
-        "base_color": BASE_COLOR,
-    });
-
+    // Geometry media intentionally reports no properties.  The earlier
+    // attempt (thumbnail dimensions plus camera / base_color constants) was
+    // arbitrary and inconsistent across formats, so it was dropped.
     Ok(RenderOutput {
         image: img,
         renderer: Some("f3d".into()),
         codec: None,
         video_seek_secs: None,
-        properties: Some(props),
+        properties: None,
     })
 }
 

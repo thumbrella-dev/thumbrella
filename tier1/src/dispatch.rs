@@ -55,7 +55,37 @@
 //! at the point where it would matter.  Any cache invalidation strategy will
 //! need to be a global generation bump or a targeted URL-based purge.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use crate::media::FileKind;
+
+//  Builtin tier flags
+//
+// These live here (not in the native-only `check` module) because the
+// always-compiled `cook` module reads them during the handoff chain.
+
+/// Whether tier 2 is compiled into this binary (set at startup by tier2/tier3).
+pub static TIER2_BUILTIN: AtomicBool = AtomicBool::new(false);
+
+/// Whether tier 3 is compiled into this binary (set at startup by tier3).
+pub static TIER3_BUILTIN: AtomicBool = AtomicBool::new(false);
+
+/// Signal that tier 2 is built into this binary.  Call at startup from
+/// `tier2` or `tier3` binaries.
+pub fn mark_tier2_builtin() {
+    TIER2_BUILTIN.store(true, Ordering::Release);
+}
+
+/// Signal that tier 3 is built into this binary.  Call at startup from
+/// `tier3` binaries.
+pub fn mark_tier3_builtin() {
+    TIER3_BUILTIN.store(true, Ordering::Release);
+}
+
+/// True when at least one higher-tier renderer is compiled into this binary.
+pub fn has_builtin_renderer() -> bool {
+    TIER2_BUILTIN.load(Ordering::Acquire) || TIER3_BUILTIN.load(Ordering::Acquire)
+}
 
 //  ThumbRoute
 

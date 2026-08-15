@@ -2,6 +2,9 @@
 
 ## Development
 
+- Cleanup the media properties for 3d geometries (now empty)
+- Simplify User-Agent to 'thumbrella/major.minor'
+
 ## 1.3.4 - 2026/08/12
 
 Server packacing moved to actions with attestation

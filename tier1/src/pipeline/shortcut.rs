@@ -385,7 +385,6 @@ async fn try_raw_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     let Ok(img) = image::load_from_memory(&embedded) else {
         return;
     };
-    let color_type = img.color();
     let dl_bytes = cook.http_bytes_fetched();
 
     // Apply TIFF IFD0 Orientation correction.  The embedded JPEG preview is
@@ -397,7 +396,6 @@ async fn try_raw_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
         8 => img.rotate270(), // left-bottom: rotate 90° CCW to display
         _ => img,
     };
-    let (thumb_w, thumb_h) = (img.width(), img.height());
 
     let img = pre_scale_to_target(img, config.exact_width, config.exact_height);
     cook.http_close().await;
@@ -405,7 +403,10 @@ async fn try_raw_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     cook.render_renderer = Some("shortcut/tiff".into());
     cook.render_handler = RenderHandler::Builtin;
     cook.out_download_bytes = dl_bytes;
-    // Prefer IFD0 sensor resolution over the embedded preview dimensions.
+    // Report the sensor resolution from IFD0 (native pixel count).  The
+    // extracted preview's own dimensions are deliberately NOT reported - the
+    // shortcut hands back that preview, and its pixels must never be mistaken
+    // for information about the upstream raw file.
     if let Some((sw, sh)) = tiff_ifd0_dimensions(&header, little) {
         // Raw sensor bpp - TIFF IFD0 BitsPerSample tag (0x0102) is per-component,
         // typically 12 or 14 for raw files.  We don't parse it here yet, so omit bpp.
@@ -414,8 +415,6 @@ async fn try_raw_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
             "height": sh,
             "lossless": 1,
         }));
-    } else if thumb_w > 0 && thumb_h > 0 {
-        cook.media.properties = Some(image_properties(thumb_w, thumb_h, color_type));
     }
     cook.render_image = Some(img);
 }
@@ -437,8 +436,6 @@ async fn try_zip_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     let Ok(img) = image::load_from_memory(&image_bytes) else {
         return;
     };
-    let (src_w, src_h) = (img.width(), img.height());
-    let color_type = img.color();
     let t_render = Instant::now();
     let img = pre_scale_to_target(img, config.exact_width, config.exact_height);
     let render_secs = t_render.elapsed().as_secs_f64();
@@ -450,11 +447,8 @@ async fn try_zip_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     cook.tel_decode_secs = render_secs;
     cook.out_download_bytes = dl_bytes;
     cook.tel_download_tail_bytes = tail_bytes;
-    // Document thumbnails are just previews - the source file isn't an image
-    // so reporting the thumbnail's pixel dimensions as "properties" is misleading.
-    if cook.media.kind != Some(FileKind::Document) && src_w > 0 && src_h > 0 {
-        cook.media.properties = Some(image_properties(src_w, src_h, color_type));
-    }
+    // Document thumbnails are just previews - the extracted preview's pixel
+    // dimensions are never reported as properties for the source document.
     cook.render_image = Some(img);
 }
 
@@ -1772,6 +1766,29 @@ fn extract_apic_image(apic_data: &[u8]) -> Option<Vec<u8>> {
 
 /// Try to produce a thumbnail without a full upstream decode.
 ///
+/// The shortcut hands back an extracted thumbnail; it must never redefine the
+/// upstream media.  `kind`, `extension`, `mime`, and `file_size` all describe
+/// the source file, so they are snapshotted here and restored afterwards.  No
+/// current path mutates them, but this makes the guarantee structural rather
+/// than incidental.  The same rule applies to properties: a shortcut may
+/// report source-derived metadata only (e.g. EXIF sensor resolution, audio
+/// channels), never the extracted thumbnail's own pixel dimensions.
+pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
+    let upstream_kind = cook.media.kind;
+    let upstream_extension = cook.media.extension.clone();
+    let upstream_mime = cook.media.mime.clone();
+    let upstream_file_size = cook.media.file_size;
+
+    shortcut_inner(cook).await;
+
+    cook.media.kind = upstream_kind;
+    cook.media.extension = upstream_extension;
+    cook.media.mime = upstream_mime;
+    cook.media.file_size = upstream_file_size;
+}
+
+/// Try to produce a thumbnail without a full upstream decode.
+///
 /// Six active paths, in priority order:
 ///
 /// 1. **Small image** (any `image`-supported format ≤ `SMALL_FILE_THRESHOLD`) -
@@ -1787,7 +1804,7 @@ fn extract_apic_image(apic_data: &[u8]) -> Option<Vec<u8>> {
 /// Sets `cook.render_image = Some(img)` and closes the HTTP connection on success.
 /// Leaves both untouched on any failure so the caller can fall through to
 /// the handoff path.
-pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
+async fn shortcut_inner<S: HttpStream>(cook: &mut ThumbCook<S>) {
     let config = &ThumbnailConfig::CANONICAL;
 
     let ext_owned = cook.media.extension.clone().unwrap_or_default();
