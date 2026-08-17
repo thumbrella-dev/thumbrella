@@ -2,12 +2,17 @@
 
 ## Development
 
+
+## 1.3.6 - 2026/08/17
+
+Restore 3d renders with wrong extension
+
 - Different view angle for 3d renders for better "front" representation
 - Fix regression for files with wrong extension
 
 ## 1.3.5 - 2026/08/15
 
-[summary: describe the key changes in this release]
+Fix incorrect handling of 3d formats
 
 - Cleanup the media properties for 3d geometries (now empty)
 - Simplify User-Agent to 'thumbrella/major.minor'
