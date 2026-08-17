@@ -2,6 +2,8 @@
 
 ## Development
 
+- Different view angle for 3d renders for better "front" representation
+- Fix regression for files with wrong extension
 
 ## 1.3.5 - 2026/08/15
 

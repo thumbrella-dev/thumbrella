@@ -1121,7 +1121,7 @@ fn run_f3d_geometry_handler(reader: &mut dyn tier1::ReadSeek, ext: &str) -> Resu
     };
 
     // Baseline framing and material styling for thumbnail appeal.
-    const AZIMUTH: &str = "-30";
+    const AZIMUTH: &str = "+20";
     const ELEVATION: &str = "20";
     const VIEW_ANGLE: &str = "45";
     const RESOLUTION: &str = "512,512";

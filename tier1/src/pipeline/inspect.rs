@@ -91,19 +91,6 @@ fn sniff(bytes: &[u8], url: &str, content_type: Option<&str>) -> (FileKind, Stri
             return (FileKind::Vector, "image/svg+xml".to_string(), "svg".to_string());
         }
 
-        // 3D model files (FBX, glTF, …) commonly embed a JPEG preview thumbnail
-        // at the head of the file.  When magic bytes identify a raster image but
-        // the URL names a known geometry format, prefer the geometry kind so the
-        // embedded preview never drives the media definition (kind, extension,
-        // mime, or properties).
-        if matches!(infer_kind, FileKind::Image)
-            && let Some(ext) = &url_ext
-            && ext_to_kind(ext) == FileKind::Geometry
-        {
-            let mime = ext_to_mime(ext).to_string();
-            return (FileKind::Geometry, mime, ext.clone());
-        }
-
         // When magic bytes identify a generic container, prefer a more
         // specific kind from the URL extension (e.g. USDZ, DOCX are ZIP).
         if matches!(infer_kind, FileKind::Archive | FileKind::Binary | FileKind::Unknown)
@@ -130,7 +117,21 @@ fn sniff(bytes: &[u8], url: &str, content_type: Option<&str>) -> (FileKind, Stri
         return (infer_kind, t.mime_type().to_string(), infer_ext);
     }
 
-    // infer found nothing - try the HTTP Content-Type header.
+    // infer found nothing.  A known URL extension is more reliable than the
+    // server's Content-Type (which is often a generic application/octet-stream
+    // for geometry formats).  When the extension identifies the file, prefer
+    // it and fill in the proper mime for that extension.
+    if let Some(ext) = &url_ext {
+        let kind = ext_to_kind(ext);
+        if !matches!(kind, FileKind::Unknown) {
+            let mime = ext_to_mime(ext).to_string();
+            return (kind, mime, ext.clone());
+        }
+    }
+
+    // infer found nothing and the URL has no recognizable extension - fall
+    // back to the HTTP Content-Type header, but only if it resolves to a
+    // known kind.
     if let Some(ct) = content_type {
         // Strip parameters like "; charset=utf-8".
         let mime = ct.split(';').next().unwrap_or(ct).trim().to_ascii_lowercase();
@@ -141,10 +142,11 @@ fn sniff(bytes: &[u8], url: &str, content_type: Option<&str>) -> (FileKind, Stri
         }
     }
 
+    // Last resort - report the URL extension when present (even if it maps to
+    // no known kind), otherwise a generic binary.
     if let Some(ext) = url_ext {
-        let kind = ext_to_kind(&ext);
         let mime = ext_to_mime(&ext).to_string();
-        return (kind, mime, ext);
+        return (FileKind::Unknown, mime, ext);
     }
 
     (FileKind::Unknown, "application/octet-stream".to_string(), "bin".to_string())
