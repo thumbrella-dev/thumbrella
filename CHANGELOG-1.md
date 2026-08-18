@@ -2,6 +2,7 @@
 
 ## Development
 
+- Update dependencies; base64, infer, resvg
 
 ## 1.3.6 - 2026/08/17
 

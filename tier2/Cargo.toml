@@ -16,7 +16,7 @@ ffmpeg-sys-next = "8"
 serde_json   = "1"
 image        = { version = "0.25", default-features = false, features = ["webp"] }
 jxl-oxide    = "0.12"
-resvg        = "0.47"
+resvg        = "0.48"
 # jpeg-decoder: has specialized dct power-of-2 scaler
 jpeg-decoder = { version = "0.3", default-features = false }
 tokio   = { version = "1", features = ["full"] }
