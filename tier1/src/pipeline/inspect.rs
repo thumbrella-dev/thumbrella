@@ -376,6 +376,7 @@ pub fn canonical_extension(raw: &str) -> String {
         // video / audio
         "mpg" | "mpe" => "mpeg",
         "m4v" => "mp4",
+        "m4b" => "m4a",
         "mid" => "midi",
         "aifc" => "aiff",
         // documents

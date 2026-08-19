@@ -14,7 +14,7 @@
 //! | Image | libav, image crate, raw preview, jxl, resvg | (same as tier 2) |
 //! | Video | libav | (same as tier 2) |
 //! | Vector | resvg | (same as tier 2) + optional inkscape subprocess |
-//! | Document | (none) | dlopen: pdfium, subprocess: libreoffice |
+//! | Document | (none) | subprocess: pdftoppm (PDF first page) |
 //! | Geometry | (none) | subprocess: f3d / usdrecord |
 //!
 //! # Dispatch order
@@ -855,14 +855,148 @@ fn run_oiiotool_decode(bytes: &[u8], ext: &str) -> Result<RenderOutput, String> 
 }
 /// Render a document via tier-3-specific backends.
 ///
-/// Dispatch order:
-/// 1. Shared-library backends (dlopen) - e.g. libpdfium.
-/// 2. Subprocess backends - e.g. libreoffice headless.
+/// Dispatch is extension-based, mirroring the geometry path.  Today only PDF
+/// is rendered in tier 3, via the standalone `pdftoppm` subprocess (no dlopen,
+/// no C linkage).  Office documents (docx/odt/...) never reach this path -
+/// their embedded thumbnails are extracted by the tier 1 shortcut.
 async fn render_document_tier3(cook: &mut dyn RenderCook, ext: &str) -> bool {
-    // Stub: document rendering will use dlopen (pdfium) or subprocess
-    // (libreoffice --headless) to render the first page.
-    let _ = (cook, ext);
-    false
+    if ext != "pdf" {
+        return false;
+    }
+
+    // Find the registered handler and confirm it passed the availability
+    // probe at startup (pdftoppm found on PATH).
+    let handlers = crate::env_check::registered_handlers();
+    let Some(handler) = handlers.iter().find(|h| h.extensions.contains(&"pdf")) else {
+        return false;
+    };
+    let report = crate::env_check::cached_report();
+    let available = report
+        .as_ref()
+        .and_then(|r| r.backends.get(handler.name))
+        .map(|b| b.available)
+        .unwrap_or(false);
+    if !available {
+        return false;
+    }
+
+    let Some(mut reader) = cook.take_reader() else {
+        return false;
+    };
+
+    let result = tokio::task::spawn_blocking(move || run_pdftoppm_handler(&mut *reader)).await;
+
+    match result {
+        Ok(Ok(out)) => {
+            apply_render_output(cook, out);
+            true
+        }
+        Ok(Err(msg)) => {
+            tbr_debug!("[tier3] pdftoppm: {msg}");
+            cook.fail_cook(&format!("pdftoppm: {msg}"));
+            true
+        }
+        Err(_) => {
+            cook.fail_cook("pdftoppm: panicked");
+            true
+        }
+    }
+}
+
+/// Render the first page of a PDF to a PNG via poppler's `pdftoppm`.
+///
+/// `pdftoppm` is invoked as a standalone subprocess (the established tier 3
+/// pattern - no dlopen, no C linkage).  The first page is rasterized at
+/// 150 DPI; the deliver step scales it down to the canonical canvas.
+///
+/// The page count is read from `pdfinfo` and reported as the optional
+/// `pages` document property.  When `pdfinfo` is unavailable the property
+/// is omitted rather than guessed.
+fn run_pdftoppm_handler(reader: &mut dyn tier1::ReadSeek) -> Result<RenderOutput, String> {
+    use std::process::Command;
+
+    reader
+        .seek(std::io::SeekFrom::Start(0))
+        .map_err(|e| format!("rewind input: {e}"))?;
+
+    let arena = ScratchArena::new(100 * 1024 * 1024).map_err(|e| format!("scratch arena: {e}"))?;
+
+    let input_path = arena
+        .stage_reader(reader, "input.pdf")
+        .map_err(|e| format!("stage input: {e}"))?;
+
+    // Page count is optional - report it when pdfinfo can provide one.
+    let pages = pdfinfo_page_count(&input_path);
+
+    // `pdftoppm -singlefile -png` writes "<prefix>.png" (no page-number
+    // suffix), so derive the prefix from the allocated output path.
+    let out_path = arena.output_path("png");
+    let prefix = out_path.with_extension("");
+
+    let mut cmd = Command::new("pdftoppm");
+    cmd.arg("-f")
+        .arg("1")
+        .arg("-l")
+        .arg("1")
+        .arg("-r")
+        .arg("150")
+        .arg("-singlefile")
+        .arg("-png")
+        .arg(&input_path)
+        .arg(&prefix)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+
+    crate::sandbox::apply(&mut cmd, &crate::sandbox::default_strict());
+
+    let output = cmd.output().map_err(|e| format!("spawn pdftoppm: {e}"))?;
+
+    dump_subprocess("pdftoppm", &output.status, &output.stdout, &output.stderr);
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let msg = if stderr.trim().is_empty() {
+            format!("pdftoppm exited with {}", output.status)
+        } else {
+            format!("pdftoppm exited with {}: {}", output.status, stderr.trim())
+        };
+        return Err(msg);
+    }
+
+    let png_bytes = arena.read_output(&out_path).map_err(|e| format!("read output: {e}"))?;
+    let img = image::load_from_memory(&png_bytes).map_err(|e| format!("decode PNG output: {e}"))?;
+
+    Ok(RenderOutput {
+        image: img,
+        renderer: Some("pdftoppm".into()),
+        codec: None,
+        video_seek_secs: None,
+        properties: pages.map(|n| serde_json::json!({ "pages": n })),
+    })
+}
+
+/// Return the page count reported by poppler's `pdfinfo`.
+///
+/// Page count is an optional document property.  When `pdfinfo` is missing
+/// or its output cannot be parsed, this returns `None` and the caller omits
+/// the `pages` field rather than guessing.
+fn pdfinfo_page_count(input_path: &std::path::Path) -> Option<u32> {
+    use std::process::Command;
+
+    let output = Command::new("pdfinfo")
+        .arg(input_path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let line = text.lines().find(|l| l.starts_with("Pages:"))?;
+    line.split_once(':')?.1.trim().parse::<u32>().ok()
 }
 
 /// Render 3D geometry via tier-3-specific backends.

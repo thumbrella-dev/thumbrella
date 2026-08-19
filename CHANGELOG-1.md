@@ -2,6 +2,10 @@
 
 ## Development
 
+- Support pdf, with or without embedded thumbnails
+- Add optional 'pages' property for documents
+- Server cli new 'thumb' mode writes thumbnail file
+- Server cli new 'result' subcommand replaces the old 'thumb'
 - Update dependencies; base64, infer, resvg
 
 ## 1.3.6 - 2026/08/17

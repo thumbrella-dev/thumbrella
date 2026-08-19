@@ -11,6 +11,7 @@ use image::imageops::{FilterType, crop_imm, resize, unsharpen};
 
 use crate::cook::{CookStatus, ThumbCook};
 use crate::http_buf::HttpStream;
+use crate::media::FileKind;
 use crate::spec::ThumbnailConfig;
 
 //  Pipeline entry point
@@ -46,6 +47,11 @@ pub async fn deliver<S: HttpStream>(cook: &mut ThumbCook<S>) {
         config.fill_budget,
         pixel_art,
     );
+    if let Some(pages) = document_page_count(cook) {
+        if pages > 1 {
+            buf.draw_page_edges(pages);
+        }
+    }
     buf.place_on_canvas(
         config.exact_width,
         config.exact_height,
@@ -82,6 +88,60 @@ pub async fn deliver<S: HttpStream>(cook: &mut ThumbCook<S>) {
     cook.tel_deliver_secs = deliver_secs;
     cook.tel_thumbnail_bytes = Some(thumbnail_bytes);
     cook.status = CookStatus::Complete;
+}
+
+/// Read the document page count from the cook's media properties.
+///
+/// Only PDF documents populate `properties.pages` (via the shortcut or the
+/// tier3 `pdftoppm` path).  Returns `None` for non-documents and for
+/// documents where the count could not be determined.
+fn document_page_count<S: HttpStream>(cook: &ThumbCook<S>) -> Option<u32> {
+    if cook.media.kind != Some(FileKind::Document) {
+        return None;
+    }
+    cook.media
+        .properties
+        .as_ref()?
+        .get("pages")?
+        .as_u64()
+        .map(|n| n as u32)
+}
+
+/// Linear interpolation between two RGB colours, clamped to `[0, 1]`.
+fn lerp_rgb(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
+    let t = t.clamp(0.0, 1.0);
+    [
+        (a[0] as f32 + (b[0] as f32 - a[0] as f32) * t).round() as u8,
+        (a[1] as f32 + (b[1] as f32 - a[1] as f32) * t).round() as u8,
+        (a[2] as f32 + (b[2] as f32 - a[2] as f32) * t).round() as u8,
+    ]
+}
+
+/// Oscillating gradient parameter along one edge (0 = start, 1 = end).
+///
+/// Piecewise-linear through the requested progression
+/// `25% 0% 25% 50% 75% 100% 75%`, giving a slightly higher-frequency wave
+/// than a single linear ramp.
+fn page_edge_wave(u: f32) -> f32 {
+    const KNOTS: [(f32, f32); 7] = [
+        (0.0 / 6.0, 0.25),
+        (1.0 / 6.0, 0.00),
+        (2.0 / 6.0, 0.25),
+        (3.0 / 6.0, 0.50),
+        (4.0 / 6.0, 0.75),
+        (5.0 / 6.0, 1.00),
+        (6.0 / 6.0, 0.75),
+    ];
+    let u = u.clamp(0.0, 1.0);
+    for i in 0..KNOTS.len() - 1 {
+        let (u0, t0) = KNOTS[i];
+        let (u1, t1) = KNOTS[i + 1];
+        if u >= u0 && u <= u1 {
+            let f = (u - u0) / (u1 - u0);
+            return t0 + (t1 - t0) * f;
+        }
+    }
+    KNOTS[KNOTS.len() - 1].1
 }
 
 //  Process buffer
@@ -253,6 +313,80 @@ impl ProcessBuffer {
                 BufInner::Rgba(r)
             }
         };
+    }
+
+    /// Draw the page-count border onto the content's right and bottom edges.
+    ///
+    /// `pages` is the document page count (>= 2).  The border thickness is
+    /// `floor(log2(pages)) + 1` pixels, clamped to 2..=10.  The right and
+    /// bottom edges carry oscillating gold/purple gradients (the geometry
+    /// tone-map palette) that meet at a 45-degree mitered corner.  The outer
+    /// ends of the two edges (top-right and bottom-left) are chamfered at 45
+    /// degrees with transparent pixels so the stack reads as a bevelled page
+    /// block.  Drawn before `place_on_canvas` so the border tracks the
+    /// document.
+    pub(super) fn draw_page_edges(&mut self, pages: u32) {
+        // Gold = warm highlight, purple = shadow colour from tier3's
+        // stylize_f3d_image tone map.
+        const GOLD: [u8; 3] = [236, 212, 155];
+        const PURPLE: [u8; 3] = [98, 80, 138];
+
+        let n = (pages.ilog2() as u32 + 1).clamp(2, 10);
+        let (w, h) = self.dimensions();
+        if w == 0 || h == 0 {
+            return;
+        }
+        let nw = n.min(w);
+        let nh = n.min(h);
+        let hd = (h - 1).max(1) as f32;
+        let wd = (w - 1).max(1) as f32;
+
+        // The chamfers erase pixels to transparent, so normalise RGB to RGBA.
+        let prev = std::mem::replace(&mut self.inner, BufInner::Rgb(image::RgbImage::new(0, 0)));
+        self.inner = match prev {
+            BufInner::Rgb(img) => BufInner::Rgba(DynamicImage::ImageRgb8(img).into_rgba8()),
+            BufInner::Rgba(img) => BufInner::Rgba(img),
+        };
+
+        let BufInner::Rgba(img) = &mut self.inner else {
+            return;
+        };
+
+        for y in 0..h {
+            for x in 0..w {
+                let on_right = x >= w - nw;
+                let on_bottom = y >= h - nh;
+                if !on_right && !on_bottom {
+                    continue;
+                }
+
+                // 45-degree chamfer at the top end of the right edge.
+                if on_right && y < nw && ((w - 1 - x) as i32 + (y as i32)) < (nw as i32 - 1) {
+                    img.put_pixel(x, y, image::Rgba([0, 0, 0, 0]));
+                    continue;
+                }
+                // 45-degree chamfer at the left end of the bottom edge.
+                if on_bottom && x < nh && ((x as i32) + ((h - 1 - y) as i32)) < (nh as i32 - 1) {
+                    img.put_pixel(x, y, image::Rgba([0, 0, 0, 0]));
+                    continue;
+                }
+
+                let c = if on_right && on_bottom {
+                    let dr = (w - 1 - x) as i32;
+                    let db = (h - 1 - y) as i32;
+                    if dr <= db {
+                        lerp_rgb(GOLD, PURPLE, page_edge_wave(y as f32 / hd))
+                    } else {
+                        lerp_rgb(GOLD, PURPLE, 1.0 - page_edge_wave(x as f32 / wd))
+                    }
+                } else if on_right {
+                    lerp_rgb(GOLD, PURPLE, page_edge_wave(y as f32 / hd))
+                } else {
+                    lerp_rgb(GOLD, PURPLE, 1.0 - page_edge_wave(x as f32 / wd))
+                };
+                img.put_pixel(x, y, image::Rgba([c[0], c[1], c[2], 255]));
+            }
+        }
     }
 
     /// Composite content onto a `canvas_w × canvas_h` canvas and convert to RGB.

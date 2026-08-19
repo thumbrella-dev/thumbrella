@@ -1914,11 +1914,165 @@ async fn shortcut_inner<S: HttpStream>(cook: &mut ThumbCook<S>) {
         try_zip_shortcut(cook).await;
     }
 
+    //  PDF documents (embedded page thumbnail + page count)
+    let is_pdf = cook.media.kind == Some(FileKind::Document)
+        && cook.media.extension.as_deref() == Some("pdf");
+    if is_pdf {
+        try_pdf_shortcut(cook).await;
+    }
+
     //  Audio: ID3v2 APIC cover art
     let is_audio =
         cook.media.kind == Some(FileKind::Audio) && matches!(cook.media.extension.as_deref(), Some("mp3"));
     if is_audio {
         try_audio_shortcut(cook).await;
+    }
+}
+
+//  PDF document shortcut
+
+/// PDF document shortcut: extract an embedded page thumbnail and report the
+/// page count without a full render.
+///
+/// lopdf parses the whole document in memory (the page tree and `/Thumb`
+/// streams can live anywhere in the file), so this path reads the full file
+/// and is gated by `shortcut_limits.pdf_max_fetch`.  `read_at` has pread
+/// semantics - the cursor is restored and streaming is never entered, so a
+/// failed parse leaves the buffer intact for the render/handoff path.
+async fn try_pdf_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
+    let Some(file_size) = cook.http_stream_len() else {
+        return;
+    };
+    if file_size == 0 || file_size > cook.runtime.shortcut_limits.pdf_max_fetch as u64 {
+        return;
+    }
+
+    let data = match cook.http_read_at(0, file_size as usize).await {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let Ok(doc) = lopdf::Document::load_mem(&data) else {
+        return;
+    };
+
+    // Page count is a source-derived document property.  Record it even when
+    // no thumbnail is found, so the render path still surfaces it.
+    let page_count = doc.get_pages().len() as u32;
+    if page_count > 0 {
+        let mut props = match cook.media.properties.take() {
+            Some(v) if v.is_object() => v,
+            _ => serde_json::json!({}),
+        };
+        props
+            .as_object_mut()
+            .expect("properties is an object here")
+            .insert("pages".into(), serde_json::json!(page_count));
+        cook.media.properties = Some(props);
+    }
+
+    let Some(img) = pdf_extract_thumbnail(&doc) else {
+        return; // no embedded thumbnail - fall through to render
+    };
+
+    let config = &ThumbnailConfig::CANONICAL;
+    let img = pre_scale_to_target(img, config.exact_width, config.exact_height);
+    let dl_bytes = cook.http_bytes_fetched();
+
+    cook.http_close().await;
+
+    cook.render_renderer = Some("shortcut/pdf".into());
+    cook.render_handler = RenderHandler::Builtin;
+    cook.out_download_bytes = dl_bytes;
+    cook.render_image = Some(img);
+}
+
+/// Walk the page tree for the first usable embedded page thumbnail.
+///
+/// Each page may carry a `/Thumb` image XObject.  Returns the decoded image,
+/// or `None` when no page has a usable thumbnail.
+fn pdf_extract_thumbnail(doc: &lopdf::Document) -> Option<DynamicImage> {
+    for page_id in doc.page_iter() {
+        let Ok(page_dict) = doc.get_dictionary(page_id) else {
+            continue;
+        };
+        let Ok(thumb) = page_dict.get_deref(b"Thumb", doc) else {
+            continue;
+        };
+        let lopdf::Object::Stream(stream) = thumb else {
+            continue;
+        };
+        // Only image XObjects are valid page thumbnails.
+        if !matches!(stream.dict.get(b"Subtype"), Ok(s) if pdf_name_is(s, b"Image")) {
+            continue;
+        }
+        if let Some(img) = pdf_stream_to_image(stream) {
+            return Some(img);
+        }
+    }
+    None
+}
+
+/// Convert a page-thumbnail image XObject into a decoded image.
+///
+/// DCTDecode thumbnails are complete JPEGs (returned as-is).  FlateDecode or
+/// uncompressed thumbnails are reconstructed from 8-bit DeviceRGB/DeviceGray
+/// pixel data.
+fn pdf_stream_to_image(stream: &lopdf::Stream) -> Option<DynamicImage> {
+    let is_dct = match stream.dict.get(b"Filter") {
+        Ok(lopdf::Object::Name(n)) => n.as_slice() == b"DCTDecode" || n.as_slice() == b"DCT",
+        Ok(lopdf::Object::Array(arr)) => {
+            arr.iter().any(|o| pdf_name_is(o, b"DCTDecode") || pdf_name_is(o, b"DCT"))
+        }
+        _ => false,
+    };
+
+    if is_dct {
+        // The raw stream content is a complete JPEG.
+        return image::load_from_memory(&stream.content).ok();
+    }
+
+    let width = pdf_dict_int(stream, b"Width")?;
+    let height = pdf_dict_int(stream, b"Height")?;
+    if pdf_dict_int(stream, b"BitsPerComponent").unwrap_or(8) != 8 {
+        return None;
+    }
+
+    let cs = stream.dict.get(b"ColorSpace").ok();
+    let is_rgb = matches!(cs, Some(c) if pdf_name_is(c, b"DeviceRGB") || pdf_name_is(c, b"RGB"));
+    let is_gray = matches!(cs, Some(c) if pdf_name_is(c, b"DeviceGray") || pdf_name_is(c, b"G"));
+    if !is_rgb && !is_gray {
+        return None;
+    }
+
+    // Bomb-safe decompression.
+    let raw = stream.decompressed_content_with_limit(16 * 1024 * 1024).ok()?;
+    let channels = if is_rgb { 3usize } else { 1usize };
+    let expected = (width as usize).checked_mul(height as usize)?.checked_mul(channels)?;
+    if raw.len() < expected {
+        return None;
+    }
+
+    if is_rgb {
+        Some(DynamicImage::ImageRgb8(image::RgbImage::from_raw(
+            width, height, raw[..expected].to_vec(),
+        )?))
+    } else {
+        Some(DynamicImage::ImageLuma8(image::GrayImage::from_raw(
+            width, height, raw[..expected].to_vec(),
+        )?))
+    }
+}
+
+/// True when an object is a PDF Name equal to `expected`.
+fn pdf_name_is(obj: &lopdf::Object, expected: &[u8]) -> bool {
+    matches!(obj, lopdf::Object::Name(n) if n.as_slice() == expected)
+}
+
+/// Read a non-negative integer from a stream dictionary.
+fn pdf_dict_int(stream: &lopdf::Stream, key: &[u8]) -> Option<u32> {
+    match stream.dict.get(key).ok()? {
+        lopdf::Object::Integer(n) if *n >= 0 => Some(*n as u32),
+        _ => None,
     }
 }
 

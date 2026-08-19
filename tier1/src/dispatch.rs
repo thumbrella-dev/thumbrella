@@ -311,6 +311,9 @@ pub fn format_manifest() -> &'static [FormatEntry] {&[
                 kind: FileKind::Document,   tier: 2, renderer: "builtin", shortcut: true },
     FormatEntry {extension: "pptx", label: "Office presentation",
                 kind: FileKind::Document,   tier: 2, renderer: "builtin", shortcut: true },
+    //  Tier 3 - documents (PDF first-page render via pdftoppm subprocess)
+    FormatEntry {extension: "pdf", label: "PDF Document",
+                kind: FileKind::Document,   tier: 3, renderer: "pdftoppm", shortcut: false },
     //  Tier 3 - ffmpeg CLI: arithmetic JPEG + all image formats
     FormatEntry {extension: "jpeg", label: "JPEG (arithmetic)",
                 kind: FileKind::Image,  tier: 3, renderer: "ffmpeg_cli", shortcut: false},

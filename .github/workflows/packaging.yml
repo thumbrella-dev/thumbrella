@@ -19,7 +19,7 @@ on:
         description: "Git ref containing packaging files; defaults to the release tag"
         required: false
         type: string
-      publish_latest:
+      latest:
         description: "Also update thumbrella/server:latest"
         required: true
         default: false
@@ -101,7 +101,7 @@ jobs:
           build-args: VERSION=${{ needs.version.outputs.version }}
           tags: |
             ${{ env.IMAGE_NAME }}:${{ needs.version.outputs.version }}
-            ${{ inputs.publish_latest && format('{0}:latest', env.IMAGE_NAME) || '' }}
+            ${{ inputs.latest && format('{0}:latest', env.IMAGE_NAME) || '' }}
 
   package-npm:
     needs: version

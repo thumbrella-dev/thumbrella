@@ -127,6 +127,13 @@ pub struct ShortcutLimits {
     /// contiguous prefix read.  Tags larger than this limit are skipped and
     /// the shortcut falls through to the tier-2 handoff path.
     pub audio_cover_max_fetch: usize,
+
+    /// Maximum file size for the PDF document shortcut (full in-memory parse).
+    ///
+    /// PDF page trees and embedded `/Thumb` streams can live anywhere in the
+    /// file, so lopdf needs the whole document.  Tier 1 keeps this small to
+    /// bound Worker memory; tier 2 raises it to cover typical documents.
+    pub pdf_max_fetch: usize,
 }
 
 impl ShortcutLimits {
@@ -139,6 +146,7 @@ impl ShortcutLimits {
         small_file_threshold: 80 * 1024,   // 80 KiB
         zip_tail_size: 128 * 1024,         // 128 KiB
         audio_cover_max_fetch: 128 * 1024, // 128 KiB
+        pdf_max_fetch: 512 * 1024,         // 512 KiB
     };
 
     /// Relaxed limits for Tier 2 (native server, no Worker budget).
@@ -155,5 +163,6 @@ impl ShortcutLimits {
         small_file_threshold: 200 * 1024,  // 200 KiB
         zip_tail_size: 256 * 1024,         // 256 KiB
         audio_cover_max_fetch: 512 * 1024, // 512 KiB
+        pdf_max_fetch: 16 * 1024 * 1024,   // 16 MiB
     };
 }

@@ -52,6 +52,14 @@ async fn main() {
         description: "USDZ/USD geometry (usd-core extract → F3D render)",
     });
 
+    tier3::env_check::register_handler(tier3::env_check::HandlerDecl {
+        name: "pdftoppm",
+        category: "document",
+        command: "pdftoppm",
+        extensions: &["pdf"],
+        description: "PDF renderer (poppler pdftoppm)",
+    });
+
     //  Probe the environment
     let env_report = tier3::env_check::probe_environment();
 

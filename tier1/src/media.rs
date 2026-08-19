@@ -33,10 +33,16 @@
 //!   duration  f64    Seconds
 //!   lossless  bool   Inferred from extension (flac, wav, aiff)
 //!
-//! Geometry, Vector, Document, Archive, Text, Binary, Unknown
-//!   - no properties for now.  Counts (pages, vertices, files) and
-//!     metadata (author, encoding) require deep format parsing or are
-//!     unreliable from a header-only read.
+//! Document
+//!   pages     u32    Page count.  Optional - omitted when the format
+//!                     cannot determine it reliably (most office formats).
+//!                     PDFs report it when the renderer can read the
+//!                     page tree.
+//!
+//! Geometry, Vector, Archive, Text, Binary, Unknown
+//!   - no properties for now.  Counts (vertices, files) and metadata
+//!     (author, encoding) require deep format parsing or are unreliable
+//!     from a header-only read.
 //! ```
 
 use serde::{Deserialize, Serialize};

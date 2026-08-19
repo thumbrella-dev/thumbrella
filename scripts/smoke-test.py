@@ -2,7 +2,7 @@
 """
 Smoke test for the Thumbrella standalone server (tier2 + tier3).
 
-Builds release binaries, then runs each through `check`, `thumb`, and `serve`
+Builds release binaries, then runs each through `check`, `result`, and `serve`
 commands.  The serve step starts a real HTTP server, hits /health and /thumb.jpeg,
 and shuts it down.
 
@@ -126,9 +126,9 @@ def run_check(binary_name, label):
     return True
 
 
-# --- thumb -------------------------------------------------------------------
+# --- result -----------------------------------------------------------------
 
-def run_thumb(binary_name, label):
+def run_result(binary_name, label):
     exe = TARGET_DIR / binary_name
     if not exe.exists():
         print(f"  SKIP: {exe} not found")
@@ -136,7 +136,7 @@ def run_thumb(binary_name, label):
     env = {**os.environ, "NO_COLOR": "1"}
     for url in TEST_URLS:
         print(f"  {label} thumb: {url}")
-        result = run_capture([str(exe), "thumb", "--json", url], env=env, timeout=60)
+        result = run_capture([str(exe), "result", "--json", url], env=env, timeout=60)
         if result.returncode != 0:
             print(f"  FAILED:\n{result.stderr[:500]}")
             return False
@@ -233,14 +233,14 @@ def main():
     if args.tier in (0, 2):
         print("\n=== Tier 2 ===")
         overall &= run_check("tier2", "tier2")
-        overall &= run_thumb("tier2", "tier2")
+        overall &= run_result("tier2", "tier2")
         port2 = free_port()
         overall &= run_serve("tier2", "tier2", port2)
 
     if args.tier in (0, 3):
         print("\n=== Tier 3 ===")
         overall &= run_check("thumbrella", "tier3")
-        overall &= run_thumb("thumbrella", "tier3")
+        overall &= run_result("thumbrella", "tier3")
         port3 = free_port()
         overall &= run_serve("thumbrella", "tier3", port3)
 

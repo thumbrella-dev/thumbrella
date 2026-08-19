@@ -4,9 +4,10 @@
 //! is a minimal stub that calls [`run`].
 //!
 //! ```text
-//! <binary> serve              # start the HTTP server
-//! <binary> thumb <url>...     # thumbnail one or more URLs
-//! <binary> check              # validate runtime config and dependencies
+//! <binary> serve                    # start the HTTP server
+//! <binary> thumb <input> <output>   # thumbnail one source, write a JPEG
+//! <binary> result <url>...          # thumbnail URLs, print result metadata
+//! <binary> check                    # validate runtime config and dependencies
 //! <binary> formats            # list all supported formats by kind
 //! <binary> license            # print third-party license notices
 //! <binary> version            # print build version
@@ -38,12 +39,27 @@ enum Command {
     /// TBR_TIER3 downstream tier3 connect string (URL + optional comma-separated headers)
     Serve,
 
-    /// Thumbnail one or more URLs and print results to stdout.
+    /// Thumbnail a single source and write the JPEG to a file.
     ///
-    /// All URLs are processed concurrently.  Output is a JSON object with an
-    /// `items` array, one `ThumbResult` per input URL, the same shape as the
-    /// `/batch` endpoint response.
+    /// `input` is a URL or a local filesystem path (promoted to a `file://`
+    /// URL).  The rendered JPEG is written to `output`.  Exits non-zero when
+    /// no thumbnail can be produced (placeholders included).
     Thumb {
+        /// Source URL or local file path.
+        #[arg(value_name = "INPUT")]
+        input: String,
+
+        /// Output file path for the JPEG thumbnail.
+        #[arg(value_name = "OUTPUT")]
+        output: String,
+    },
+
+    /// Thumbnail one or more URLs and print result metadata as JSON.
+    ///
+    /// All URLs are processed concurrently.  Default output is pretty-printed
+    /// JSON with the base64 thumbnail abbreviated.  Pass `--raw` for compact,
+    /// unabridged JSON (full base64 thumbnail).
+    Result {
         /// Source URLs to thumbnail.
         #[arg(required = true)]
         urls: Vec<String>,
@@ -55,12 +71,8 @@ enum Command {
         #[arg(long)]
         cache: Option<String>,
 
-        /// Emit machine-readable JSON instead of the default pretty text.
-        #[arg(long)]
-        json: bool,
-
-        /// Emit raw result JSON (unwrapped, with base64 thumbnail intact).
-        /// Output is `{"result": {…}}` - one object per URL, no `items` wrapper.
+        /// Emit compact, unabridged JSON (full base64 thumbnail) instead of
+        /// the default pretty output.
         #[arg(long)]
         raw: bool,
     },
@@ -160,8 +172,11 @@ where
 
     match cli.command {
         Command::Serve => run_server(runtime.unwrap()).await,
-        Command::Thumb { urls, cache, json, raw } => {
-            run_thumb(urls, cache, json, raw, runtime.unwrap()).await
+        Command::Thumb { input, output } => {
+            run_thumb(input, output, runtime.unwrap()).await
+        }
+        Command::Result { urls, cache, raw } => {
+            run_result(urls, cache, raw, runtime.unwrap()).await
         }
         Command::Check { json } => run_check(json, tier).await,
         Command::Formats { json } => run_formats(json),
@@ -366,10 +381,9 @@ pub fn promote_url(raw: &str) -> String {
     format!("file://{}", abs.display())
 }
 
-async fn run_thumb(
+async fn run_result(
     urls: Vec<String>,
     cache_str: Option<String>,
-    json: bool,
     raw: bool,
     runtime: Arc<Runtime>,
 ) {
@@ -380,9 +394,9 @@ async fn run_thumb(
     let cache = cache_str.as_deref().and_then(CacheHints::decode);
 
     let mut pool = FuturesUnordered::new();
-    for raw in urls {
-        let is_local = !raw.contains("://") || raw.starts_with("file://");
-        let url = promote_url(&raw);
+    for url_arg in urls {
+        let is_local = !url_arg.contains("://") || url_arg.starts_with("file://");
+        let url = promote_url(&url_arg);
         let input = InputSpec {
             url,
             cache: cache.clone(),
@@ -397,106 +411,78 @@ async fn run_thumb(
         results.push(result);
     }
 
-    if raw || json {
-        // --raw: compact JSON with full base64 thumbnail (machine-readable).
-        // --json: pretty-printed, colourised, thumbnail replaced with placeholder.
-        for result in &results {
-            if json {
-                // Serialise to Value so we can swap the base64 thumbnail
-                // for a short placeholder string.  (Replacing the Vec<u8>
-                // would get re-encoded as base64, so we do it post-serialise.)
-                let mut value = serde_json::to_value(result).unwrap();
-                if let Some(media) = value.get_mut("media")
-                    && let Some(thumb) = media.get("thumbnail").and_then(|v| v.as_str())
-                    && thumb.len() > 200
-                {
-                    media["thumbnail"] =
-                        serde_json::Value::String(format!("<base64 jpeg data: {} bytes>", thumb.len()));
-                }
-                let pretty = serde_json::to_string_pretty(&value).unwrap();
-                let ux = crate::ux::get();
-                println!("{}", ux.colorize_json(&pretty));
-            } else {
-                println!("{}", serde_json::to_string(&result).unwrap());
+    for result in &results {
+        if raw {
+            // --raw: compact, unabridged JSON (full base64 thumbnail).
+            println!("{}", serde_json::to_string(result).unwrap());
+        } else {
+            // Default: pretty-printed JSON with the base64 thumbnail
+            // abbreviated.  Serialise to Value so we can swap the thumbnail
+            // for a short placeholder string (replacing the Vec<u8> would
+            // re-encode as base64, so we do it post-serialise).
+            let mut value = serde_json::to_value(result).unwrap();
+            if let Some(media) = value.get_mut("media")
+                && let Some(thumb) = media.get("thumbnail").and_then(|v| v.as_str())
+                && thumb.len() > 200
+            {
+                media["thumbnail"] =
+                    serde_json::Value::String(format!("<base64 jpeg data: {} bytes>", thumb.len()));
             }
+            let pretty = serde_json::to_string_pretty(&value).unwrap();
+            let ux = crate::ux::get();
+            println!("{}", ux.colorize_json(&pretty));
         }
-    } else {
-        print_thumb_items(&results);
     }
 }
 
-//  thumb pretty printer
+/// Thumbnail a single source and write the JPEG to `output`.
+///
+/// `input` is a URL or a local filesystem path (promoted to a `file://` URL).
+/// Exits non-zero when no thumbnail can be produced or the output cannot be
+/// written.  Placeholder results (no real thumbnail) are treated as failures.
+async fn run_thumb(input: String, output: String, runtime: Arc<Runtime>) {
+    use crate::{ThumbCook, cook::InputSpec};
 
-pub fn print_thumb_items(results: &[crate::ThumbResult]) {
-    for result in results {
-        // Not-modified cache hit - compact single-line display.
-        if result.source == Some(crate::result::ResultSource::NotModified) {
-            println!("304  -  not modified");
-            continue;
-        }
+    let is_local = !input.contains("://") || input.starts_with("file://");
+    let input_spec = InputSpec {
+        url: promote_url(&input),
+        cache: None,
+        allow_local: is_local,
+    };
 
-        let http = result.http_status.map(|s| format!("{s}")).unwrap_or_else(|| "---".into());
+    let cook = ThumbCook::from_input(input_spec, Arc::clone(&runtime));
+    let (result, _trace, mut after) = cook.run().await;
+    after.drain_spawn();
 
-        let kind = result
-            .media
-            .as_ref()
-            .map(|m| {
-                serde_json::to_value(m.kind)
-                    .ok()
-                    .and_then(|v| v.as_str().map(|s| s.to_string()))
-                    .unwrap_or_default()
-            })
-            .unwrap_or_default();
-        let ext = result.media.as_ref().map(|m| m.extension.as_str()).unwrap_or("");
-        let file_size = result.media.as_ref().map(|m| fmt_bytes(m.file_size)).unwrap_or_default();
-        let thumb_size = result.media.as_ref().and_then(|m| {
-            if m.thumbnail.is_empty() {
-                None
-            } else {
-                Some(fmt_bytes(m.thumbnail.len() as u64))
-            }
-        });
+    let ux = crate::ux::get();
 
-        let type_col = if kind.is_empty() && ext.is_empty() {
-            "unknown".to_string()
-        } else if ext.is_empty() {
-            kind
-        } else {
-            format!("{kind} {ext}")
-        };
-
-        let info_col = if let Some(ref media) = result.media {
-            if !media.placeholder.is_empty() {
-                format!("{file_size}  ->  {} placeholder", media.placeholder)
-            } else if let Some(ref thumb) = thumb_size {
-                format!("{file_size}  ->  {thumb}")
-            } else {
-                file_size
-            }
-        } else {
-            file_size
-        };
-
-        let msg = result
-            .message
-            .as_deref()
-            .filter(|m| !m.is_empty())
-            .map(|m| format!("  -  {m}"))
-            .unwrap_or_default();
-
-        println!(
-            "{http:<4}  {dur:>8}  {type_col:<16}  {info_col}{msg}",
-            http = http,
-            dur = fmt_secs(result.duration),
-            type_col = type_col,
-            info_col = info_col,
-            msg = msg,
+    let Some(media) = result.media.as_ref() else {
+        ux.fatal(
+            &format!("no result for {}", result.url),
+            "the source could not be fetched or recognised",
         );
+    };
 
-        if let Some(cache) = result.media.as_ref().map(|m| &*m.cache).filter(|c| !c.is_empty()) {
-            println!("cache {cache}");
-        }
+    if media.thumbnail.is_empty() {
+        let reason = if !media.placeholder.is_empty() {
+            format!(" (placeholder: {})", media.placeholder)
+        } else if let Some(msg) = result.message.as_deref().filter(|m| !m.is_empty()) {
+            format!(" ({msg})")
+        } else {
+            String::new()
+        };
+        ux.fatal(
+            &format!("no thumbnail for {}{}", result.url, reason),
+            "the source may be unsupported, or the server could not render it",
+        );
     }
+
+    if let Err(e) = std::fs::write(&output, &media.thumbnail) {
+        let msg = e.to_string();
+        ux.fatal(&format!("could not write {output}"), &msg);
+    }
+
+    println!("wrote {output}  ({} bytes)", media.thumbnail.len());
 }
 
 //  check
@@ -806,31 +792,4 @@ fn run_version(tier: u8) {
 
 fn run_license() {
     print!("{}", include_str!("license.txt"));
-}
-
-//  helpers
-
-pub fn fmt_bytes(n: u64) -> String {
-    if n >= 1_048_576 {
-        format!("{:.1} MB", n as f64 / 1_048_576.0)
-    } else if n >= 1_024 {
-        format!("{:.1} KB", n as f64 / 1_024.0)
-    } else {
-        format!("{n} B")
-    }
-}
-
-pub fn fmt_secs(s: f64) -> String {
-    if s <= 0.0 {
-        return "-".into();
-    }
-    if s >= 1.0 {
-        format!("{s:.2} s")
-    } else if s >= 0.001 {
-        format!("{:.1} ms", s * 1_000.0)
-    } else if s >= 0.000_001 {
-        format!("{:.0} µs", s * 1_000_000.0)
-    } else {
-        format!("{:.0} ns", s * 1_000_000_000.0)
-    }
 }

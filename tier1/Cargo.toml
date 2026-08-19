@@ -60,6 +60,12 @@ jpeg-decoder = { version = "0.3", default-features = false }
 # hand-rolled ZIP parser in pipeline/shortcut.rs.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
+# lopdf - pure-Rust PDF parser for the PDF document shortcut (embedded page
+# thumbnails and page count).  WASM-compatible; default features pull in
+# chrono/rayon/time which tier1 does not need and which do not build on wasm.
+# `wasm_js` provides getrandom's wasm32 backend (required on wasm32-unknown-unknown).
+lopdf = { version = "0.44", default-features = false, features = ["wasm_js"] }
+
 # Bytes - zero-copy buffer primitive.  WASM-compatible; used by the native
 # streaming handler and transitively by tokio/axum/reqwest.
 bytes = "1"
