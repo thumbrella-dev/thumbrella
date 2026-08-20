@@ -371,18 +371,43 @@ impl ProcessBuffer {
                     continue;
                 }
 
-                let c = if on_right && on_bottom {
+                // Which face does this pixel belong to?  The right face stripes
+                // along columns, the bottom face along rows, so the grain stays
+                // parallel to each edge across the miter seam.
+                let (right_face, c) = if on_right && on_bottom {
                     let dr = (w - 1 - x) as i32;
                     let db = (h - 1 - y) as i32;
                     if dr <= db {
-                        lerp_rgb(GOLD, PURPLE, page_edge_wave(y as f32 / hd))
+                        (true, lerp_rgb(GOLD, PURPLE, page_edge_wave(y as f32 / hd)))
                     } else {
-                        lerp_rgb(GOLD, PURPLE, 1.0 - page_edge_wave(x as f32 / wd))
+                        (false, lerp_rgb(GOLD, PURPLE, 1.0 - page_edge_wave(x as f32 / wd)))
                     }
                 } else if on_right {
-                    lerp_rgb(GOLD, PURPLE, page_edge_wave(y as f32 / hd))
+                    (true, lerp_rgb(GOLD, PURPLE, page_edge_wave(y as f32 / hd)))
                 } else {
-                    lerp_rgb(GOLD, PURPLE, 1.0 - page_edge_wave(x as f32 / wd))
+                    (false, lerp_rgb(GOLD, PURPLE, 1.0 - page_edge_wave(x as f32 / wd)))
+                };
+
+                // Interlace: darken every even column (right face) / even row
+                // (bottom face) so the dark bands run along each edge rather
+                // than across it.  Bright bands sit at 90% and dark bands at
+                // 70% of the base colour - a pure luminance change that reads
+                // as a soft shadow rather than distinct stripes, and survives
+                // JPEG 4:2:0 chroma subsampling where per-pixel chroma would
+                // not.
+                let dark = if right_face { x % 2 == 0 } else { y % 2 == 0 };
+                let c = if dark {
+                    [
+                        (c[0] as u32 * 7 / 10) as u8,
+                        (c[1] as u32 * 7 / 10) as u8,
+                        (c[2] as u32 * 7 / 10) as u8,
+                    ]
+                } else {
+                    [
+                        (c[0] as u32 * 9 / 10) as u8,
+                        (c[1] as u32 * 9 / 10) as u8,
+                        (c[2] as u32 * 9 / 10) as u8,
+                    ]
                 };
                 img.put_pixel(x, y, image::Rgba([c[0], c[1], c[2], 255]));
             }
