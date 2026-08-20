@@ -328,6 +328,12 @@ pub struct ThumbCook<S: HttpStream> {
     /// is an artifact of partial decoding, not genuine small-image content.
     pub render_is_progressive_partial: bool,
 
+    /// Pixel thickness for the document page-edge border.  `0` means no border.
+    /// Populated before `deliver` by shortcut/render paths; only document media
+    /// set it.  Exact counts (PDF) and rough estimates (office docs) are both
+    /// acceptable - this field drives presentation, never media properties.
+    pub page_edge_thickness: u32,
+
     //  Output fields - written as steps complete
     /// The encoded JPEG thumbnail bytes.
     pub out_thumbnail: Vec<u8>,
@@ -421,6 +427,7 @@ impl<S: HttpStream> ThumbCook<S> {
             render_codec: None,
             render_video_seek_secs: None,
             render_is_progressive_partial: false,
+            page_edge_thickness: 0,
             out_thumbnail: Vec::new(),
             out_message: String::new(),
             out_placeholder: None,
@@ -1495,6 +1502,21 @@ impl<S: HttpStream + Send + 'static> crate::renderer::RenderCook for ThumbCook<S
             merged = props;
         }
         self.media.properties = Some(merged);
+
+        // Document page counts drive the page-edge border.  Exact counts (PDF)
+        // and estimates both arrive here as a "pages" property from the render
+        // path; the shortcut paths set `page_edge_thickness` directly.
+        if self.media.kind == Some(FileKind::Document) {
+            if let Some(pages) = self
+                .media
+                .properties
+                .as_ref()
+                .and_then(|p| p.get("pages"))
+                .and_then(|v| v.as_u64())
+            {
+                self.page_edge_thickness = crate::spec::page_edge_thickness(pages as u32);
+            }
+        }
     }
     fn fail_cook(&mut self, msg: &str) {
         self.fail(msg);

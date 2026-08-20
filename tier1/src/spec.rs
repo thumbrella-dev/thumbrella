@@ -64,6 +64,17 @@ pub struct ThumbnailConfig {
     pub pixel_art_max_px: u32,
 }
 
+/// Pixel thickness of the document page-edge border for a given page count.
+///
+/// Powers-of-two granularity so a rough page estimate is good enough: 2 px for
+/// 2-3 pages, 3 px for 4-7, and so on, capped at 10 px.  Produced by the
+/// shortcut/render paths before `deliver`, which just consumes the finished
+/// thickness.  `0` pages maps to 2 px (the minimum border) and is treated by
+/// the caller as "no border" via the separate 0-means-none cook field.
+pub(crate) fn page_edge_thickness(pages: u32) -> u32 {
+    (pages.ilog2() as u32 + 1).clamp(2, 10)
+}
+
 impl Default for ThumbnailConfig {
     fn default() -> Self {
         Self::CANONICAL

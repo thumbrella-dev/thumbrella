@@ -4,6 +4,7 @@
 
 - Support pdf, with or without embedded thumbnails
 - Add optional 'pages' property for documents
+- Add rendered border estimating page count for documents
 - Server cli new 'thumb' mode writes thumbnail file
 - Server cli new 'result' subcommand replaces the old 'thumb'
 - Update dependencies; base64, infer, resvg

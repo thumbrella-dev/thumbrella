@@ -11,7 +11,6 @@ use image::imageops::{FilterType, crop_imm, resize, unsharpen};
 
 use crate::cook::{CookStatus, ThumbCook};
 use crate::http_buf::HttpStream;
-use crate::media::FileKind;
 use crate::spec::ThumbnailConfig;
 
 //  Pipeline entry point
@@ -47,10 +46,8 @@ pub async fn deliver<S: HttpStream>(cook: &mut ThumbCook<S>) {
         config.fill_budget,
         pixel_art,
     );
-    if let Some(pages) = document_page_count(cook) {
-        if pages > 1 {
-            buf.draw_page_edges(pages);
-        }
+    if cook.page_edge_thickness >= 2 {
+        buf.draw_page_edges(cook.page_edge_thickness);
     }
     buf.place_on_canvas(
         config.exact_width,
@@ -88,23 +85,6 @@ pub async fn deliver<S: HttpStream>(cook: &mut ThumbCook<S>) {
     cook.tel_deliver_secs = deliver_secs;
     cook.tel_thumbnail_bytes = Some(thumbnail_bytes);
     cook.status = CookStatus::Complete;
-}
-
-/// Read the document page count from the cook's media properties.
-///
-/// Only PDF documents populate `properties.pages` (via the shortcut or the
-/// tier3 `pdftoppm` path).  Returns `None` for non-documents and for
-/// documents where the count could not be determined.
-fn document_page_count<S: HttpStream>(cook: &ThumbCook<S>) -> Option<u32> {
-    if cook.media.kind != Some(FileKind::Document) {
-        return None;
-    }
-    cook.media
-        .properties
-        .as_ref()?
-        .get("pages")?
-        .as_u64()
-        .map(|n| n as u32)
 }
 
 /// Linear interpolation between two RGB colours, clamped to `[0, 1]`.
@@ -317,21 +297,15 @@ impl ProcessBuffer {
 
     /// Draw the page-count border onto the content's right and bottom edges.
     ///
-    /// `pages` is the document page count (>= 2).  The border thickness is
-    /// `floor(log2(pages)) + 1` pixels, clamped to 2..=10.  The right and
-    /// bottom edges carry oscillating gold/purple gradients (the geometry
-    /// tone-map palette) that meet at a 45-degree mitered corner.  The outer
-    /// ends of the two edges (top-right and bottom-left) are chamfered at 45
-    /// degrees with transparent pixels so the stack reads as a bevelled page
-    /// block.  Drawn before `place_on_canvas` so the border tracks the
-    /// document.
-    pub(super) fn draw_page_edges(&mut self, pages: u32) {
+    /// `thickness` is the pre-computed border width in pixels (2..=10), set
+    /// before `deliver` from the document's page count or a rough estimate.
+    pub(super) fn draw_page_edges(&mut self, thickness: u32) {
         // Gold = warm highlight, purple = shadow colour from tier3's
         // stylize_f3d_image tone map.
         const GOLD: [u8; 3] = [236, 212, 155];
         const PURPLE: [u8; 3] = [98, 80, 138];
 
-        let n = (pages.ilog2() as u32 + 1).clamp(2, 10);
+        let n = thickness.clamp(2, 10);
         let (w, h) = self.dimensions();
         if w == 0 || h == 0 {
             return;

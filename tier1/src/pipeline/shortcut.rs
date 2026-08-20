@@ -28,7 +28,7 @@ use crate::cook::ThumbCook;
 use crate::http_buf::HttpStream;
 use crate::media::FileKind;
 use crate::result::RenderHandler;
-use crate::spec::ThumbnailConfig;
+use crate::spec::{page_edge_thickness, ThumbnailConfig};
 
 /// Header bytes needed to locate the embedded thumbnail span.
 ///
@@ -68,6 +68,21 @@ const ZIP_THUMB_NAMES: &[&str] = &[
     "docProps/thumbnail.jpg",   // OOXML variant
     "docProps/thumbnail.png",   // OOXML variant
 ];
+
+/// Approximate uncompressed `content.xml` bytes per rendered page for ODF
+/// documents. Powers-of-2 accuracy is all the page-edge border needs.
+const ODT_CONTENT_BYTES_PER_PAGE: u64 = 11_750;
+
+/// Head-window budget for reading `meta.xml` to recover the exact page count.
+///
+/// ODF stores `meta:page-count` in `meta.xml`, but only some producers write it
+/// (LibreOffice does) and the entry can sit anywhere in the archive.  When the
+/// central directory shows `meta.xml` ends within this many bytes of the file
+/// start, read that head span and surface the exact count; otherwise fall back
+/// to the `content.xml` estimate. I'm fairly certain most Libreoffice written
+/// ODT files keep the metadata on a remote deserted island in the zip contents
+/// that won't be worth streaming to reach.
+const ODT_META_HEAD_BUDGET: u64 = 16 * 1024;
 
 //  Progressive JPEG shortcut
 
@@ -484,8 +499,36 @@ async fn zip_extract<S: HttpStream>(cook: &mut ThumbCook<S>) -> Option<(Vec<u8>,
         cook.http_fetch_range(tail_start, tail_size).await.ok()?
     };
 
-    // Phase 1: find the thumbnail entry from the Central Directory.
-    let entry = zip_find_thumb_entry(&tail, tail_start)?;
+    // Phase 1: scan the Central Directory for the thumbnail entry, the root
+    // content.xml size (the ODF page-count estimate input), and meta.xml.
+    let dir = zip_scan_dir_entry(&tail, tail_start)?;
+
+    // Exact page count from meta.xml when it is within the head budget.
+    // meta.xml holds <meta:document-statistic meta:page-count="N">, written by
+    // LibreOffice and some other producers.  When present and cheap to fetch,
+    // it becomes the real "pages" property and the border uses it directly.
+    let mut exact_pages: Option<u32> = None;
+    if let Some(meta) = &dir.meta_xml {
+        let head_end = meta.local_offset + meta.comp_size + 512; // + local header / fname / extra overhead
+        if head_end <= ODT_META_HEAD_BUDGET {
+            if let Ok(head) = cook.http_read_at(0, head_end as usize).await {
+                if let Some(bytes) = zip_extract_from_buffer(&head, meta, 0) {
+                    exact_pages = odt_meta_page_count(&bytes);
+                }
+            }
+        }
+    }
+
+    if let Some(pages) = exact_pages {
+        record_exact_page_count(cook, pages);
+    } else if let Some(cx) = dir.content_xml_uncomp {
+        // Estimate from content.xml (uncompressed) size.  Powers-of-2 accuracy
+        // only - this drives the page-edge border, never media properties.
+        let est_pages = (cx / ODT_CONTENT_BYTES_PER_PAGE).clamp(1, u32::MAX as u64) as u32;
+        cook.page_edge_thickness = page_edge_thickness(est_pages);
+    }
+
+    let entry = dir.thumb?;
 
     let image_bytes = if entry.local_offset >= tail_start {
         // Thumbnail data sits within the tail window - extract inline,
@@ -513,10 +556,35 @@ async fn zip_extract<S: HttpStream>(cook: &mut ThumbCook<S>) -> Option<(Vec<u8>,
     Some((image_bytes, dl_bytes, tail_size as u64))
 }
 
-/// Find the thumbnail entry from a ZIP tail buffer.  Returns the entry metadata
-/// (local offset, sizes, method) or `None` if no thumbnail is found or the CD
-/// is incomplete.
-fn zip_find_thumb_entry(tail: &[u8], tail_start: u64) -> Option<ZipEntry> {
+/// Record an exact document page count: surface it as the `pages` media
+/// property and derive the page-edge border thickness from it.
+fn record_exact_page_count<S: HttpStream>(cook: &mut ThumbCook<S>, pages: u32) {
+    let mut props = match cook.media.properties.take() {
+        Some(v) if v.is_object() => v,
+        _ => serde_json::json!({}),
+    };
+    props
+        .as_object_mut()
+        .expect("properties is an object here")
+        .insert("pages".into(), serde_json::json!(pages));
+    cook.media.properties = Some(props);
+    cook.page_edge_thickness = page_edge_thickness(pages);
+}
+
+/// Extract the `meta:page-count` value from an ODF `meta.xml` document.
+fn odt_meta_page_count(xml: &[u8]) -> Option<u32> {
+    let text = std::str::from_utf8(xml).ok()?;
+    let needle = "page-count=\"";
+    let idx = text.find(needle)?;
+    let rest = &text[idx + needle.len()..];
+    let end = rest.find('"')?;
+    rest[..end].parse::<u32>().ok()
+}
+
+/// Scan a ZIP tail buffer's Central Directory.  Returns the thumbnail entry
+/// (if any) plus the root `content.xml` uncompressed size (ODF page-count
+/// estimate input), or `None` when the CD is incomplete.
+fn zip_scan_dir_entry(tail: &[u8], tail_start: u64) -> Option<ZipDir> {
     let eocd = zip_find_eocd(tail)?;
     if eocd + 22 > tail.len() {
         return None;
@@ -534,7 +602,7 @@ fn zip_find_thumb_entry(tail: &[u8], tail_start: u64) -> Option<ZipEntry> {
         return None;
     }
 
-    zip_find_thumb(&tail[cd_in_tail..cd_end])
+    Some(zip_scan_dir(&tail[cd_in_tail..cd_end]))
 }
 
 /// Extract and decompress thumbnail data from a buffer that contains the local
@@ -580,6 +648,15 @@ struct ZipEntry {
     method: u16,
 }
 
+/// What the Central Directory scan found: the embedded thumbnail entry (if
+/// any), the root `content.xml` uncompressed size (if present), and the
+/// `meta.xml` entry (if present).
+struct ZipDir {
+    thumb: Option<ZipEntry>,
+    content_xml_uncomp: Option<u64>,
+    meta_xml: Option<ZipEntry>,
+}
+
 //  ZIP helper functions
 
 /// Find the End-of-Central-Directory record by scanning backwards.
@@ -594,8 +671,16 @@ fn zip_find_eocd(buf: &[u8]) -> Option<usize> {
     None
 }
 
-/// Scan a Central Directory buffer for a known thumbnail entry.
-fn zip_find_thumb(cd: &[u8]) -> Option<ZipEntry> {
+/// Scan a Central Directory buffer for the embedded thumbnail entry, the root
+/// `content.xml` entry, and the `meta.xml` entry.  Zero extra I/O - the CD is
+/// already in the tail buffer.  Runs the whole scan (no early return) so all
+/// three are found regardless of their relative order.
+fn zip_scan_dir(cd: &[u8]) -> ZipDir {
+    let mut dir = ZipDir {
+        thumb: None,
+        content_xml_uncomp: None,
+        meta_xml: None,
+    };
     let mut pos = 0;
     while pos + 46 <= cd.len() {
         if &cd[pos..pos + 4] != b"PK\x01\x02" {
@@ -620,8 +705,19 @@ fn zip_find_thumb(cd: &[u8]) -> Option<ZipEntry> {
         let name_end = pos + 46 + fname_len;
         if name_end <= cd.len() {
             let fname = std::str::from_utf8(&cd[pos + 46..name_end]).unwrap_or("");
-            if ZIP_THUMB_NAMES.contains(&fname) {
-                return Some(ZipEntry {
+            if dir.thumb.is_none() && ZIP_THUMB_NAMES.contains(&fname) {
+                dir.thumb = Some(ZipEntry {
+                    local_offset,
+                    comp_size,
+                    uncomp_size,
+                    method,
+                });
+            }
+            if dir.content_xml_uncomp.is_none() && fname == "content.xml" {
+                dir.content_xml_uncomp = Some(uncomp_size);
+            }
+            if dir.meta_xml.is_none() && fname == "meta.xml" {
+                dir.meta_xml = Some(ZipEntry {
                     local_offset,
                     comp_size,
                     uncomp_size,
@@ -631,7 +727,7 @@ fn zip_find_thumb(cd: &[u8]) -> Option<ZipEntry> {
         }
         pos += 46 + fname_len + extra_len + comment_len;
     }
-    None
+    dir
 }
 
 /// Decompress raw DEFLATE (ZIP method 8) bytes.
@@ -1959,15 +2055,7 @@ async fn try_pdf_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     // no thumbnail is found, so the render path still surfaces it.
     let page_count = doc.get_pages().len() as u32;
     if page_count > 0 {
-        let mut props = match cook.media.properties.take() {
-            Some(v) if v.is_object() => v,
-            _ => serde_json::json!({}),
-        };
-        props
-            .as_object_mut()
-            .expect("properties is an object here")
-            .insert("pages".into(), serde_json::json!(page_count));
-        cook.media.properties = Some(props);
+        record_exact_page_count(cook, page_count);
     }
 
     let Some(img) = pdf_extract_thumbnail(&doc) else {
