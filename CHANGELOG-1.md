@@ -3,6 +3,11 @@
 ## Development
 
 
+
+## 1.4.1 - 2026/08/21
+
+Repair regressions in release tools and actions
+
 ## 1.4.0 - 2026/08/21
 
 PDF support and more document metadata and visuals
