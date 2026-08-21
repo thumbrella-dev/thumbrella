@@ -18,7 +18,6 @@ Use `--force` to skip pre-flight checks (e.g. experimental branches).
 Usage:
     python scripts/prepare.py v1.4.0              # prepare everything
     python scripts/prepare.py v1.4.0 --force      # skip pre-flight checks
-    python scripts/prepare.py v1.4.0 --dry-run    # show what would change
 """
 
 import argparse
@@ -350,6 +349,7 @@ def main():
 
     if not version.startswith("v") or len(version) < 6 or not (version[1].isdigit() and version[-1].isdigit()):
         print(red("Version must be formatted with 'v' prefix, like 'v1.2.3'"))
+        sys.exit(1)
 
     print(f"=== Preparing release {version} ===\n")
 
@@ -360,8 +360,10 @@ def main():
     roll_changelog(version)
 
     print("\n--- Version bumps ---")
+    # Strip the 'v' prefix: TOML/JSON version fields must be bare (e.g. 1.4.0).
+    num_version = version[1:]
     for file_rel, key_path, is_toml, extra_keys in VERSION_FILES:
-        bump_version(REPO, file_rel, key_path, is_toml, extra_keys, version)
+        bump_version(REPO, file_rel, key_path, is_toml, extra_keys, num_version)
 
     print("\n--- README sync ---")
     sync_npm_readme()
