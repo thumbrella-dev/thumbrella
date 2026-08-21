@@ -1,0 +1,24 @@
+PackageIdentifier: Thumbrella.Server
+PackageVersion: 1.3.6
+PackageLocale: en-US
+Publisher: Thumbrella
+PublisherUrl: https://thumbrella.dev
+PublisherSupportUrl: https://github.com/thumbrella-dev/thumbrella/issues
+PackageName: Thumbrella Server
+PackageUrl: https://thumbrella.dev
+License: Apache-2.0
+LicenseUrl: https://github.com/thumbrella-dev/thumbrella/blob/v1.3.6/LICENSE
+ShortDescription: Fast thumbnail server for online media
+Description: Thumbrella is a fast thumbnail server for online media, supporting 100+ formats including photos, video, documents, and 3D models through a simple HTTP API.
+Moniker: thumbrella
+Tags:
+  - thumbnail
+  - media
+  - server
+  - images
+  - video
+  - http
+ReleaseNotesUrl: https://github.com/thumbrella-dev/thumbrella/releases/tag/v1.3.6
+ReleaseDate: 2026-08-17
+ManifestType: defaultLocale
+ManifestVersion: 1.12.0

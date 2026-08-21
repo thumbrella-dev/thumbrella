@@ -1,0 +1,17 @@
+PackageIdentifier: Thumbrella.Server
+PackageVersion: 1.3.6
+InstallerLocale: en-US
+Platform:
+  - Windows.Desktop
+MinimumOSVersion: 10.0.0.0
+InstallerType: portable
+InstallModes:
+  - silent
+Commands:
+  - thumbrella
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/thumbrella-dev/thumbrella/releases/download/v1.3.6/thumbrella-v1.3.6-windows-x86_64.zip
+    InstallerSha256: 334D8BFD3F6607B04BFB8E128DF62643465FBC86713BE601D1D14DD5D3B3251C
+ManifestType: installer
+ManifestVersion: 1.12.0
