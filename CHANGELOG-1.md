@@ -2,6 +2,11 @@
 
 ## Development
 
+
+## 1.4.0 - 2026/08/21
+
+PDF support and more document metadata and visuals
+
 - Support pdf, with or without embedded thumbnails
 - Add optional 'pages' property for documents
 - Add rendered border estimating page count for documents
