@@ -18,7 +18,7 @@ For us that is `manifests/t/Thumbrella/Server/<version>/`.
 - **PackageIdentifier:** `Thumbrella.Server`
 - **Publisher:** `Thumbrella`
 - **PackageName:** `Thumbrella Server`
-- **InstallerType:** `portable` (single binary, no installer)
+- **InstallerType:** `zip` with `NestedInstallerType: portable`
 - **InstallerUrl:** the `thumbrella-<tag>-windows-x86_64.zip` GitHub release
   asset. winget extracts the archive and creates a `thumbrella` command shim.
 - **License:** `Apache-2.0`

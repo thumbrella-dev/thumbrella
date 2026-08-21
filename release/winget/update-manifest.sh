@@ -71,6 +71,7 @@ RELEASE_DATE="$(curl -fsS "https://api.github.com/repos/${REPO}/releases/tags/${
 
 # ---- write version manifest --------------------------------------------------
 cat > "${OUT_DIR}/${PACKAGE_IDENTIFIER}.yaml" <<EOF
+# yaml-language-server: \$schema=https://aka.ms/winget-manifest.version.${SCHEMA_VERSION}.schema.json
 PackageIdentifier: ${PACKAGE_IDENTIFIER}
 PackageVersion: ${VERSION}
 DefaultLocale: en-US
@@ -80,6 +81,7 @@ EOF
 
 # ---- write default locale manifest ------------------------------------------
 cat > "${OUT_DIR}/${PACKAGE_IDENTIFIER}.locale.en-US.yaml" <<EOF
+# yaml-language-server: \$schema=https://aka.ms/winget-manifest.defaultLocale.${SCHEMA_VERSION}.schema.json
 PackageIdentifier: ${PACKAGE_IDENTIFIER}
 PackageVersion: ${VERSION}
 PackageLocale: en-US
@@ -108,13 +110,18 @@ EOF
 
 # ---- write installer manifest ------------------------------------------------
 cat > "${OUT_DIR}/${PACKAGE_IDENTIFIER}.installer.yaml" <<EOF
+# yaml-language-server: \$schema=https://aka.ms/winget-manifest.installer.${SCHEMA_VERSION}.schema.json
 PackageIdentifier: ${PACKAGE_IDENTIFIER}
 PackageVersion: ${VERSION}
 InstallerLocale: en-US
 Platform:
   - Windows.Desktop
 MinimumOSVersion: 10.0.0.0
-InstallerType: portable
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+  - RelativeFilePath: thumbrella.exe
+    PortableCommandAlias: thumbrella
 InstallModes:
   - silent
 Commands:
