@@ -88,8 +88,9 @@ aac,flac,opus,vorbis,png,gif \
     --enable-swscale \
     --enable-swresample \
     \
-    --extra-cflags="-O3 -fPIC" \
-    --extra-cxxflags="-O3 -fPIC" \
+    --optflags="-Os" \
+    --extra-cflags="-fPIC" \
+    --extra-cxxflags="-fPIC" \
     2>&1
 
 #  Build

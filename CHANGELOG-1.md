@@ -2,7 +2,7 @@
 
 ## Development
 
-
+- Compiler flags reduce build by 35% (about 9MB smaller on Linux)
 
 ## 1.4.1 - 2026/08/21
 
