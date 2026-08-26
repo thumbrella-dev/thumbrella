@@ -3,17 +3,18 @@
 # [Thumbrella](https://thumbrella.dev)
 
 [Thumbrella](https://thumbrella.dev) brings fast, beautiful thumbnails to any
-online gallery, with support for 100+ formats: photos, video, documents, 3D
+online gallery. Supporting 100+ formats: photos, video, documents, 3D
 models, and other media.
 
-Run the open-source server with one command, zero config, and all the features
-and functionality. Then connect with 
+Run the server with one command and zero config. The open-source server
+comes with all the features and functionality. Then connect with 
 [client packages](https://thumbrella.dev/docs/client/) for the browser or any 
 of the other supported languages. 
 
 Also check out the [Thumbrella Cloud](https://thumbrella.dev/docs/cloud/) for a
 distributed server and caching system. This genuine free tier is built for real
 every day projects; connected in two clicks.
+
 
 ## Quickstart
 
@@ -22,7 +23,7 @@ helpful starting point for operating a thumbnail server.
 
 
 ```bash
-docker run --rm -it -p 3114:3114 thumbrella/server
+docker run --rm --publish 3114:3114 thumbrella/server
 ```
 
 See the [Server Documentation](https://thumbrella.dev/docs/server/)
@@ -41,19 +42,17 @@ More advanced formats will still need additional applications like
 For any commands not available those formats will use a simple placeholder
 thumbnail.
 
-## Alternates
+## Native
 
 The Thumbrella server is also available from several sources. Use the most
 convenient starting point for your environment and tools. The server
-executable is available on Windows and Linux. 
+executable is available on Windows and Linux. This will listen on port `3114`
+by default.
 (macOS still in development)
 
 - npx `npx @thumbrella/server serve`
 
 Or fetch the Rust source and build your own server.
-- `git clone https://github.com/thumbrella-dev/thumbrella && cd thumbrella`
-- `bash ffs/build-linux.sh`  (or build-windows.ps1, or set your own `FFMPEG_DIR`)
-- `cargo run --release`
 
 ### Cloud Server
 
@@ -66,9 +65,10 @@ payment info required.
 The server can easily be used with direct http calls.
 
 ```bash
-curl http://localhost:3114/thumb.jpeg \
-  --data-urlencode "url=https://demo.thumbrella.dev/media/harbor-trucks.mp4" \
-  --output thumb.jpeg 
+curl -OG 
+  http://localhost:3114/thumb.jpeg \
+  --data-urlencode \
+  url=https://demo.thumbrella.dev/media/math-guide.odt
 ```
 
 The best and easiest functionality comes from using one of the 

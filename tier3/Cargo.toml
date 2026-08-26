@@ -35,6 +35,9 @@ tempfile = "3"
 # apply resource limits and drop capabilities on subprocess renderers.
 libc = "0.2"
 
+# wait-timeout: enforce wall-clock deadlines for external renderer processes.
+wait-timeout = "0.2"
+
 # serde: serialization for env_check reports.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
