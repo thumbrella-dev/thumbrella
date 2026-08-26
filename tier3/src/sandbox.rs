@@ -8,7 +8,11 @@
 //! | macOS | setrlimit only |
 //! | Other | no-op |
 
-use std::process::Command;
+use std::io::Read;
+use std::process::{Command, Output};
+use std::time::Duration;
+
+use wait_timeout::ChildExt;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::unix::process::CommandExt;
@@ -21,6 +25,8 @@ use std::os::unix::process::CommandExt;
 /// Zero means "no limit".
 #[derive(Debug, Clone)]
 pub struct SandboxConfig {
+    /// Maximum wall-clock runtime for the subprocess. Zero disables the limit.
+    pub timeout: Duration,
     /// Maximum address space in bytes (RLIMIT_AS).  0 = no limit.
     pub max_memory: u64,
     /// Maximum number of open file descriptors (RLIMIT_NOFILE).  0 = no limit.
@@ -34,6 +40,7 @@ pub struct SandboxConfig {
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
+            timeout: Duration::from_secs(20),
             // 0 = no address space limit - needed for Python-based renderers
             // (usd-core) and FFmpeg that load large native libraries.
             max_memory: 0,
@@ -46,6 +53,56 @@ impl Default for SandboxConfig {
 
 pub fn default_strict() -> SandboxConfig {
     SandboxConfig::default()
+}
+
+/// Run a configured command and enforce its wall-clock deadline.
+///
+/// Captured stdout and stderr are drained concurrently so a noisy renderer
+/// cannot block on a full pipe before its deadline is reached.
+pub fn output(cmd: &mut Command, config: &SandboxConfig) -> std::io::Result<Output> {
+    apply(cmd, config);
+    let mut child = cmd.spawn()?;
+    let stdout = child.stdout.take().map(drain_pipe);
+    let stderr = child.stderr.take().map(drain_pipe);
+
+    let status = if config.timeout.is_zero() {
+        child.wait()?
+    } else {
+        match child.wait_timeout(config.timeout)? {
+            Some(status) => status,
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                join_pipe(stdout)?;
+                join_pipe(stderr)?;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("subprocess timed out after {} seconds", config.timeout.as_secs_f64()),
+                ));
+            }
+        }
+    };
+
+    Ok(Output {
+        status,
+        stdout: join_pipe(stdout)?,
+        stderr: join_pipe(stderr)?,
+    })
+}
+
+fn drain_pipe<R: Read + Send + 'static>(mut pipe: R) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        pipe.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    })
+}
+
+fn join_pipe(handle: Option<std::thread::JoinHandle<std::io::Result<Vec<u8>>>>) -> std::io::Result<Vec<u8>> {
+    match handle {
+        Some(handle) => handle.join().map_err(|_| std::io::Error::other("subprocess output reader panicked"))?,
+        None => Ok(Vec::new()),
+    }
 }
 
 //  pre_exec sandbox
@@ -161,4 +218,23 @@ fn set_rlimit(resource: u32, soft: u64, hard: u64) -> std::io::Result<()> {
     // may fail when the process already has tighter constraints.
     let _ = rc;
     Ok(())
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_terminates_timed_out_child() {
+        let config = SandboxConfig {
+            timeout: Duration::from_millis(50),
+            ..SandboxConfig::default()
+        };
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("sleep 1");
+
+        let err = output(&mut cmd, &config).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+    }
 }

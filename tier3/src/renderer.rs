@@ -474,9 +474,8 @@ fn run_ffmpeg_decode(bytes: &[u8], ext: &str, is_video: bool) -> Result<RenderOu
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
 
-    crate::sandbox::apply(&mut cmd, &crate::sandbox::default_strict());
-
-    let output = cmd.output().map_err(|e| format!("spawn ffmpeg: {e}"))?;
+    let output = crate::sandbox::output(&mut cmd, &crate::sandbox::default_strict())
+        .map_err(|e| format!("run ffmpeg: {e}"))?;
     dump_subprocess("ffmpeg", &output.status, &output.stdout, &output.stderr);
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -947,9 +946,8 @@ fn run_pdftoppm_handler(reader: &mut dyn tier1::ReadSeek) -> Result<RenderOutput
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
 
-    crate::sandbox::apply(&mut cmd, &crate::sandbox::default_strict());
-
-    let output = cmd.output().map_err(|e| format!("spawn pdftoppm: {e}"))?;
+    let output = crate::sandbox::output(&mut cmd, &crate::sandbox::default_strict())
+        .map_err(|e| format!("run pdftoppm: {e}"))?;
 
     dump_subprocess("pdftoppm", &output.status, &output.stdout, &output.stderr);
 
@@ -1151,9 +1149,9 @@ fn run_subprocess_handler(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
 
-    crate::sandbox::apply(&mut cmd, &crate::sandbox::default_strict());
-
-    let status = cmd.status().map_err(|e| format!("spawn {command}: {e}"))?;
+    let output = crate::sandbox::output(&mut cmd, &crate::sandbox::default_strict())
+        .map_err(|e| format!("run {command}: {e}"))?;
+    let status = output.status;
 
     if !status.success() {
         return Err(format!("exited with {status}"));
