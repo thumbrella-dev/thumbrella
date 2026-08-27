@@ -2,6 +2,11 @@
 
 ## Development
 
+
+## 1.5.0 - 2026/08/27
+
+First steps reducing subprocess priveldges, and smaller binaries
+
 - External processes drop priveledges and use restrictions
 - Compiler flags reduce build by 35% (about 9MB smaller on Linux)
 

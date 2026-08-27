@@ -1,6 +1,6 @@
 {
   "name": "@thumbrella/server-win32-x64-msvc",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "description": "Thumbrella server binary for win32-x64-msvc.",
   "license": "Apache-2.0",
   "homepage": "https://thumbrella.dev",
