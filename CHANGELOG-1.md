@@ -2,6 +2,11 @@
 
 ## Development
 
+
+## 1.5.1 - 2026/08/30
+
+Streamling and clarify the tier2 and tier3 handoffs
+
 - Handoff codepaths more flexible on handling
 - Improve tier3 error messages when external tools missing
 
