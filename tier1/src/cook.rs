@@ -343,6 +343,10 @@ pub struct ThumbCook<S: HttpStream> {
     pub out_placeholder: Option<String>,
     /// When set, overrides the source in `to_result()` for placeholder paths.
     pub placeholder_source: Option<ResultSource>,
+    /// Short note from the in-process renderer explaining why it could not
+    /// handle this item (e.g. a required external tool is unavailable).
+    /// Used as the result message when no higher tier can be reached.
+    pub render_note: Option<String>,
     /// Cache outcome - `None` until the cache check runs.
     pub cache_hit: Option<String>,
     /// Wall-clock seconds to generate this result.
@@ -374,6 +378,10 @@ pub struct ThumbCook<S: HttpStream> {
     pub ctx_session_id: Option<String>,
     /// Customer identifier for billing and quota attribution.
     pub ctx_customer_id: Option<String>,
+    /// Maximum cache lifetime for this request, in seconds.
+    /// Defaults to the shared runtime maximum; cloud callers may lower it
+    /// for free accounts without changing the isolate-wide runtime.
+    pub cache_max_ttl_secs: u64,
     /// True if the client connection dropped before this item completed.
     pub ctx_cancelled: bool,
     /// True when this cook was reconstructed from a higher-tier handoff.
@@ -410,6 +418,7 @@ impl<S: HttpStream> ThumbCook<S> {
 
     /// Create a new cook from a fully-specified [`InputSpec`].
     pub fn from_input(input: InputSpec, runtime: Arc<Runtime>) -> Self {
+        let cache_max_ttl_secs = runtime.cache_max_ttl_secs;
         Self {
             status: CookStatus::Processing,
             runtime,
@@ -432,6 +441,7 @@ impl<S: HttpStream> ThumbCook<S> {
             out_message: String::new(),
             out_placeholder: None,
             placeholder_source: None,
+            render_note: None,
             cache_hit: None,
             out_duration: 0.0,
             out_download_bytes: 0,
@@ -448,6 +458,7 @@ impl<S: HttpStream> ThumbCook<S> {
             tel_version_override: None,
             ctx_session_id: None,
             ctx_customer_id: None,
+            cache_max_ttl_secs,
             ctx_cancelled: false,
             ctx_handoff: false,
             cache_resolved: false,
@@ -1335,7 +1346,10 @@ impl<S: HttpStream> ThumbCook<S> {
 
             self.status = CookStatus::Complete;
             self.placeholder_source = Some(ResultSource::Placeholder);
-            self.out_message = "no higher-tier renderer is configured".to_string();
+            self.out_message = self
+                .render_note
+                .clone()
+                .unwrap_or_else(|| "no higher-tier renderer is configured".to_string());
             self.out_duration = t0.elapsed().as_secs_f64();
             self.finish(after)
         }
@@ -1352,7 +1366,7 @@ impl<S: HttpStream> ThumbCook<S> {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let default_expiry = now + self.runtime.cache_default_ttl_secs;
-        let max_expiry = now + self.runtime.cache_max_ttl_secs;
+        let max_expiry = now + self.cache_max_ttl_secs;
 
         self.src
             .cache_hints
@@ -1523,6 +1537,10 @@ impl<S: HttpStream + Send + 'static> crate::renderer::RenderCook for ThumbCook<S
     }
     fn clear_message(&mut self) {
         self.out_message.clear();
+        self.render_note = None;
+    }
+    fn note(&mut self, msg: &str) {
+        self.render_note = Some(msg.to_string());
     }
     fn set_bytes_consumed(&mut self, n: u64) {
         self.render_bytes_consumed = Some(n);

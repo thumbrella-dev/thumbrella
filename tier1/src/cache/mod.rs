@@ -272,6 +272,11 @@ impl CacheStore {
         expires_at: u64,
         after: &mut AfterResponse,
     ) {
+        // Progress snapshots are response-only and must never become cache entries.
+        if result.status == ResultStatus::Intermediate {
+            return;
+        }
+
         //  Sticky cache + inflight fan-out (always, for request dedup)
         #[cfg(feature = "native")]
         if let Some(ref fe) = self.frontend {

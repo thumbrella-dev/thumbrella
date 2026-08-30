@@ -136,7 +136,7 @@ def run_result(binary_name, label):
     env = {**os.environ, "NO_COLOR": "1"}
     for url in TEST_URLS:
         print(f"  {label} thumb: {url}")
-        result = run_capture([str(exe), "result", "--json", url], env=env, timeout=60)
+        result = run_capture([str(exe), "result", "--raw", url], env=env, timeout=60)
         if result.returncode != 0:
             print(f"  FAILED:\n{result.stderr[:500]}")
             return False

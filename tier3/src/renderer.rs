@@ -130,24 +130,26 @@ impl InProcessRenderer for Tier3Renderer {
                 Some(FileKind::Image) if matches!(ext.as_str(), "jpeg" | "jpg") => {
                     if render_image_tier3(cook, &ext).await {
                         true
-                    } else if is_handoff {
-                        false
+                    } else if self.tier2.render(cook).await {
+                        true
                     } else {
-                        self.tier2.render(cook).await
+                        render_image_ffmpeg_fallback(cook, &ext).await
                     }
                 }
                 Some(FileKind::Image) => {
-                    // Try tier2 first (libav is faster for common formats).
-                    // If tier2 claims the format but fails to decode
-                    // (has_render_image is false), fall back to the
-                    // ffmpeg/oiio CLI path below.
-                    let tier2_ok = !is_handoff && self.tier2.render(cook).await && cook.has_render_image();
+                    // Tier 3 is a superset of tier 2: try the builtin libav
+                    // path first (even on handoff), then the external
+                    // ffmpeg/oiio CLI path.
+                    let tier2_ok = self.tier2.render(cook).await && cook.has_render_image();
                     if tier2_ok { true } else { render_image_ffmpeg_fallback(cook, &ext).await }
                 }
                 Some(FileKind::Video) => {
-                    // Try tier2 first (libav is faster).  Fall back to
-                    // ffmpeg CLI for formats libav can't handle.
-                    if !is_handoff && self.tier2.render(cook).await {
+                    // Tier 3 is a superset of tier 2.  Always try the builtin
+                    // libav path first - even on a handoff, since the lower
+                    // tier may not have had libav (e.g. tier 1 routing
+                    // straight to us).  The external ffmpeg CLI is a last
+                    // resort for formats the builtin cannot claim.
+                    if self.tier2.render(cook).await {
                         true
                     } else {
                         render_video_ffmpeg_fallback(cook, &ext).await
@@ -185,6 +187,7 @@ async fn render_image_tier3(cook: &mut dyn RenderCook, ext: &str) -> bool {
         .unwrap_or(false);
 
     if !has_magick {
+        cook.note("external tool unavailable (magick)");
         return false;
     }
 
@@ -633,6 +636,7 @@ async fn render_image_ffmpeg_fallback(cook: &mut dyn RenderCook, ext: &str) -> b
     };
 
     if !tool_available {
+        cook.note(&format!("external tool unavailable ({tool_name})"));
         return false;
     }
 
@@ -716,6 +720,7 @@ async fn render_video_ffmpeg_fallback(cook: &mut dyn RenderCook, ext: &str) -> b
         .map(|b| b.available)
         .unwrap_or(false);
     if !has_ffmpeg {
+        cook.note("external tool unavailable (ffmpeg)");
         return false;
     }
 
@@ -876,6 +881,7 @@ async fn render_document_tier3(cook: &mut dyn RenderCook, ext: &str) -> bool {
         .map(|b| b.available)
         .unwrap_or(false);
     if !available {
+        cook.note("external tool unavailable (pdftoppm)");
         return false;
     }
 
@@ -1047,6 +1053,7 @@ async fn render_geometry_tier3(cook: &mut dyn RenderCook, ext: &str) -> bool {
         .unwrap_or(false);
 
     if !available {
+        cook.note(&format!("external tool unavailable ({})", handler.name));
         return false;
     }
 

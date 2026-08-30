@@ -93,6 +93,21 @@ jobs:
           file "${BINARY}"
           "${BINARY}" version || true
 
+      # Specialized tier2 server binary.  Not part of the release - uploaded
+      # as a 90-day workflow artifact so our deploy tooling can discover and
+      # download it (thumbrella-tier2-linux-x86_64).  Uses a subset of the
+      # tier3 deps already built above, so this adds little build time.
+      - name: Build tier2 (specialized, not shipped)
+        env:
+          RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=lld -C link-arg=-Wl,-u,ff_image_psd_pipe_demuxer"
+        run: |
+          cargo build --release -p tier2
+          mkdir -p tier2-assets
+          cp target/release/tier2 tier2-assets/thumbrella-tier2
+          tar -C tier2-assets -czf thumbrella-tier2-${{ needs.version.outputs.tag }}-linux-x86_64.tar.gz thumbrella-tier2
+          echo "tier2-archive=thumbrella-tier2-${{ needs.version.outputs.tag }}-linux-x86_64.tar.gz" >> "$GITHUB_OUTPUT"
+        id: tier2
+
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
@@ -123,6 +138,14 @@ jobs:
         with:
           name: thumbrella-${{ needs.version.outputs.tag }}-linux-x86_64.tar.gz
           path: thumbrella-${{ needs.version.outputs.tag }}-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+      - name: Upload tier2 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: thumbrella-tier2-linux-x86_64
+          path: thumbrella-tier2-${{ needs.version.outputs.tag }}-linux-x86_64.tar.gz
+          retention-days: 90
           if-no-files-found: error
 
   # ---- Windows x86_64 build + attest ----------------------------------------

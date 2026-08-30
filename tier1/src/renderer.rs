@@ -112,6 +112,10 @@ pub trait RenderCook: Send {
     /// Clear any previously set failure message.  Used when a higher-tier
     /// renderer successfully produces output after a lower tier failed.
     fn clear_message(&mut self);
+    /// Record a short note explaining why this renderer could not handle the
+    /// item (e.g. a required external tool is unavailable).  The cook uses it
+    /// as the result message when no higher tier can be reached.
+    fn note(&mut self, msg: &str);
     /// Report the actual bytes consumed by the renderer (e.g. AVIO bytes from
     /// libav).  When set, this value is preferred over the `file_size` fallback
     /// in the download counter, enabling accurate reporting for formats that
