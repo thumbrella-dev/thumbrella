@@ -9,6 +9,7 @@
 //! <binary> result <url>...          # thumbnail URLs, print result metadata
 //! <binary> check                    # validate runtime config and dependencies
 //! <binary> formats            # list all supported formats by kind
+//! <binary> service            # print deployment config files
 //! <binary> license            # print third-party license notices
 //! <binary> version            # print build version
 //! ```
@@ -101,6 +102,22 @@ enum Command {
         json: bool,
     },
 
+    /// Print or write a deployment config file.
+    ///
+    /// Without an alias, lists the available files. Each file is embedded
+    /// in this binary and adjusted for the running server: the compose
+    /// image tag is pinned to this exact version, and the systemd unit
+    /// points ExecStart at this executable.
+    Service {
+        /// Config file alias (omit to list the available files).
+        alias: Option<String>,
+
+        /// Write to a file instead of printing. Optional path argument;
+        /// defaults to the file's usual name in the current directory.
+        #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "")]
+        write: Option<String>,
+    },
+
     /// Print the build version.
     Version,
 
@@ -149,7 +166,7 @@ where
 
     let cli = Cli::parse();
 
-    let runtime = if !matches!(cli.command, Command::Check { .. } | Command::Formats { .. }) {
+    let runtime = if !matches!(cli.command, Command::Check { .. } | Command::Formats { .. } | Command::Service { .. }) {
         let cfg = crate::config::AppConfig::from_env();
 
         // Fail fast on handshake values that look like auth tokens.
@@ -180,6 +197,7 @@ where
         }
         Command::Check { json } => run_check(json, tier).await,
         Command::Formats { json } => run_formats(json),
+        Command::Service { alias, write } => run_service(alias, write),
         Command::Version => run_version(tier),
         Command::License => run_license(),
     }
@@ -792,4 +810,129 @@ fn run_version(tier: u8) {
 
 fn run_license() {
     print!("{}", include_str!("license.txt"));
+}
+
+//  service
+
+/// One embedded deployment config file, keyed by alias.
+struct ServiceFile {
+    alias: &'static str,
+    /// One-line description shown by the listing.
+    desc: &'static str,
+    /// Default file name for `--write` without a path.
+    file: &'static str,
+    body: &'static str,
+}
+
+/// Deployment config files from the repo `service/` directory, embedded
+/// at compile time.  Each file is valid as-is; [`service_body`] adjusts
+/// it for the running binary before printing.
+const SERVICE_FILES: &[ServiceFile] = &[
+    ServiceFile {
+        alias: "compose",
+        desc: "Docker Compose with persistent sqlite cache",
+        file: "compose.yml",
+        body: include_str!("../../service/compose.yml"),
+    },
+    ServiceFile {
+        alias: "systemd",
+        desc: "systemd unit for bare-metal Linux",
+        file: "thumbrella.service",
+        body: include_str!("../../service/thumbrella.service"),
+    },
+    ServiceFile {
+        alias: "windows",
+        desc: "Windows service setup instructions for NSSM",
+        file: "windows.md",
+        body: include_str!("../../service/windows.md"),
+    },
+];
+
+/// Return a file body adjusted for the running binary.
+///
+/// - compose: pin the image tag to this exact version.
+/// - systemd: point ExecStart at this executable, when discoverable.
+fn service_body(sf: &ServiceFile) -> String {
+    let body = sf.body.to_string();
+    match sf.alias {
+        "compose" => body.replace(
+            "thumbrella/server:latest",
+            &format!("thumbrella/server:{}", crate::TBR_VERSION),
+        ),
+        "systemd" => match std::env::current_exe() {
+            Ok(exe) if exe.is_absolute() => {
+                body.replace("/usr/local/bin/thumbrella", &exe.to_string_lossy())
+            }
+            _ => body,
+        },
+        _ => body,
+    }
+}
+
+fn run_service(alias: Option<String>, write: Option<String>) {
+    let ux = crate::ux::get();
+
+    let Some(alias) = alias else {
+        println!("{}", ux.bold("Thumbrella service config files"));
+        println!("Print one of the service files to show or write a service configuration with instructions.");
+        println!();
+        for sf in SERVICE_FILES {
+            // Pad manually - format specs count ANSI escape bytes, which
+            // would break the column alignment.
+            let pad = " ".repeat(10usize.saturating_sub(sf.alias.len()));
+            println!("  {}{} {}", ux.bold(sf.alias), pad, ux.dim(sf.desc));
+        }
+        println!();
+        println!(
+            "  {} thumbrella service {}",
+            ux.dim("Print one:"),
+            ux.bold("<alias>")
+        );
+        println!(
+            "  {} thumbrella service {} {}",
+            ux.dim("Write a file:"),
+            ux.bold("<alias>"),
+            ux.bold("--write [path]")
+        );
+        println!(
+            "  {} https://thumbrella.dev/docs/server/",
+            ux.dim("Server Docs:")
+        );
+        return;
+    };
+
+    let Some(sf) = SERVICE_FILES.iter().find(|sf| sf.alias == alias.as_str()) else {
+        ux.fatal(
+            &format!("no service config file named \"{alias}\""),
+            "run \"thumbrella service\" with no arguments to list them",
+        );
+    };
+
+    let body = service_body(sf);
+
+    match write {
+        None => print!("{body}"),
+        Some(path) => {
+            let path = if path.is_empty() {
+                std::path::PathBuf::from(sf.file)
+            } else {
+                std::path::PathBuf::from(&path)
+            };
+            // Refuse to clobber - the whole point of printing to stdout
+            // by default is that users can edit these files afterwards.
+            if path.exists() {
+                ux.fatal(
+                    &format!("{} already exists", path.display()),
+                    "delete it first, or pass a different path with --write <path>",
+                );
+            }
+            if let Err(e) = std::fs::write(&path, &body) {
+                ux.fatal(
+                    &format!("could not write {}: {e}", path.display()),
+                    "check that the directory exists and is writable",
+                );
+            }
+            println!("wrote {}", path.display());
+        }
+    }
 }

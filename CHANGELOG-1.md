@@ -2,6 +2,7 @@
 
 ## Development
 
+- Add 'service' subcommand to generate service configurations
 
 ## 1.5.1 - 2026/08/30
 

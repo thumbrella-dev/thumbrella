@@ -1,0 +1,107 @@
+# Thumbrella self-hosted thumbnail server, via Docker Compose.
+#
+# Docs and support:  https://thumbrella.dev
+# Server reference:  https://thumbrella.dev/docs/server/
+#
+# This file works as-is with no edits required. Common commands, run from
+# the directory containing this file:
+#
+#   start     docker compose up -d
+#   status    docker compose ps
+#   logs      docker compose logs -f
+#   stop      docker compose down
+#   upgrade   docker compose pull && docker compose up -d
+#   wipe      docker compose down -v   (also deletes cached thumbnails)
+#
+# The server is configured entirely through environment variables. The
+# interesting ones are shown (commented) below; the full reference is at
+# https://thumbrella.dev/docs/server/
+#
+# Tip: `thumbrella service compose` prints this file with the image
+# tag pinned to the exact version of the server that printed it.
+
+services:
+  thumbrella:
+    # "latest" tracks the newest release. For a production server, pin an
+    # exact version so upgrades only happen when you choose:
+    #   image: thumbrella/server:1.2.3
+    image: thumbrella/server:latest
+
+    # Restarts the server after crashes and reboots, but a manual
+    # `docker compose stop` stays stopped.
+    restart: unless-stopped
+
+    ports:
+      # "host port : container port". The server always listens on 3114
+      # inside the container, so only ever change the left number.
+      # To reach it on port 8080 instead:  "8080:3114"
+      - "3114:3114"
+
+    environment:
+      # Persistent cache. Thumbnails survive restarts and upgrades, and
+      # are stored in the thumbrella_cache volume declared at the bottom.
+      - TBR_CACHE=sqlite:/var/lib/thumbrella/cache.db
+
+      # Uncomment for more detailed startup and request logging.
+      # Values: standard (default), minimal, full.
+      # - TBR_LOG=full
+
+      # Uncomment to require a shared secret on every request. Generate
+      # one with:  openssl rand -hex 24
+      # Clients then connect with TBR_CONNECT=http://host:3114,<secret>
+      # - TBR_HANDSHAKE=change-me
+
+      # Uncomment to let the server thumbnail local files and localhost
+      # URLs. Only enable this on a machine you fully control.
+      # - TBR_ALLOW_LOCAL=true
+
+      # Uncomment together with the tmpfs option below to keep renderer
+      # temp files in RAM instead of on disk.
+      # - TBR_SCRATCH=/scratch
+
+      # Uncomment (with the certs volume below) if the server must fetch
+      # source files over HTTPS signed by an internal/corporate CA.
+      # - SSL_CERT_FILE=/certs/ca.pem
+
+      # Uncomment inside CPU-limited containers. The default is one worker
+      # thread per host core, which can oversubscribe a capped container.
+      # - TOKIO_WORKER_THREADS=2
+
+      # Uncomment to hand off complex formats to another Thumbrella
+      # server (e.g. the free Thumbrella Cloud) instead of rendering
+      # them locally. Value is a connect string, see the docs.
+      # - TBR_TIER3=change-me
+
+    volumes:
+      - thumbrella_cache:/var/lib/thumbrella
+      # Pairs with SSL_CERT_FILE above.
+      # - ./certs:/certs:ro
+
+    # The image ships with a built-in health check (curl /health), so
+    # `docker compose ps` reports healthy/unhealthy on its own.
+
+    # Uncomment to cap memory. Thumbnails for very large sources are
+    # staged on disk rather than in RAM, so 512m is a reasonable floor
+    # for a small deployment.
+    # mem_limit: 512m
+
+    # Pairs with TBR_SCRATCH=/scratch above: a RAM-backed temp dir for
+    # renderer staging. The server caps each render at 100 MiB, but tmpfs
+    # usage counts toward mem_limit, so size accordingly.
+    # tmpfs:
+    #   - /scratch:size=512m
+
+    # To put Thumbrella behind an existing reverse proxy container
+    # (nginx Proxy Manager, Traefik, Caddy, ...): comment out "ports"
+    # above, then uncomment this and set the network name to match the
+    # one your proxy is already on.
+    # networks:
+    #   - proxy
+
+volumes:
+  thumbrella_cache:
+
+# Only needed for the reverse proxy setup above.
+# networks:
+#   proxy:
+#     external: true

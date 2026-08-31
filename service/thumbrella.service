@@ -1,0 +1,78 @@
+# Thumbrella thumbnail server, as a systemd service for bare-metal Linux.
+#
+# Docs and support:  https://thumbrella.dev
+# Server reference:  https://thumbrella.dev/docs/server/
+#
+# Install (as root, with the server binary at /usr/local/bin/thumbrella):
+#
+#   cp thumbrella.service /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now thumbrella
+#
+# Check it is running:
+#
+#   systemctl status thumbrella
+#   journalctl -u thumbrella -f     (live logs)
+#
+# The server is configured entirely through environment variables. Either
+# edit the Environment= lines below, or (cleaner) create /etc/thumbrella.env
+# and keep all settings there. The full reference is at
+# https://thumbrella.dev/docs/server/
+#
+# Tip: `thumbrella service systemd` prints this file with ExecStart
+# pointing at the exact binary that printed it.
+
+[Unit]
+Description=Thumbrella thumbnail server
+Documentation=https://thumbrella.dev/docs/server/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Change this if the binary lives somewhere else. Check with:
+#   which thumbrella
+ExecStart=/usr/local/bin/thumbrella serve
+
+# systemd runs the server as a throwaway user and creates
+# /var/lib/thumbrella (owned by that user) automatically. No useradd
+# needed, and nothing runs as root.
+DynamicUser=yes
+StateDirectory=thumbrella
+
+# Persistent cache. Thumbnails survive restarts and upgrades.
+# Wipe them with:  rm -rf /var/lib/thumbrella
+Environment=TBR_CACHE=sqlite:/var/lib/thumbrella/cache.db
+
+# Plain-text logs: ANSI colour codes show as garbage in journalctl.
+# Delete this line if you want colour (e.g. in a terminal attached with
+# "journalctl -f" or "systemd-run").
+Environment=NO_COLOR=1
+
+# Optional settings live in /etc/thumbrella.env. The leading dash means
+# "don't fail if the file doesn't exist". Example contents:
+#
+#   TBR_PORT=8080
+#   TBR_LOG=full
+#   TBR_HANDSHAKE=change-me
+#
+EnvironmentFile=-/etc/thumbrella.env
+
+# Restart after crashes, but stay stopped after a clean manual stop
+# (systemctl stop thumbrella).
+Restart=on-failure
+RestartSec=2
+
+# Sandbox. These are safe defaults for the formats built into the
+# binary. If you use external tier3 renderers (libreoffice, ImageMagick,
+# F3D) and something stops working, relax these one at a time, starting
+# with ProtectHome (libreoffice wants a writable HOME).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/thumbrella
+
+[Install]
+WantedBy=multi-user.target
