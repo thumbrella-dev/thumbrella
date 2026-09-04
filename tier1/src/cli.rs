@@ -770,6 +770,18 @@ fn run_formats(json: bool) {
         println!();
     }
 
+    // External tools found/missing (registered by tier3).
+    if let Some((found, missing)) = crate::check::format_tools() {
+        println!("  {}", ux.bold("External Tools"));
+        if !found.is_empty() {
+            println!("    found:   {}", found.join(", "));
+        }
+        if !missing.is_empty() {
+            println!("    missing: {}", missing.join(", "));
+        }
+        println!();
+    }
+
     // Summary
     println!(
         "  {}  {} defined, {} enabled",

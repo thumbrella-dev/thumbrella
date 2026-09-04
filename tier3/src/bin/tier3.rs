@@ -109,6 +109,45 @@ async fn main() {
     //  Register check sections
     register_tier3_check(&env_report);
 
+    //  When running local (no TBR_TIER3), report on the external tools:
+    //  - `formats` footer lists which tools were found vs missing
+    //  - the serve banner gets a one-line cloud nudge when headline tools are missing
+    //  - `check` gets a summary (all found, or missing + cloud hint)
+    if tier3_env.is_none() {
+        let mut found: Vec<&str> = Vec::new();
+        let mut missing: Vec<&str> = Vec::new();
+        for (name, info) in &env_report.backends {
+            if matches!(info.method, tier3::env_check::ProbeMethod::Executable { .. }) {
+                if info.available {
+                    found.push(name.as_str());
+                } else {
+                    missing.push(name.as_str());
+                }
+            }
+        }
+        found.sort_unstable();
+        missing.sort_unstable();
+
+        tier1::check::set_format_tools(
+            found.iter().map(|s| s.to_string()).collect(),
+            missing.iter().map(|s| s.to_string()).collect(),
+        );
+
+        if let Some(tip) = missing_tools_tip(&env_report) {
+            tier1::ux::add_startup_tip(tip);
+        }
+
+        let notes = if missing.is_empty() {
+            vec!["all external formats and tools found".to_string()]
+        } else {
+            vec![
+                "external tools and formats missing, see `thumbrella formats` for details,".to_string(),
+                "or set TBR_TIER3 to your Thumbrella Cloud token to enable all formats".to_string(),
+            ]
+        };
+        tier1::check::register_check_notes(notes);
+    }
+
     tier1::cli::run_with_hook(3, |rt| async move {
         let rt = if tier3_env.is_none() {
             tier1::with_renderer(rt, tier3::Tier3Renderer::shared())
@@ -122,6 +161,40 @@ async fn main() {
         }
     })
     .await;
+}
+
+/// Representative headline format per external tool that tier 3 needs.
+/// Used only for the startup cloud nudge.
+const TOOL_FORMAT_EXAMPLES: &[(&str, &str)] = &[
+    ("oiiotool", "exr"),
+    ("f3d", "gltf"),
+    ("pdftoppm", "pdf"),
+];
+
+/// Build the one-line cloud nudge: at most three of the missing tools' formats
+/// plus `and more` when there are more.  `None` when every tool is present.
+fn missing_tools_tip(env: &tier3::env_check::EnvReport) -> Option<String> {
+    let missing: Vec<&str> = TOOL_FORMAT_EXAMPLES
+        .iter()
+        .filter(|(name, _)| env.backends.get(*name).map(|b| !b.available).unwrap_or(false))
+        .map(|(_, ext)| *ext)
+        .collect();
+    if missing.is_empty() {
+        return None;
+    }
+
+    let shown = &missing[..missing.len().min(3)];
+    let mut list = shown
+        .iter()
+        .map(|ext| format!(".{ext}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if missing.len() > shown.len() {
+        list.push_str(" and more");
+    }
+    Some(format!(
+        "install external tools or set TBR_TIER3 to your Cloud token to enable {list}"
+    ))
 }
 
 /// Build tier-3 diagnostic sections from the format manifest and env report.

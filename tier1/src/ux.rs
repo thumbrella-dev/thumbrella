@@ -17,7 +17,7 @@
 //! Hints are shown in `standard` and `full` modes, suppressed in `minimal`.
 
 use std::io::{self, Write};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 //  Once-only warnings
@@ -45,6 +45,31 @@ pub fn warn_localhost_denied() {
             "a localhost or private-network URL was requested, but is denied by default",
             "set TBR_ALLOW_LOCAL=true to allow these URLs",
         );
+    }
+}
+
+//  Startup tips
+
+/// Short extra `#` lines queued by tier binaries to show in the startup
+/// banner (e.g. a cloud nudge).  Printed once, gated by the same hint
+/// setting as the banner (`standard`/`full`).
+static STARTUP_TIPS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+
+/// Queue a short line (without the `  # ` prefix) for the startup banner.
+pub fn add_startup_tip(tip: impl Into<String>) {
+    STARTUP_TIPS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .unwrap()
+        .push(tip.into());
+}
+
+/// Drain and return queued startup tips.  Printed by the serve banner and
+/// the `check` report, whichever runs first in this process.
+pub fn drain_startup_tips() -> Vec<String> {
+    match STARTUP_TIPS.get() {
+        Some(m) => std::mem::take(&mut *m.lock().unwrap()),
+        None => Vec::new(),
     }
 }
 
@@ -218,7 +243,7 @@ impl Ux {
 
         //  Identity
         lines.push(format!(
-            "  #  {} {} - online thumbnail server",
+            "  #  {} {} - thumbnail server",
             Colour::bold("☂  Thumbrella"),
             Colour::dim(version),
         ));
@@ -263,6 +288,13 @@ impl Ux {
             Colour::dim(&format!("TBR_CONNECT=http://localhost:{port}"))
         };
         lines.push(format!("  # clients:  {connect}",));
+
+        //  Startup tips - short extra lines queued by tier binaries (cloud nudges, ...)
+        if self.style.show_hints() {
+            for tip in drain_startup_tips() {
+                lines.push(format!("  # {tip}"));
+            }
+        }
 
         //  Listening (always last)
         let listen_addr = if in_container() {

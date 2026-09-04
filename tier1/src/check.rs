@@ -180,6 +180,35 @@ pub fn collect_sections() -> Vec<CheckSection> {
     CHECK_SECTIONS.read().unwrap().clone()
 }
 
+//  Formats tools + check footer notes
+//
+//  Registered by higher tiers (tier3) after the environment probe.  The
+//  `formats` command prints which external tools were found/missing; the
+//  `check` command prints a short summary under the same conditions.
+
+static FORMAT_TOOLS: std::sync::RwLock<Option<(Vec<String>, Vec<String>)>> = std::sync::RwLock::new(None);
+static CHECK_NOTES: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+
+/// Record the external tools found and missing (for the `formats` output).
+pub fn set_format_tools(found: Vec<String>, missing: Vec<String>) {
+    *FORMAT_TOOLS.write().unwrap() = Some((found, missing));
+}
+
+/// The external tools found and missing, if a higher tier registered them.
+pub fn format_tools() -> Option<(Vec<String>, Vec<String>)> {
+    FORMAT_TOOLS.read().unwrap().clone()
+}
+
+/// Queue footer notes for the `check` report.
+pub fn register_check_notes(notes: Vec<String>) {
+    CHECK_NOTES.write().unwrap().extend(notes);
+}
+
+/// Drain footer notes queued for the `check` report.
+pub fn drain_check_notes() -> Vec<String> {
+    std::mem::take(&mut *CHECK_NOTES.write().unwrap())
+}
+
 /// Full server diagnostic report.
 ///
 /// Collected by [`collect`] from environment variables and `AppConfig`.
@@ -339,7 +368,7 @@ pub fn collect(cfg: &crate::config::AppConfig) -> CheckReport {
             (Some(summary), validation, file_check)
         }
         None => {
-            let default_line = format!("mem: (default, {} MB)", 100,);
+            let default_line = format!("mem (default, {} MB)", 100,);
             (Some(default_line), Validation::ok(), None)
         }
     };
@@ -659,6 +688,15 @@ impl CheckReport {
 
         // TBR_TIER3
         print_tier_var("TBR_TIER3", &self.tier3, &self.tier3_validation);
+
+        //  Tier-specific footer notes (e.g. tier3 external-tools summary)
+        let notes = drain_check_notes();
+        if !notes.is_empty() {
+            println!();
+            for note in notes {
+                println!("{note}");
+            }
+        }
 
         //  Status
         println!();
