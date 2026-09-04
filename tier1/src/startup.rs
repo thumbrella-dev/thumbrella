@@ -24,21 +24,20 @@ pub async fn startup(cfg: &AppConfig) -> Arc<Runtime> {
     // identical requests and enables request coalescing.
     const STICKY_TTL_SECS: u64 = 5;
 
-    let cache = if let Some(ref dsn) = cfg.cache_url {
-        if dsn == "none:" || dsn == "none" {
-            CacheStore::none()
-        } else {
-            match cache::open_from_dsn(dsn) {
-                Ok(backend) => CacheStore::new(backend, STICKY_TTL_SECS),
-                Err(e) => {
-                    tracing::error!("cache: could not open {dsn}: {e} - running without cache");
-                    CacheStore::none()
-                }
+    let cache = match cfg.cache_url.as_deref() {
+        Some(dsn) => match cache::open_from_dsn(dsn) {
+            Ok(Some(backend)) => CacheStore::new(backend, STICKY_TTL_SECS),
+            // none / empty - caching disabled
+            Ok(None) => CacheStore::none(),
+            Err(e) => {
+                tracing::error!("cache: could not open {dsn}: {e} - running without cache");
+                CacheStore::none()
             }
+        },
+        None => {
+            let backend = Arc::new(cache::memory::MemoryCacheBackend::default_cache());
+            CacheStore::new(backend, STICKY_TTL_SECS)
         }
-    } else {
-        let backend = Arc::new(cache::memory::MemoryCacheBackend::default_cache());
-        CacheStore::new(backend, STICKY_TTL_SECS)
     };
 
     //  3. Trace backend

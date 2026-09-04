@@ -3,13 +3,13 @@
 //! Bounded by total approximate byte size or entry count.  Entries are
 //! automatically evicted after their `expires_at` timestamp passes.
 //!
-//! ## DSN format
+//! ## Spec format
 //!
-//! `mem:` with an optional size spec after `#`:
-//! - `mem:`           - default 100 MB
-//! - `mem:/#500`      - max 500 entries
-//! - `mem:/#200mb`    - max 200 MB
-//! - `mem:/#2gb`      - max 2 GB
+//! `mem:` with an optional size (as a single link in a `TBR_CACHE` chain):
+//! - `mem:`        - default 100 MB
+//! - `mem:500`     - max 500 entries
+//! - `mem:200mb`   - max 200 MB
+//! - `mem:2gb`     - max 2 GB
 
 use std::future::Future;
 use std::pin::Pin;

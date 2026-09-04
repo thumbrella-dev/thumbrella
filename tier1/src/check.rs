@@ -280,36 +280,6 @@ pub use crate::dispatch::{
     TIER2_BUILTIN, TIER3_BUILTIN, has_builtin_renderer, mark_tier2_builtin, mark_tier3_builtin,
 };
 
-/// Build a one-line human-readable cache-config summary for `tier1 check`.
-#[cfg(feature = "native")]
-fn build_cache_summary(dsn: &str, _cfg: &crate::config::AppConfig) -> String {
-    let scheme = dsn.split(':').next().unwrap_or(dsn);
-    let rest = dsn.split_once(':').map(|(_, r)| r).unwrap_or("");
-
-    match scheme {
-        "mem" => {
-            if rest.is_empty() {
-                "mem: (default 100 MB)".to_string()
-            } else {
-                format!("mem:{rest}")
-            }
-        }
-        "sqlite" => {
-            let path = rest.split('#').next().unwrap_or(rest);
-            if let Some(size) = rest.split('#').nth(1) {
-                format!("sqlite:{path} (max {size})")
-            } else {
-                format!("sqlite:{path}")
-            }
-        }
-        "cloud" => {
-            let masked = crate::ux::Ux::mask_connect_string(rest);
-            format!("cloud:{masked}")
-        }
-        "none" => "none: (cache disabled)".to_string(),
-        _ => dsn.to_string(),
-    }
-}
 
 /// Collect a diagnostic report for the current process environment.
 ///
@@ -365,7 +335,7 @@ pub fn collect(cfg: &crate::config::AppConfig) -> CheckReport {
     let (cache_config, cache_validation, cache_file_check) = match cfg.cache_url.as_ref() {
         Some(dsn) => {
             let (validation, file_check) = crate::cache::validate_dsn(dsn);
-            let summary = build_cache_summary(dsn, cfg);
+            let summary = crate::cache::describe_dsn(dsn);
             (Some(summary), validation, file_check)
         }
         None => {

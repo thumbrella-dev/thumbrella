@@ -14,7 +14,7 @@
 //! | `TBR_TIER2`                | -       | Tier-2 connect string (URL + optional headers)   |
 //! | `TBR_TIER3`                | -       | Tier-3 connect string (URL + optional headers)   |
 //! | `TBR_HANDSHAKE`            | -       | Shared secret required on all endpoints          |
-//! | `TBR_CACHE`                | -       | Cache backend DSN - `sqlite:<path>`, …           |
+//! | `TBR_CACHE`                | mem:     | Cache spec - chained links with `+` (`none`, `mem[:size]`, `sqlite:path[,size]`, `cloud:connect`) |
 //! | `TBR_TRACE`                | -       | Trace sink DSN - `ndjson:<path>`, …              |
 //! | `TBR_LOG`                  | standard| Output level: `standard`, `minimal`, `full`      |
 //!
@@ -72,8 +72,9 @@ pub struct AppConfig {
     pub handshake: Option<String>,
 
     //  Cache
-    /// Cache backend DSN (`TBR_CACHE`).  Scheme determines backend type:
-    /// `mem:`, `sqlite:`, `none:`.
+    /// Cache backend spec (`TBR_CACHE`).  Zero or more backends chained with
+    /// `+`, fastest first.  Links: `mem[:size]`, `sqlite:path[,size]`,
+    /// `cloud:connect`, or `none` to disable.
     pub cache_url: Option<String>,
     /// Maximum server-side cache TTL in seconds.  Upstream `max-age` values
     /// are capped at this duration.  Default: 7 days (604800).
@@ -130,7 +131,9 @@ impl AppConfig {
             tier3,
             handshake: env_opt_string("TBR_HANDSHAKE"),
             server: env_opt_string("TBR_SERVER"),
-            cache_url: std::env::var("TBR_CACHE").ok(),
+            cache_url: std::env::var("TBR_CACHE")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
             cache_max_ttl_secs: env_opt_u32("TBR_CACHE_MAX_TTL").unwrap_or(604_800) as u64,
             cache_default_ttl_secs: env_opt_u32("TBR_CACHE_DEFAULT_TTL").unwrap_or(3_600) as u64,
             trace_url: std::env::var("TBR_TRACE").ok(),

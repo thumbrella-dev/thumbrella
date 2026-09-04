@@ -1,5 +1,5 @@
 //! Cache integration - `CacheBackend` trait, `CacheStore` runtime holder,
-//! and DSN-based backend construction.
+//! and spec-based backend construction (single backends or a `+` chain).
 //!
 //! ## Async contract
 //!
@@ -27,6 +27,9 @@ pub mod memory;
 
 #[cfg(feature = "native")]
 pub mod cloud;
+
+#[cfg(feature = "native")]
+pub mod chain;
 
 //  Backend trait
 
@@ -310,31 +313,66 @@ pub fn render_cost_from_secs(render_secs: f64) -> u8 {
     (render_ms.min(1000) / 10) as u8
 }
 
-//  DSN parser
+//  Cache spec parser
+//
+//  `TBR_CACHE` selects zero or more cache backends chained with `+`, fastest
+//  first.  Each link's parameters are positional and separated by `,`, so
+//  values are typed by shape rather than named.  Supported links:
+//
+//  - `none`              - disable caching
+//  - `mem[:size]`        - in-memory LRU (default 100 MB; 200mb|2gb|500)
+//  - `sqlite:path[,size]` - persistent SQLite cache
+//  - `cloud:connect`     - cloud-service cache (single opaque value)
 
-/// Build a single cache backend from a DSN string.
+/// Open the backends described by a `TBR_CACHE` spec.
 ///
-/// Supported schemes:
-/// - `mem:<size>` - in-memory LRU cache (e.g. `mem:200mb`, `mem:`, default 100 MB)
-/// - `sqlite:<path>[#<size>]` - persistent SQLite cache (e.g. `sqlite:cache.db#1gb`)
-/// - `cloud:<token>` - cloud-service cache (e.g. `cloud:tbr_e_3QnzBcWx7KpRmYT2000example`)
-/// - `none:` - disable caching
+/// Returns `Ok(None)` only for the explicit disable forms `none` (or legacy
+/// `none:`).  A blank spec is an error - an unset or blank `TBR_CACHE` means
+/// "use the default" and is normalized away by config before this parser is
+/// reached.  A single link returns that backend directly; multiple links
+/// return a [`chain::ChainCacheBackend`].
 #[cfg(feature = "native")]
-pub fn open_from_dsn(dsn: &str) -> Result<Arc<dyn CacheBackend>, String> {
-    // none: - explicit no-cache.  Must not have extra content.
-    if dsn == "none:" || dsn == "none" {
-        return Err("none: requested - no cache backend to open".to_string());
+pub fn open_from_dsn(dsn: &str) -> Result<Option<Arc<dyn CacheBackend>>, String> {
+    let spec = dsn.trim();
+    if spec == "none" || spec == "none:" {
+        return Ok(None);
     }
-    if dsn.starts_with("none:") {
-        return Err("none: takes no parameters - use just 'none:' to disable caching".to_string());
+    if spec.is_empty() {
+        return Err(
+            "empty cache spec - omit TBR_CACHE for the default, or set TBR_CACHE=none to disable"
+                .to_string(),
+        );
     }
 
-    let (scheme, rest) = dsn
-        .split_once(':')
-        .ok_or_else(|| format!("invalid cache spec '{dsn}' - expected <scheme>:<value>"))?;
+    let mut backends: Vec<Arc<dyn CacheBackend>> = Vec::new();
+    for link in spec.split('+') {
+        let link = link.trim();
+        if link.is_empty() {
+            return Err(format!("invalid cache spec '{dsn}' - empty link in chain"));
+        }
+        backends.push(open_link(link)?);
+    }
+
+    if backends.len() == 1 {
+        Ok(Some(backends.pop().unwrap()))
+    } else {
+        Ok(Some(Arc::new(chain::ChainCacheBackend::new(backends))))
+    }
+}
+
+/// Open a single cache link (`scheme:params` segment) into a backend.
+#[cfg(feature = "native")]
+fn open_link(spec: &str) -> Result<Arc<dyn CacheBackend>, String> {
+    let (scheme, rest) = match spec.split_once(':') {
+        Some((s, r)) => (s.trim(), r),
+        None => (spec.trim(), ""),
+    };
 
     match scheme {
         "mem" => {
+            if rest.contains(',') {
+                return Err("mem cache takes a single optional size: 'mem[:size]'".to_string());
+            }
             let backend = if rest.is_empty() {
                 memory::MemoryCacheBackend::default_cache()
             } else {
@@ -350,13 +388,31 @@ pub fn open_from_dsn(dsn: &str) -> Result<Arc<dyn CacheBackend>, String> {
             Ok(Arc::new(backend))
         }
         "sqlite" => {
-            let (path, size_spec) = match rest.split_once('#') {
-                Some((p, s)) => (p, Some(s)),
-                None => (rest, None),
+            let parts: Vec<&str> = rest.split(',').collect();
+            if parts.len() > 2 {
+                return Err("sqlite cache takes at most two parameters: 'sqlite:path[,size]'".to_string());
+            }
+            let path = parts[0].trim();
+            if path.is_empty() {
+                return Err("sqlite cache requires a file path: 'sqlite:path[,size]'".to_string());
+            }
+            let max_bytes = match parts.get(1) {
+                None => None,
+                Some(size) => {
+                    let size = size.trim();
+                    if size.is_empty() {
+                        return Err("sqlite cache: empty size after ',' - expected e.g. 1gb".to_string());
+                    }
+                    match memory::parse_mem_size(size)
+                        .map_err(|e| format!("sqlite cache: {e}"))?
+                    {
+                        Some((bytes, "bytes")) => Some(bytes),
+                        _ => {
+                            return Err("sqlite cache: size must carry a byte unit (kb/mb/gb/tb)".to_string())
+                        }
+                    }
+                }
             };
-            let max_bytes = size_spec
-                .and_then(|s| memory::parse_mem_size(s).ok().flatten())
-                .and_then(|(v, kind)| if kind == "bytes" { Some(v) } else { None });
             let backend = sqlite::SqliteCacheBackend::open_with_limit(path, max_bytes)
                 .map_err(|e| format!("sqlite cache: {e}"))?;
             Ok(Arc::new(backend))
@@ -366,56 +422,202 @@ pub fn open_from_dsn(dsn: &str) -> Result<Arc<dyn CacheBackend>, String> {
             cloud::CloudCacheBackend::new(target).map(|b| Arc::new(b) as Arc<dyn CacheBackend>)
         }
         other => Err(format!(
-            "unsupported cache scheme '{other}' - supported: mem:, sqlite:, cloud:, none:"
+            "unsupported cache scheme '{other}' - supported: mem:, sqlite:, cloud:, none"
         )),
     }
 }
 
-/// Validate a `TBR_CACHE` DSN and produce a diagnostic report.
+/// Validate a `TBR_CACHE` spec and produce a diagnostic report.
+///
+/// Returns `(validation, file_check)`.  The file check covers the first
+/// file-backed (sqlite) link in the chain; remaining links are validated but
+/// not file-checked.
 #[cfg(feature = "native")]
 pub fn validate_dsn(dsn: &str) -> (crate::check::Validation, Option<crate::check::FileCheck>) {
-    if dsn == "none:" || dsn == "none" {
+    let spec = dsn.trim();
+    if spec == "none" || spec == "none:" {
         return (crate::check::Validation::ok(), None);
     }
-    if dsn.starts_with("none:") {
+    if spec.is_empty() {
         return (
             crate::check::Validation::error(
-                "none: takes no parameters - use just 'none:' to disable caching",
+                "empty cache spec - omit TBR_CACHE for the default, or set TBR_CACHE=none to disable",
             ),
             None,
         );
     }
 
-    let scheme = dsn.split(':').next().unwrap_or(dsn);
-    match scheme {
-        "mem" => {
-            let rest = dsn.strip_prefix("mem:").unwrap_or("");
-            if rest.is_empty() {
-                (crate::check::Validation::ok(), None)
-            } else {
-                match memory::parse_mem_size(rest) {
-                    Ok(_) => (crate::check::Validation::ok(), None),
-                    Err(e) => (crate::check::Validation::error(e), None),
+    let mut file_check: Option<crate::check::FileCheck> = None;
+    for link in spec.split('+') {
+        let link = link.trim();
+        if link.is_empty() {
+            return (
+                crate::check::Validation::error(format!("invalid cache spec '{dsn}' - empty link in chain")),
+                None,
+            );
+        }
+        match validate_link(link) {
+            Ok(check) => {
+                if file_check.is_none() {
+                    file_check = check;
                 }
             }
+            Err(message) => return (crate::check::Validation::error(message), None),
         }
-        "cloud" => (crate::check::Validation::skipped(), None),
-        "sqlite" => {
-            let rest = dsn.strip_prefix("sqlite:").unwrap_or("");
-            let path = rest.split('#').next().unwrap_or(rest);
-            if path.is_empty() {
-                return (crate::check::Validation::error("sqlite: requires a file path"), None);
+    }
+    (crate::check::Validation::ok(), file_check)
+}
+
+/// Validate a single cache link.  Returns an optional file check for
+/// file-backed links.
+#[cfg(feature = "native")]
+fn validate_link(spec: &str) -> Result<Option<crate::check::FileCheck>, String> {
+    let (scheme, rest) = match spec.split_once(':') {
+        Some((s, r)) => (s.trim(), r),
+        None => (spec.trim(), ""),
+    };
+    match scheme {
+        "mem" => {
+            if rest.is_empty() {
+                Ok(None)
+            } else if rest.contains(',') {
+                Err("mem cache takes a single optional size: 'mem[:size]'".to_string())
+            } else {
+                memory::parse_mem_size(rest).map(|_| None)
             }
-            (
-                crate::check::Validation::skipped(),
-                Some(sqlite::SqliteCacheBackend::check(path)),
-            )
         }
-        _ => (
-            crate::check::Validation::error(format!(
-                "unknown cache scheme '{scheme}' - supported: mem:, sqlite:, cloud:, none:"
-            )),
-            None,
-        ),
+        "cloud" => Ok(None),
+        "sqlite" => {
+            let parts: Vec<&str> = rest.split(',').collect();
+            if parts.len() > 2 {
+                return Err("sqlite cache takes at most two parameters: 'sqlite:path[,size]'".to_string());
+            }
+            let path = parts[0].trim();
+            if path.is_empty() {
+                return Err("sqlite cache requires a file path: 'sqlite:path[,size]'".to_string());
+            }
+            if let Some(size) = parts.get(1) {
+                let size = size.trim();
+                if size.is_empty() {
+                    return Err("sqlite cache: empty size after ',' - expected e.g. 1gb".to_string());
+                }
+                match memory::parse_mem_size(size)? {
+                    Some((_, "bytes")) => {}
+                    _ => {
+                        return Err("sqlite cache: size must carry a byte unit (kb/mb/gb/tb)".to_string())
+                    }
+                }
+            }
+            Ok(Some(sqlite::SqliteCacheBackend::check(path)))
+        }
+        other => Err(format!(
+            "unsupported cache scheme '{other}' - supported: mem:, sqlite:, cloud:, none"
+        )),
+    }
+}
+
+/// Human-readable summary of a `TBR_CACHE` spec for `--check` reports.
+/// Cloud connect tokens are masked.
+#[cfg(feature = "native")]
+pub fn describe_dsn(dsn: &str) -> String {
+    let spec = dsn.trim();
+    if spec.is_empty() {
+        return "mem (default 100 MB)".to_string();
+    }
+    if spec == "none" || spec == "none:" {
+        return "none (cache disabled)".to_string();
+    }
+    spec.split('+')
+        .map(|link| describe_link(link.trim()))
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+#[cfg(feature = "native")]
+fn describe_link(spec: &str) -> String {
+    let (scheme, rest) = match spec.split_once(':') {
+        Some((s, r)) => (s.trim(), r),
+        None => (spec.trim(), ""),
+    };
+    match scheme {
+        "mem" => {
+            if rest.is_empty() {
+                "mem (default 100 MB)".to_string()
+            } else {
+                format!("mem:{rest}")
+            }
+        }
+        "sqlite" => {
+            let mut parts = rest.split(',');
+            let path = parts.next().unwrap_or("").trim();
+            let size = parts.next().map(|s| s.trim()).unwrap_or("");
+            if size.is_empty() {
+                format!("sqlite:{path}")
+            } else {
+                format!("sqlite:{path} (max {size})")
+            }
+        }
+        "cloud" => format!("cloud:{}", crate::ux::Ux::mask_connect_string(rest)),
+        _ => spec.to_string(),
+    }
+}
+
+#[cfg(all(test, feature = "native"))]
+mod tests {
+    use super::*;
+    use crate::check::ValidationStatus;
+
+    #[test]
+    fn none_disables() {
+        for spec in ["none", "none:"] {
+            assert!(matches!(open_from_dsn(spec), Ok(None)), "{spec:?}");
+        }
+        // Blank is NOT "disable" - it means default.  The parser rejects it so
+        // the caller never mistakes an empty TBR_CACHE for an explicit none.
+        assert!(open_from_dsn("").is_err());
+        assert!(open_from_dsn("   ").is_err());
+    }
+
+    #[test]
+    fn single_backends() {
+        assert_eq!(open_from_dsn("mem").unwrap().unwrap().name(), "memory");
+        assert_eq!(open_from_dsn("mem:200mb").unwrap().unwrap().name(), "memory");
+        assert_eq!(open_from_dsn("mem:500").unwrap().unwrap().name(), "memory");
+    }
+
+    #[test]
+    fn chain_builds() {
+        let chain = open_from_dsn("mem:20+mem:30").unwrap().unwrap();
+        assert_eq!(chain.name(), "chain");
+        // A chain of two memory backends reads and writes without panicking.
+        let got = tokio::runtime::Runtime::new().unwrap().block_on(chain.get("key"));
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn reject_invalid() {
+        assert!(open_from_dsn("bogus:x").is_err());
+        assert!(open_from_dsn("mem:1gb,2gb").is_err()); // mem takes one param
+        assert!(open_from_dsn("sqlite:").is_err()); // path required
+        assert!(open_from_dsn("sqlite:/tmp/x.db,20").is_err()); // size needs a byte unit
+        assert!(open_from_dsn("mem++mem").is_err()); // empty link
+        assert!(open_from_dsn("none+mem").is_err()); // none cannot chain
+    }
+
+    #[test]
+    fn validate_and_describe() {
+        let spec = "mem:64mb+sqlite:/tmp/tbr-cache-test.db,1gb";
+        let (v, fc) = validate_dsn(spec);
+        assert_eq!(v.status, ValidationStatus::Ok);
+        assert!(fc.is_some());
+        assert_eq!(
+            describe_dsn(spec),
+            "mem:64mb+sqlite:/tmp/tbr-cache-test.db (max 1gb)"
+        );
+        let (bad, _) = validate_dsn("mem:64mb+bogus");
+        assert_eq!(bad.status, ValidationStatus::Error);
+        let (blank, _) = validate_dsn("");
+        assert_eq!(blank.status, ValidationStatus::Error);
+        assert_eq!(describe_dsn("none"), "none (cache disabled)");
     }
 }
