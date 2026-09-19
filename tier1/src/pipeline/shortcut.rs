@@ -15,9 +15,9 @@
 //! Supported paths:
 //! - JPEG: EXIF IFD1 `JPEGInterchangeFormat` thumbnail
 //! - TIFF: embedded JPEG via IFD traversal
-//! - ZIP containers (ODT, DOCX, …): single tail Range fetch that covers both
-//!   the Central Directory and the embedded thumbnail data, with no further
-//!   requests needed
+//! - ZIP containers (ODT, DOCX, …): tail Range fetch to read the Central
+//!   Directory; a near-end embedded thumbnail is extracted inline, otherwise
+//!   its bytes are fetched via a targeted `read_at` on the open connection
 
 use std::collections::{HashSet, VecDeque};
 use web_time::Instant;
@@ -39,17 +39,18 @@ const HEADER_SCAN: usize = 4 * 1024;
 
 /// Tail bytes to fetch for the ZIP container shortcut.
 ///
-/// Tail bytes to fetch for the ZIP container shortcut.
+/// The window must capture the End-of-Central-Directory record plus the whole
+/// Central Directory so the thumbnail entry can be located with zero extra
+/// I/O.  Any embedded thumbnail whose stored data also falls inside the window
+/// is extracted inline; a thumbnail stored earlier in the archive (e.g.
+/// `Thumbnails/thumbnail.png` near the front of a large ODT) is read through
+/// the out-of-tail `read_at` path in `zip_extract` while the connection is
+/// still open.
 ///
-/// Sizing rationale (ODT test file):
-/// - Central Directory: 649 bytes from EOF
-/// - Thumbnail PNG (83.7 KB stored): starts 88.3 KB from EOF
-/// - 128 KB tail gives ~40 KB margin over the observed minimum, comfortably
-///   covering LibreOffice thumbnails up to roughly 120 KB (256×256 px, complex
-///   content).  DOCX thumbnails (JPEG) are much smaller - typically under 50 KB.
-///
-/// Tier 1 default is 128 KiB; tier 2 uses 2 MiB to cover larger documents.
-/// The actual value at runtime comes from `cook.runtime.shortcut_limits.zip_tail_size`.
+/// Tier values (see [`crate::spec::ShortcutLimits`]):
+/// - Tier 1 (`ShortcutLimits::TIER1`): 128 KiB
+/// - Tier 2 / tier 3 (`ShortcutLimits::TIER2`): 256 KiB
+/// The runtime value lives in `cook.runtime.shortcut_limits.zip_tail_size`.
 ///
 /// Header bytes for the camera-raw shortcut.
 ///
