@@ -90,22 +90,35 @@ fn source_label(source: &ResultSource) -> &'static str {
     }
 }
 
-/// Log a completed thumbnail result through the UX layer.
-fn log_result(result: &crate::ThumbResult, duration_ms: u64) {
-    let ux = ux::get();
-    let media = result.media.as_ref();
-    // Use the remote HTTP status when available (reflects what the source
-    // server returned), falling back to our result-status mapping.
-    let status_code = result.http_status.unwrap_or(match result.status {
+/// Status code to report for a result in the terminal log.
+///
+/// Prefers the upstream status the pipeline captured (e.g. `304`), then maps
+/// the result status.  A `not_modified` result with no upstream status means
+/// the caller's cache token was still fresh, so nothing was re-made - it is
+/// logged as `304` to match the revalidation path.
+fn result_status_code(result: &crate::ThumbResult) -> u16 {
+    if let Some(code) = result.http_status {
+        return code;
+    }
+    if result.source == Some(ResultSource::NotModified) {
+        return 304;
+    }
+    match result.status {
         crate::result::ResultStatus::Success => 200,
         crate::result::ResultStatus::Failed => 500,
         crate::result::ResultStatus::Overloaded => 503,
         crate::result::ResultStatus::Intermediate => 102,
         crate::result::ResultStatus::BatchLimit => 422,
-    });
+    }
+}
+
+/// Log a completed thumbnail result through the UX layer.
+fn log_result(result: &crate::ThumbResult, duration_ms: u64) {
+    let ux = ux::get();
+    let media = result.media.as_ref();
     ux.log_thumb_result(
         &result.url,
-        status_code,
+        result_status_code(result),
         duration_ms,
         media.map(|m| kind_str(m.kind)),
         media.map(|m| m.extension.as_str()),
@@ -137,8 +150,7 @@ pub async fn health(headers: HeaderMap, connect_info: ConnectInfo<SocketAddr>) -
     let ip = client_ip(&headers, Some(&connect_info.0)).unwrap_or_else(|| "?".to_string());
 
     if full_log || n < 20 {
-        let line = format!("GET /health from {ip}\n");
-        let _ = std::io::Write::write_all(&mut std::io::stdout(), line.as_bytes());
+        ux::get().log_request("GET", "/health", 200, Some(&ip), None);
     } else if !HINT_SHOWN.swap(true, Ordering::Relaxed) {
         let line = "  # hint: no longer showing /health requests, use TBR_LOG=full to see them\n";
         let _ = std::io::Write::write_all(&mut std::io::stdout(), line.as_bytes());
@@ -155,7 +167,14 @@ pub async fn health(headers: HeaderMap, connect_info: ConnectInfo<SocketAddr>) -
 /// When `TBR_HANDSHAKE` is set the thumbnail demo links are hidden (they
 /// would fail without the handshake header) and the connect string includes
 /// a placeholder for the secret.
-pub async fn landing(State(runtime): State<Arc<Runtime>>) -> Response {
+pub async fn landing(
+    State(runtime): State<Arc<Runtime>>,
+    headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
+) -> Response {
+    let ip = client_ip(&headers, Some(&connect_info.0));
+    ux::get().log_request("GET", "/", 200, ip.as_deref(), None);
+
     let template = include_str!("landing.html");
 
     let has_handshake = runtime.handshake.is_some();
@@ -194,32 +213,13 @@ pub async fn not_found(
     connect_info: ConnectInfo<SocketAddr>,
 ) -> Response {
     let ip = client_ip(&headers, Some(&connect_info.0));
-    let line = format!(
-        "{} {} from {} - 404 not found\n",
-        colour::cyan(method.as_str()),
-        uri.path(),
-        ip.as_deref().unwrap_or("?"),
-    );
-    let _ = std::io::Write::write_all(&mut std::io::stdout(), line.as_bytes());
+    ux::get().log_request(method.as_str(), uri.path(), 404, ip.as_deref(), Some("not found"));
     (StatusCode::NOT_FOUND, Json(json!({ "error": "not found" }))).into_response()
 }
 
 /// Log a request that returned early with an error (missing param, bad URL, etc.).
 fn log_early_exit(method: &str, path: &str, reason: &str, ip: &Option<String>) {
-    let ip_str = ip.as_deref().unwrap_or("?");
-    let line = format!("{} {} from {} - 400 {}\n", colour::cyan(method), path, ip_str, reason,);
-    let _ = std::io::Write::write_all(&mut std::io::stdout(), line.as_bytes());
-}
-
-/// Tiny colour helpers - duplicated here to avoid a circular dep on ux.
-mod colour {
-    pub(super) fn cyan(s: &str) -> String {
-        if std::env::var("NO_COLOR").is_ok_and(|v| !v.is_empty()) {
-            s.to_string()
-        } else {
-            format!("\x1b[36m{s}\x1b[0m")
-        }
-    }
+    ux::get().log_request(method, path, 400, ip.as_deref(), Some(reason));
 }
 
 //  GET /placeholder/:kind.jpeg
@@ -321,10 +321,15 @@ pub async fn thumb(
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": "url parameter is required" })))
             .into_response();
     }
-    let url = match normalize_url(url_raw, runtime.allow_local) {
+    let url = match normalize_url(url_raw.clone(), runtime.allow_local) {
         Ok(u) => u,
         Err(msg) => {
-            log_early_exit(method.as_str(), "/thumb.jpeg", msg, &ip);
+            log_early_exit(
+                method.as_str(),
+                "/thumb.jpeg",
+                &format!("{msg} ({url_raw})"),
+                &ip,
+            );
             return (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response();
         }
     };
@@ -344,7 +349,7 @@ pub async fn thumb(
         method.as_str(),
         "/thumb.jpeg",
         &url,
-        200,
+        result_status_code(&result),
         duration_ms,
         media.map(|m| kind_str(m.kind)),
         media.map(|m| m.extension.as_str()),
@@ -390,9 +395,18 @@ pub async fn batch(
     let mut jobs = Vec::with_capacity(req.items.len());
     for (idx, input) in req.items.into_iter().enumerate() {
         let (url, cache) = input.into_parts();
-        let url = match normalize_url(url, runtime.allow_local) {
+        let url = match normalize_url(url.clone(), runtime.allow_local) {
             Ok(u) => u,
-            Err(msg) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response(),
+            Err(msg) => {
+                // One rejected item aborts the whole batch - no item is
+                // processed, so report what was refused and why.
+                log_early_exit("POST", "/batch", &format!("{msg} ({url})"), &ip);
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": format!("items[{idx}]: {msg}") })),
+                )
+                    .into_response();
+            }
         };
         jobs.push((
             idx,

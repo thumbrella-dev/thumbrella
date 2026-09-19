@@ -4,6 +4,7 @@
 
 - Simplify cache configuration strings
 - Add 'service' subcommand to generate service configurations
+- Server log printing and formatting more consistent
 
 ## 1.5.1 - 2026/08/30
 

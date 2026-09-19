@@ -138,6 +138,9 @@ impl Colour {
     fn magenta(s: &str) -> String {
         if use_colour() { format!("\x1b[35m{s}\x1b[0m") } else { s.to_string() }
     }
+    fn blue(s: &str) -> String {
+        if use_colour() { format!("\x1b[34m{s}\x1b[0m") } else { s.to_string() }
+    }
     fn dim(s: &str) -> String {
         if use_colour() { format!("\x1b[2m{s}\x1b[0m") } else { s.to_string() }
     }
@@ -201,6 +204,27 @@ impl Ux {
     }
     pub fn bold(&self, s: &str) -> String {
         Colour::bold(s)
+    }
+
+    /// Colour a numeric HTTP status code by class.
+    ///
+    /// | class | colour | meaning                                             |
+    /// |-------|--------|-----------------------------------------------------|
+    /// | 2xx   | green  | clean success                                       |
+    /// | 3xx   | blue   | nothing was re-made (redirect / `304 Not Modified`) |
+    /// | other | red    | the request failed - 4xx caller, 5xx ours/upstream  |
+    ///
+    /// 3xx is deliberately not red: a `304` means the caller's cached copy is
+    /// still good, which is the cheapest possible outcome, not an error.
+    pub fn status_colour(&self, status: u16) -> String {
+        let s = status.to_string();
+        if (200..300).contains(&status) {
+            Colour::green(&s)
+        } else if (300..400).contains(&status) {
+            Colour::blue(&s)
+        } else {
+            Colour::red(&s)
+        }
     }
 
     /// Pretty-print and colour a JSON string for terminal display.
@@ -410,6 +434,33 @@ impl Ux {
         let _ = io::stdout().write_all(header.as_bytes());
     }
 
+    /// Log a request that is not a thumbnail render - `/`, `/health`, and the
+    /// error exits.  One line per request, sharing the status colouring of the
+    /// thumbnail results but without a duration or media description.
+    pub fn log_request(
+        &self,
+        method: &str,
+        path: &str,
+        status: u16,
+        client_ip: Option<&str>,
+        message: Option<&str>,
+    ) {
+        let ip = match client_ip {
+            Some(ip) => format!(" from {ip}"),
+            None => String::new(),
+        };
+        let msg_str = match message {
+            Some(m) if !m.is_empty() => Colour::yellow(&format!("  {m}")),
+            _ => String::new(),
+        };
+        let line = format!(
+            "{method} {path}{ip}  {status}{msg_str}\n",
+            method = Colour::cyan(method),
+            status = self.status_colour(status),
+        );
+        let _ = io::stdout().write_all(line.as_bytes());
+    }
+
     /// Log a single thumbnail result.  Call for each item in a batch.
     #[allow(clippy::too_many_arguments)]
     pub fn log_thumb_result(
@@ -422,13 +473,7 @@ impl Ux {
         _source: Option<&str>,
         message: Option<&str>,
     ) {
-        let status_str = if (200..300).contains(&status) {
-            Colour::green(&format!("{}", status))
-        } else if (400..500).contains(&status) {
-            Colour::yellow(&format!("{}", status))
-        } else {
-            Colour::red(&format!("{}", status))
-        };
+        let status_str = self.status_colour(status);
 
         let format_str = match (kind, extension) {
             (Some(k), Some(e)) if !e.is_empty() => format!("{k} {e}"),
@@ -437,7 +482,7 @@ impl Ux {
         };
 
         let msg_str = match message {
-            Some(m) if !m.is_empty() => format!(" - {m}"),
+            Some(m) if !m.is_empty() => Colour::yellow(&format!(" - {m}")),
             _ => String::new(),
         };
 
@@ -447,7 +492,6 @@ impl Ux {
             duration = duration_ms,
             format_str = format_str,
             url = Colour::dim(url),
-            msg_str = Colour::yellow(&msg_str),
         );
         let _ = io::stdout().write_all(line.as_bytes());
     }
