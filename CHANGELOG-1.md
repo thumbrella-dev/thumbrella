@@ -2,6 +2,12 @@
 
 ## Development
 
+
+## 1.5.2 - 2026/09/21
+
+New service command and simplify cache config and server output.
+Ffmpeg upgrade brings important security updates (Linux only for now)
+
 - Update ffmpeg 8.1.3 (on linux), rustls, and other indirect dependencies
 - Simplify cache configuration strings
 - Add 'service' subcommand to generate service configurations
