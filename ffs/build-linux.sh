@@ -25,7 +25,7 @@ if [[ "${1:-}" == "--prefix" ]]; then
 fi
 
 #  FFmpeg 
-FFMPEG_VERSION=8.1.2
+FFMPEG_VERSION=8.1.3
 FFMPEG_TARBALL=ffmpeg-${FFMPEG_VERSION}.tar.gz
 FFMPEG_SRC_URL="https://ffmpeg.org/releases/${FFMPEG_TARBALL}"
 FFMPEG_BUILD_DIR="${PROJECT_ROOT}/target/ffmpeg-build"

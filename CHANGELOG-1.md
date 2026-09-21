@@ -2,6 +2,7 @@
 
 ## Development
 
+- Update ffmpeg 8.1.3 (on linux), rustls, and other indirect dependencies
 - Simplify cache configuration strings
 - Add 'service' subcommand to generate service configurations
 - Server log printing and formatting more consistent
