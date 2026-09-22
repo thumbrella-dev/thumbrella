@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<!-- Thumbrella Browser client example
+
+This is an overly simplified example of using the browser client for Thumbrella.
+The actual Typescript browser client lives in
+
+- **Pypi** at https://pypi.org/project/thumbrella-client/
+- **Github** at https://github.com/thumbrella-dev/clients/
+
+See the more complete browser client examples at
+https://github.com/thumbrella-dev/clients/tree/main/typescript/examples
+-->
+
+<head>
+  <meta charset="UTF-8" />
+  <script type="module">
+    import { tbrSetup } from "@thumbrella/client/browser";
+    tbrSetup("https://demo.thumbrella.dev");
+  </script>
+</head>
+
+<body>
+
+<tbr-thumb src="https://demo.thumbrella.dev/media/golden-gate.exr" alt="Space colony" lazy="true">
+</tbr-thumb>
+
+</body>
+</html>

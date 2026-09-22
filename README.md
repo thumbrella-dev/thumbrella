@@ -25,7 +25,7 @@ Use one of these commands to get a server running locally.
 
 ```bash
 docker run --rm -it --name tbr --publish 3114:3114 thumbrella/server
-npx @thumbrella/server
+npx @thumbrella/server serve
 ```
 
 The server is configured through environment variables, like `TBR_PORT=3114`
@@ -38,6 +38,37 @@ the environment variable `TBR_CONNECT=http://localhost:3114`.
 
 The server prints helpful output with onboarding links and suggestions
 at startup.
+
+## Connect an application
+
+Once the server is running, connect it to an application with one of the
+[Thumbrella client packages](https://thumbrella.dev/docs/client/). For browser
+galleries and file browsers, start with the `<tbr-thumb>` web component:
+
+```html
+<script type="module">
+  import { tbrSetup } from "https://js.thumbrella.dev/1.4/tbr.js";
+  tbrSetup("http://localhost:3114");
+</script>
+
+<tbr-thumb src="https://example.com/media/photo.heic"></tbr-thumb>
+```
+
+For applications that need direct control over requests, caching, batching, or
+streaming, use the [JavaScript client on npm](https://www.npmjs.com/package/@thumbrella/client).
+The client also provides the browser component for bundled applications.
+
+- [Web component documentation](https://thumbrella.dev/docs/components/)
+- [Client library documentation](https://thumbrella.dev/docs/client/)
+- [JavaScript client package](https://www.npmjs.com/package/@thumbrella/client)
+- [Client packages and examples repository](https://github.com/thumbrella-dev/clients)
+- [HTTP API documentation](https://thumbrella.dev/docs/http-api/) for lower-level integrations
+
+The runnable client examples live in the separate
+[clients repository](https://github.com/thumbrella-dev/clients), including
+[browser examples](https://github.com/thumbrella-dev/clients/tree/main/typescript/examples),
+[Python examples](https://github.com/thumbrella-dev/clients/tree/main/python/examples),
+and [Rust examples](https://github.com/thumbrella-dev/clients/tree/main/rust/examples).
 
 ## Build
 
