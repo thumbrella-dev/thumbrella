@@ -30,6 +30,7 @@ pub mod dispatch;
 pub mod fetch_guard;
 pub mod handoff;
 pub mod http_buf;
+pub mod local_path;
 pub mod media;
 pub mod pipeline;
 pub mod request;

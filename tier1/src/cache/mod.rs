@@ -346,6 +346,35 @@ pub fn render_cost_from_secs(render_secs: f64) -> u8 {
     (render_ms.min(1000) / 10) as u8
 }
 
+//  Retention helper
+
+/// Compute a cache **retention** deadline.
+///
+/// Retention is not freshness.  An entry that is already stale still earns its
+/// place in a cache, because its validators let the next request revalidate
+/// with a conditional request and reuse the stored bytes on `304`.  The
+/// upstream freshness window is therefore a *lower bound* on retention rather
+/// than the answer, and a resource that is stale on arrival -
+/// `Cache-Control: max-age=0, must-revalidate`, which is what most CDNs send for
+/// HTML and untouched assets - must still get the default window.
+///
+/// Taking the freshness window at face value gives such a resource a retention
+/// of zero, and the entry is discarded the moment it is written.
+///
+/// Returns a Unix epoch second, clamped to `now + default_ttl` .. `now + max_ttl`.
+pub fn retention_deadline(
+    now: u64,
+    upstream_expiry: Option<u64>,
+    default_ttl: u64,
+    max_ttl: u64,
+) -> u64 {
+    let floor = now.saturating_add(default_ttl);
+    upstream_expiry
+        .unwrap_or(floor)
+        .max(floor)
+        .min(now.saturating_add(max_ttl))
+}
+
 //  Cache spec parser
 //
 //  `TBR_CACHE` selects zero or more cache backends chained with `+`, fastest
@@ -652,5 +681,33 @@ mod tests {
         let (blank, _) = validate_dsn("");
         assert_eq!(blank.status, ValidationStatus::Error);
         assert_eq!(describe_dsn("none"), "none (cache disabled)");
+    }
+
+    /// A resource that is stale on arrival must still be retained for the
+    /// default window, so its validators can back a later `304`.
+    #[test]
+    fn stale_on_arrival_is_still_retained() {
+        const NOW: u64 = 1_000;
+        const DEFAULT: u64 = 3_600;
+        const MAX: u64 = 604_800;
+
+        // `Cache-Control: max-age=0, must-revalidate` - expiry is the fetch time.
+        assert_eq!(retention_deadline(NOW, Some(NOW), DEFAULT, MAX), NOW + DEFAULT);
+        // A window that already elapsed.
+        assert_eq!(retention_deadline(NOW, Some(NOW - 500), DEFAULT, MAX), NOW + DEFAULT);
+        // No freshness window at all.
+        assert_eq!(retention_deadline(NOW, None, DEFAULT, MAX), NOW + DEFAULT);
+        // A window shorter than the default is still floored.
+        assert_eq!(retention_deadline(NOW, Some(NOW + 60), DEFAULT, MAX), NOW + DEFAULT);
+    }
+
+    #[test]
+    fn longer_upstream_windows_win_but_stay_capped() {
+        const NOW: u64 = 1_000;
+        const DEFAULT: u64 = 3_600;
+        const MAX: u64 = 604_800;
+
+        assert_eq!(retention_deadline(NOW, Some(NOW + 100_000), DEFAULT, MAX), NOW + 100_000);
+        assert_eq!(retention_deadline(NOW, Some(u64::MAX), DEFAULT, MAX), NOW + MAX);
     }
 }

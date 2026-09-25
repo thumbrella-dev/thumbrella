@@ -1361,28 +1361,27 @@ impl<S: HttpStream> ThumbCook<S> {
         }
     }
 
-    /// Compute the cache expiry timestamp for the current cook.
+    /// Compute the cache **retention** deadline for the current cook.
     ///
-    /// Uses the upstream `CacheHints::expires_at` if available, capped by
-    /// `runtime.cache_max_ttl_secs`.  Falls back to a default TTL when the
-    /// upstream provides no freshness window.
+    /// This is how long the backend should keep the entry, which is not how long
+    /// the upstream says it stays fresh.  The upstream freshness window is
+    /// treated as a lower bound so that a resource which is stale on arrival
+    /// still gets the default window - see [`crate::cache::retention_deadline`]
+    /// for why, and [`crate::cache::CacheBackend`] for the contract.
     ///
-    /// The result is a *retention* deadline handed to the cache backend, not a
-    /// freshness window for clients - see [`crate::cache::CacheBackend`].
+    /// Capped by `cache_max_ttl_secs`.
     fn cache_expires_at(&self) -> u64 {
         let now = web_time::SystemTime::now()
             .duration_since(web_time::SystemTime::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let default_expiry = now + self.runtime.cache_default_ttl_secs;
-        let max_expiry = now + self.cache_max_ttl_secs;
 
-        self.src
-            .cache_hints
-            .as_ref()
-            .and_then(|h| h.expires_at)
-            .unwrap_or(default_expiry)
-            .min(max_expiry)
+        crate::cache::retention_deadline(
+            now,
+            self.src.cache_hints.as_ref().and_then(|h| h.expires_at),
+            self.runtime.cache_default_ttl_secs,
+            self.cache_max_ttl_secs,
+        )
     }
 
     fn finish(mut self, mut after: AfterResponse) -> (ThumbResult, ThumbTrace, AfterResponse) {

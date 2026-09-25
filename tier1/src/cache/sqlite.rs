@@ -107,6 +107,13 @@ fn format_scoped_key(key: &str) -> String {
     format!("v{}:{key}", crate::TBR_CACHE_VERSION)
 }
 
+fn unix_now_secs() -> u64 {
+    web_time::SystemTime::now()
+        .duration_since(web_time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 impl CacheBackend for SqliteCacheBackend {
     fn name(&self) -> &'static str {
         "sqlite"
@@ -141,6 +148,12 @@ impl CacheBackend for SqliteCacheBackend {
         let max_bytes = self.max_bytes;
         let key = format_scoped_key(&key);
         Box::pin(async move {
+            // Nothing to retain.  The purge at the end of this write would delete
+            // the row in the same statement, so skip it - matching the memory and
+            // cloud backends, which also treat a past deadline as "no write".
+            if expires_at <= unix_now_secs() {
+                return;
+            }
             let Ok(value) = serde_json::to_string(&media) else { return };
             tokio::task::spawn_blocking(move || {
                 let size = value.len() as i64;
