@@ -162,6 +162,25 @@ impl ProcessBuffer {
         }
     }
 
+    /// `true` when the buffer carries alpha and all four corner pixels are
+    /// fully transparent.
+    ///
+    /// An opaque source is fill-cropped because thin letterbox bands look like
+    /// a mistake.  When the corners are transparent the same bands read as
+    /// deliberate padding, so such a source can be fitted whole instead.
+    fn has_transparent_corners(&self) -> bool {
+        let BufInner::Rgba(img) = &self.inner else {
+            return false;
+        };
+        let (w, h) = img.dimensions();
+        if w == 0 || h == 0 {
+            return false;
+        }
+        [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)]
+            .into_iter()
+            .all(|(x, y)| img.get_pixel(x, y)[3] == 0)
+    }
+
     /// Scale source to fit within `target_w × target_h` while ensuring neither
     /// output dimension falls below `min_ratio × target_dimension`.
     ///
@@ -198,18 +217,21 @@ impl ProcessBuffer {
         // Clamped cases: source AR is outside the acceptable min-fill range.
         // We scale up to the minimum acceptable size and crop the overflowing
         // dimension to the canvas maximum.
-        let (resize_w, resize_h, crop_w, crop_h) = if fit_h < min_h {
+        // `clamped` marks the sources the min-fill rule forces us to crop.  Their
+        // scaled size follows the aspect ratio, so they are read through a source
+        // window instead - see `window` below.
+        let (resize_w, resize_h, crop_w, crop_h, clamped) = if fit_h < min_h {
             // Extremely wide: height would fall below minimum after fit-within.
             // Scale so height = min_h; width overflows target_w -> center-crop.
             let s = min_h as f32 / src_h as f32;
             let rw = ((src_w as f32 * s).round() as u32).max(target_w);
-            (rw, min_h, target_w, min_h)
+            (rw, min_h, target_w, min_h, true)
         } else if fit_w < min_w {
             // Extremely tall: width would fall below minimum after fit-within.
             // Scale so width = min_w; height overflows target_h -> upper-crop.
             let s = min_w as f32 / src_w as f32;
             let rh = ((src_h as f32 * s).round() as u32).max(target_h);
-            (min_w, rh, min_w, target_h)
+            (min_w, rh, min_w, target_h, true)
         } else {
             // Normal fit-within range (not clamped by min_fill_ratio).
             //
@@ -225,14 +247,20 @@ impl ProcessBuffer {
             let src_ar = src_w as f32 / src_h as f32;
             let fill_scale = (target_w as f32 / src_w as f32).max(target_h as f32 / src_h as f32);
             let max_scale = fit_scale / (1.0 - fill_budget).max(f32::EPSILON);
-            let blend = if (1.0..=1.5).contains(&src_ar) {
+            // A source whose corners are transparent reads those bands as
+            // padding rather than as an accident, so it is fitted whole instead
+            // of being cropped to fill.
+            let near_square = (1.0..=1.5).contains(&src_ar);
+            let blend = if near_square && !self.has_transparent_corners() {
                 fill_scale // near-square (1:1 – ~3:2): snap directly to full fill
+            } else if near_square {
+                fit_scale
             } else {
                 fill_scale.min(max_scale)
             };
             let rw = ((src_w as f32 * blend).round() as u32).max(1);
             let rh = ((src_h as f32 * blend).round() as u32).max(1);
-            (rw, rh, rw.min(target_w), rh.min(target_h))
+            (rw, rh, rw.min(target_w), rh.min(target_h), false)
         };
 
         let needs_resize = resize_w != src_w || resize_h != src_h;
@@ -253,17 +281,37 @@ impl ProcessBuffer {
         let crop_x = resize_w.saturating_sub(crop_w) / 2;
         let crop_y = ((resize_h.saturating_sub(crop_h)) as f32 * 0.25) as u32;
 
+        // A clamped source scales to min_w/min_h, so the oversized dimension is
+        // `min * source_ar` long - a 4000x2 source would be scaled to 240000x120
+        // before a 250px crop.  Map the surviving window back to source pixels
+        // instead and scale only that: same window, same scale, and the work no
+        // longer grows with the aspect ratio.
+        let window = clamped.then(|| {
+            let sx = resize_w as f32 / src_w as f32;
+            let sy = resize_h as f32 / src_h as f32;
+            let w = ((crop_w as f32 / sx).round() as u32).clamp(1, src_w);
+            let h = ((crop_h as f32 / sy).round() as u32).clamp(1, src_h);
+            let x = ((crop_x as f32 / sx) as u32).min(src_w - w);
+            let y = ((crop_y as f32 / sy) as u32).min(src_h - h);
+            (x, y, w, h)
+        });
+
         let filter = if pixel_art { FilterType::Nearest } else { FilterType::Triangle };
 
         let prev = std::mem::replace(&mut self.inner, BufInner::Rgb(image::RgbImage::new(0, 0)));
         self.inner = match prev {
             BufInner::Rgb(img) => {
-                let r = if trivial || !needs_resize {
-                    img
-                } else {
-                    resize(&img, resize_w, resize_h, filter)
+                let r = match window {
+                    // Clamped: scale the window straight to the content box.  The
+                    // window is bounded by the source, not by the aspect ratio.
+                    Some((x, y, w, h)) => {
+                        let win = crop_imm(&img, x, y, w, h).to_image();
+                        resize(&win, crop_w, crop_h, filter)
+                    }
+                    None if trivial || !needs_resize => img,
+                    None => resize(&img, resize_w, resize_h, filter),
                 };
-                let r = if needs_crop {
+                let r = if needs_crop && window.is_none() {
                     crop_imm(&r, crop_x, crop_y, crop_w, crop_h).to_image()
                 } else {
                     r
@@ -271,21 +319,37 @@ impl ProcessBuffer {
                 BufInner::Rgb(r)
             }
             BufInner::Rgba(img) => {
-                let r = if trivial || !needs_resize {
-                    img
-                } else if pixel_art {
-                    // Nearest-neighbour: no blending, premultiply not needed.
-                    resize(&img, resize_w, resize_h, FilterType::Nearest)
-                } else {
-                    // Triangle filter blends adjacent pixels.  Premultiplied-alpha space
-                    // prevents dark halos at transparent region boundaries.
-                    let mut pm = img;
-                    premultiply_rgba(&mut pm);
-                    let mut r = resize(&pm, resize_w, resize_h, FilterType::Triangle);
-                    unpremultiply_rgba(&mut r);
-                    r
+                let r = match window {
+                    // Clamped: scale the window straight to the content box.
+                    // Premultiplying needs an owned buffer, so the window is the
+                    // only thing copied - never the oversized scaled image.
+                    Some((x, y, w, h)) => {
+                        let mut win = crop_imm(&img, x, y, w, h).to_image();
+                        if pixel_art {
+                            resize(&win, crop_w, crop_h, FilterType::Nearest)
+                        } else {
+                            premultiply_rgba(&mut win);
+                            let mut r = resize(&win, crop_w, crop_h, FilterType::Triangle);
+                            unpremultiply_rgba(&mut r);
+                            r
+                        }
+                    }
+                    None if trivial || !needs_resize => img,
+                    None if pixel_art => {
+                        // Nearest-neighbour: no blending, premultiply not needed.
+                        resize(&img, resize_w, resize_h, FilterType::Nearest)
+                    }
+                    None => {
+                        // Triangle filter blends adjacent pixels.  Premultiplied-alpha space
+                        // prevents dark halos at transparent region boundaries.
+                        let mut pm = img;
+                        premultiply_rgba(&mut pm);
+                        let mut r = resize(&pm, resize_w, resize_h, FilterType::Triangle);
+                        unpremultiply_rgba(&mut r);
+                        r
+                    }
                 };
-                let r = if needs_crop {
+                let r = if needs_crop && window.is_none() {
                     crop_imm(&r, crop_x, crop_y, crop_w, crop_h).to_image()
                 } else {
                     r
@@ -618,8 +682,24 @@ fn composite_rgba_onto(rgba: &image::RgbaImage, dst: &mut image::RgbImage, ox: u
 
 #[cfg(test)]
 mod tests {
-    use super::ProcessBuffer;
-    use image::{DynamicImage, RgbImage};
+    use super::{BufInner, ProcessBuffer};
+    use image::{DynamicImage, Rgb, RgbImage, Rgba, RgbaImage};
+
+    /// Canvas dimensions after the canonical fit.
+    fn fitted(img: RgbaImage) -> (u32, u32) {
+        let mut buf = ProcessBuffer::from_dynamic(DynamicImage::ImageRgba8(img));
+        buf.fit_to_target(250, 200, 0.6, 0.10, false);
+        buf.dimensions()
+    }
+
+    /// Opaque RGBA with the four corner pixels cleared.
+    fn clear_corners(w: u32, h: u32) -> RgbaImage {
+        let mut img = RgbaImage::from_pixel(w, h, Rgba([9, 9, 9, 255]));
+        for (x, y) in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)] {
+            img.put_pixel(x, y, Rgba([9, 9, 9, 0]));
+        }
+        img
+    }
 
     #[test]
     fn near_three_halves_sources_fill_the_thumbnail_canvas() {
@@ -629,5 +709,105 @@ mod tests {
         buf.fit_to_target(250, 200, 0.6, 0.10, false);
 
         assert_eq!(buf.dimensions(), (250, 200));
+    }
+
+    #[test]
+    fn a_square_source_with_clear_corners_is_fitted_whole() {
+        // Fitted rather than cropped: 200x200 centred on the 250x200 canvas.
+        assert_eq!(fitted(clear_corners(400, 400)), (200, 200));
+    }
+
+    #[test]
+    fn a_square_source_with_opaque_corners_still_fills() {
+        // Alpha alone is not enough - the corners have to be clear too.
+        let opaque = RgbaImage::from_pixel(400, 400, Rgba([9, 9, 9, 255]));
+        assert_eq!(fitted(opaque), (250, 200));
+    }
+
+    #[test]
+    fn every_corner_has_to_be_transparent() {
+        let mut one_opaque = clear_corners(400, 400);
+        one_opaque.put_pixel(0, 0, Rgba([9, 9, 9, 255]));
+        assert_eq!(fitted(one_opaque), (250, 200));
+
+        // A faintly visible corner still counts as opaque.
+        let mut faint = clear_corners(400, 400);
+        faint.put_pixel(399, 399, Rgba([9, 9, 9, 1]));
+        assert_eq!(fitted(faint), (250, 200));
+    }
+
+    #[test]
+    fn clear_corners_leave_sources_outside_the_near_square_band_alone() {
+        // 16:9 is outside the snap band, so the fill budget decides either way.
+        let opaque = RgbaImage::from_pixel(1600, 900, Rgba([9, 9, 9, 255]));
+        assert_eq!(fitted(clear_corners(1600, 900)), fitted(opaque));
+    }
+
+    /// Content dimensions for a solid source after the canonical fit.
+    fn content_dims(w: u32, h: u32) -> (u32, u32) {
+        let mut buf = ProcessBuffer::from_dynamic(DynamicImage::ImageRgb8(RgbImage::new(w, h)));
+        buf.fit_to_target(250, 200, 0.6, 0.10, false);
+        buf.dimensions()
+    }
+
+    #[test]
+    fn clamped_sources_keep_the_min_fill_content_box() {
+        // Extreme wide -> target_w x min_h; extreme tall -> min_w x target_h.
+        assert_eq!(content_dims(4000, 2), (250, 120));
+        assert_eq!(content_dims(2, 4000), (150, 200));
+    }
+
+    #[test]
+    fn a_clamped_wide_source_keeps_its_centre_window() {
+        // Red edge, white centre, blue edge: only the centre can survive.
+        let mut img = RgbImage::from_pixel(4000, 2, Rgb([0, 0, 255]));
+        for x in 0..1990 {
+            for y in 0..2 {
+                img.put_pixel(x, y, Rgb([255, 0, 0]));
+            }
+        }
+        for x in 1990..2010 {
+            for y in 0..2 {
+                img.put_pixel(x, y, Rgb([255, 255, 255]));
+            }
+        }
+        let mut buf = ProcessBuffer::from_dynamic(DynamicImage::ImageRgb8(img));
+        buf.fit_to_target(250, 200, 0.6, 0.10, false);
+
+        let BufInner::Rgb(out) = &buf.inner else { panic!("expected an RGB buffer") };
+        assert_eq!(out.dimensions(), (250, 120));
+        assert!(
+            out.pixels().all(|p| p.0 == [255, 255, 255]),
+            "the window has to come from the centre of the source"
+        );
+    }
+
+    #[test]
+    fn a_clamped_tall_source_keeps_its_upper_quarter_window() {
+        // 2x4000: the window sits a quarter of the way down, not in the middle.
+        let mut img = RgbImage::from_pixel(2, 4000, Rgb([0, 0, 255]));
+        for y in 990..1010 {
+            for x in 0..2 {
+                img.put_pixel(x, y, Rgb([255, 255, 255]));
+            }
+        }
+        let mut buf = ProcessBuffer::from_dynamic(DynamicImage::ImageRgb8(img));
+        buf.fit_to_target(250, 200, 0.6, 0.10, false);
+
+        let BufInner::Rgb(out) = &buf.inner else { panic!("expected an RGB buffer") };
+        assert_eq!(out.dimensions(), (150, 200));
+        assert!(
+            out.pixels().all(|p| p.0 == [255, 255, 255]),
+            "the window has to sit a quarter of the way down the source"
+        );
+    }
+
+    #[test]
+    fn a_pathological_aspect_ratio_does_not_scale_the_whole_source() {
+        // Scaling the source first builds a 1200000x120 intermediate for this
+        // 20000x2 input (~432 MB at RGB8); the window keeps the work bounded by
+        // the content box instead.
+        assert_eq!(content_dims(20000, 2), (250, 120));
+        assert_eq!(content_dims(2, 20000), (150, 200));
     }
 }

@@ -2,6 +2,7 @@
 
 ## Development
 
+- Improve crop and fit resources and quality
 - Cleanup absolute file path logic, mainly for Windows
 - Cloud cache fixes ttl values to agree with cloud service
 - Sqlite cache backend salts cache keys with serial version counter
