@@ -930,7 +930,7 @@ fn pre_scale(img: DynamicImage, target_w: u32, target_h: u32) -> DynamicImage {
 
 /// Fallback: fetch `url` - supports both `http(s)://` and `file://`.
 pub async fn fetch_url(url: &str) -> Option<Vec<u8>> {
-    if let Some(path) = url.strip_prefix("file://") {
+    if let Some(path) = tier1::local_path::path_from_file_url(url) {
         return tokio::fs::read(path).await.ok();
     }
     reqwest::get(url).await.ok()?.bytes().await.ok().map(|b| b.to_vec())

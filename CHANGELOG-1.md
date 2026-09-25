@@ -2,6 +2,9 @@
 
 ## Development
 
+- Cleanup absolute file path logic, mainly for Windows
+- Cloud cache fixes ttl values to agree with cloud service
+- Sqlite cache backend salts cache keys with serial version counter
 
 ## 1.5.2 - 2026/09/21
 

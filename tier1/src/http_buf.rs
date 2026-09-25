@@ -667,7 +667,7 @@ enum ReqwestStreamInner {
 impl HttpStream for ReqwestStream {
     async fn connect(url: &str, options: &ConnectOptions) -> Result<Self, HttpError> {
         //  file:// - stream from disk
-        if let Some(path) = url.strip_prefix("file://") {
+        if let Some(path) = crate::local_path::path_from_file_url(url) {
             // Get file length without reading any content.
             let file_len = match std::fs::metadata(path) {
                 Ok(m) => m.len(),

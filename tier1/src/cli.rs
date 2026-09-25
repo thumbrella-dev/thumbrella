@@ -382,21 +382,23 @@ async fn shutdown_signal() {
 /// Promote a bare filesystem path to a `file://` URL.
 ///
 /// Paths that already have a scheme (`http://`, `https://`, `file://`) are
-/// returned unchanged.  Relative paths are resolved against the current
-/// working directory.
+/// returned unchanged.  A relative path is resolved against the current working
+/// directory; `C:data` is drive-relative on Windows and so counts as relative.
+/// A path that cannot be made absolute is returned as given, with no URL
+/// invented for it, and the fetch reports it.
 pub fn promote_url(raw: &str) -> String {
     if raw.starts_with("http://") || raw.starts_with("https://") || raw.starts_with("file://") {
         return raw.to_string();
     }
+    // `join` discards the base when the path is already absolute, so an absolute
+    // path passes through and a relative one resolves against the working
+    // directory.
     let path = std::path::Path::new(raw);
-    let abs = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."))
-            .join(path)
-    };
-    format!("file://{}", abs.display())
+    let abs = std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path));
+    match crate::local_path::path_for_file_url(&abs.to_string_lossy()) {
+        Some(url_path) => format!("file://{url_path}"),
+        None => raw.to_string(),
+    }
 }
 
 async fn run_result(

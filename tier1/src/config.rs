@@ -54,9 +54,9 @@ pub struct AppConfig {
     /// Allow `file://`, bare paths, and localhost/private-network URLs.
     ///
     /// When `true`, callers may pass `file:///path/to/file`, bare absolute
-    /// paths, or `localhost` / private-IP URLs.  **Only enable in trusted
-    /// environments** - any caller can read any file the server process has
-    /// permission to open.
+    /// paths (`/data/a.png`, and on Windows `C:/data/a.png`), or `localhost` /
+    /// private-IP URLs.  **Only enable in trusted environments** - any caller
+    /// can read any file the server process has permission to open.
     pub allow_local: bool,
     /// Root directory for temporary scratch space used by tier3 CLI tool
     /// staging.  Defaults to `$TMPDIR/thumbrella` (or `/tmp/thumbrella`).

@@ -518,8 +518,9 @@ pub async fn batch(
 ///
 /// When `allow_local` is `true` (`TBR_ALLOW_LOCAL=1`):
 /// - `file://` URLs → accepted unchanged.
-/// - Bare absolute paths (starting with `/`) → promoted to `file://` URLs
-///   (e.g. `/data/img.png` becomes `file:///data/img.png`).
+/// - Bare absolute paths → promoted to `file://` URLs (e.g. `/data/img.png`
+///   becomes `file:///data/img.png`, and on Windows `C:/data/img.png` becomes
+///   `file:///C:/data/img.png`).  See [`crate::local_path`].
 /// - Bare relative paths → rejected; the server's CWD is ambiguous.
 fn normalize_url(url: String, allow_local: bool) -> Result<String, &'static str> {
     if url.contains("://") {
@@ -542,8 +543,8 @@ fn normalize_url(url: String, allow_local: bool) -> Result<String, &'static str>
 
         Ok(url)
     } else if allow_local {
-        if url.starts_with('/') {
-            Ok(format!("file://{url}"))
+        if let Some(path) = crate::local_path::path_for_file_url(&url) {
+            Ok(format!("file://{path}"))
         } else {
             Err("bare relative paths are not permitted; use an absolute path or a file:// URL")
         }
