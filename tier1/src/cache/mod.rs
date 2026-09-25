@@ -34,6 +34,31 @@ pub mod chain;
 //  Backend trait
 
 /// A single cache storage backend.
+///
+/// ## The key
+///
+/// `key` is what the entry is addressed by, and its meaning belongs to whichever
+/// backend owns the storage.  Local backends (`mem`, `sqlite`) and the sticky
+/// frontend treat it as opaque; the embedder chooses it (see
+/// `ThumbCook::ctx_cache_key`), defaulting to the canonical source identity.
+///
+/// The cloud cache backend is the exception: it has to be handed the *source
+/// identity* itself, because it addresses entries by URL and lets the cloud
+/// derive its own account-scoped storage key.  That holds for every deployment
+/// that can configure `cloud:` - a standalone server has no account of its own,
+/// so it always keys by identity.  See [`cloud::CloudCacheBackend`].
+///
+/// ## Freshness vs retention
+///
+/// `expires_at` is a **retention** deadline - how long the backend should keep
+/// the entry at all.  It is unrelated to `media.cache`, which carries the
+/// client-facing freshness window and validators.
+///
+/// These are genuinely different things and backends must not conflate them:
+/// an entry stays useful long after it goes stale, because a stale entry with
+/// validators lets the pipeline revalidate with a conditional request and
+/// reuse the stored thumbnail on `304`.  Backends therefore retain for
+/// `expires_at` and never evict or reject on the basis of `media.cache`.
 #[cfg(feature = "native")]
 pub trait CacheBackend: Send + Sync {
     /// Human-readable name used in logs (e.g. `"sqlite"`, `"memory"`).
@@ -48,8 +73,8 @@ pub trait CacheBackend: Send + Sync {
     /// 100 = >= 1 s render).  Backends use it to favour retaining expensive
     /// entries under eviction pressure.
     ///
-    /// `expires_at` is a Unix epoch timestamp after which the entry should
-    /// be evicted.  Backends SHOULD purge entries past this time.
+    /// `expires_at` is the retention deadline (Unix epoch seconds).  Backends
+    /// SHOULD purge entries past this time.
     ///
     /// The future is owned and can be handed to [`AfterResponse`] so the
     /// write runs after the HTTP response.  Errors should be swallowed inside.
@@ -57,6 +82,9 @@ pub trait CacheBackend: Send + Sync {
 }
 
 /// A single cache storage backend for single-threaded wasm targets.
+///
+/// See the native [`CacheBackend`] for the key and freshness-vs-retention
+/// contracts.
 #[cfg(not(feature = "native"))]
 pub trait CacheBackend {
     fn name(&self) -> &'static str;
@@ -254,7 +282,9 @@ impl CacheStore {
 
     /// Check the cache for raw [`ThumbMedia`] — no ThumbResult wrapper.
     ///
-    /// Used by cloud cache endpoints that need the stored format directly.
+    /// Bypasses the sticky frontend and reads the durable backend by an
+    /// already-derived `key`.  Used by the cloud `/cache/*` endpoints, which
+    /// derive the key themselves and need the stored format directly.
     pub async fn check_media(&self, key: &str) -> Option<(crate::result::ThumbMedia, &'static str)> {
         if let Some(ref backend) = self.backend
             && let Some(media) = backend.get(key).await
@@ -267,6 +297,9 @@ impl CacheStore {
     /// Schedule a write of `result` into the durable backend via `after`.
     ///
     /// Also stores in the sticky cache and fans out to inflight joiners.
+    ///
+    /// `expires_at` is the retention deadline, not a freshness window - see
+    /// [`CacheBackend`].
     pub fn store(
         &self,
         key: &str,

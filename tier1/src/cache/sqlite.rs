@@ -12,6 +12,14 @@
 //! )
 //! ```
 //!
+//! # Format versioning
+//!
+//! One database file can be shared by several binary versions, so every stored
+//! key carries [`crate::TBR_CACHE_VERSION`] (`format_scoped_key`).  A build can
+//! therefore only ever read rows it wrote, and an incompatible version simply
+//! starts cold instead of decoding the wrong payload.  The version lives inside
+//! this backend because it is a property of the serialized value.
+//!
 //! # Maintenance
 //!
 //! The database ships a `readme` table with ready-to-run SQL snippets
@@ -89,6 +97,16 @@ impl SqliteCacheBackend {
     }
 }
 
+/// Scope a caller-supplied key to this build's cache format.
+///
+/// One SQLite file can be shared by several binary versions, so the stored key
+/// carries [`crate::TBR_CACHE_VERSION`] and a build can only ever read rows it
+/// wrote.  Keeping the version here - rather than in the pipeline's key - means
+/// nothing upstream has to know about it.
+fn format_scoped_key(key: &str) -> String {
+    format!("v{}:{key}", crate::TBR_CACHE_VERSION)
+}
+
 impl CacheBackend for SqliteCacheBackend {
     fn name(&self) -> &'static str {
         "sqlite"
@@ -96,7 +114,7 @@ impl CacheBackend for SqliteCacheBackend {
 
     fn get<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = Option<crate::result::ThumbMedia>> + Send + 'a>> {
         let conn = Arc::clone(&self.conn);
-        let key = key.to_string();
+        let key = format_scoped_key(key);
         Box::pin(async move {
             let json = tokio::task::spawn_blocking(move || {
                 let conn = conn.lock().unwrap();
@@ -121,6 +139,7 @@ impl CacheBackend for SqliteCacheBackend {
     fn put(&self, key: String, media: crate::result::ThumbMedia, cost: u8, expires_at: u64) -> DeferredFuture {
         let conn = Arc::clone(&self.conn);
         let max_bytes = self.max_bytes;
+        let key = format_scoped_key(&key);
         Box::pin(async move {
             let Ok(value) = serde_json::to_string(&media) else { return };
             tokio::task::spawn_blocking(move || {

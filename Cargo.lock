@@ -2982,7 +2982,6 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "sha2",
  "time",
  "tokio",
  "tower-http 0.7.1",

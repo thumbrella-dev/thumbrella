@@ -265,9 +265,15 @@ pub struct SourceIdentity {
     pub canonical_url: Option<String>,
     /// Structured freshness hints parsed from upstream response headers.
     pub cache_hints: Option<CacheHints>,
-    /// SHA-256(customer_id ":" content_identity) - the cache storage key.
+    /// Cache storage key.  Supplied by the embedder via
+    /// `ThumbCook::ctx_cache_key`, falling back to the canonical source
+    /// identity when none is set (the standalone-server case).
     pub cache_key: Option<String>,
     /// Which header (or fallback) was used as the identity input for `cache_key`.
+    ///
+    /// Currently unread, but part of the handoff wire format: dropping it would
+    /// make a newer server's `SourceIdentity` fail to deserialise on an older
+    /// one.
     pub cache_key_source: Option<String>,
 }
 
@@ -376,8 +382,14 @@ pub struct ThumbCook<S: HttpStream> {
     //  Attribution / context
     /// Groups multiple trace records from the same inbound batch call.
     pub ctx_session_id: Option<String>,
-    /// Customer identifier for billing and quota attribution.
-    pub ctx_customer_id: Option<String>,
+    /// Cache storage key for this cook, supplied by the embedder.
+    ///
+    /// `None` (the default, and always the case for a standalone server) keys
+    /// the entry by the canonical source identity.  The cloud worker supplies
+    /// an account-scoped key here instead.  Tier 1 never derives one itself:
+    /// how an entry is namespaced is the key owner's business, not the
+    /// pipeline's.
+    pub ctx_cache_key: Option<String>,
     /// Maximum cache lifetime for this request, in seconds.
     /// Defaults to the shared runtime maximum; cloud callers may lower it
     /// for free accounts without changing the isolate-wide runtime.
@@ -457,7 +469,7 @@ impl<S: HttpStream> ThumbCook<S> {
             tel_job_tier_override: None,
             tel_version_override: None,
             ctx_session_id: None,
-            ctx_customer_id: None,
+            ctx_cache_key: None,
             cache_max_ttl_secs,
             ctx_cancelled: false,
             ctx_handoff: false,
@@ -905,23 +917,17 @@ impl<S: HttpStream> ThumbCook<S> {
 
         //  Pre-connect cache check — always runs (handoffs skip via ctx_handoff).
         // Sets pre_cached and pre_cache_backend for the post-connect path.
-        // Also computes the canonical cache key (stored in self.src.cache_key)
-        // before connect may change src.canonical_url due to redirects.
+        // Also pins the source identity and the local cache key into self.src
+        // before connect may change src.canonical_url due to redirects.  get
+        // and put must use the same identity for the whole cook or the write
+        // would land under a different key than the read looks for.
         let mut pre_cached: Option<ThumbResult> = None;
         let mut pre_cache_backend: Option<String> = None;
         if !self.ctx_handoff {
             use crate::source::canonical_url;
 
             let identity = canonical_url(&self.input.url).unwrap_or_else(|| self.input.url.clone());
-            let cache_key = if let Some(ref account_id) = self.ctx_customer_id {
-                use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-                use sha2::{Digest, Sha256};
-                let input = format!("v{}:{account_id}:{identity}", crate::TBR_CACHE_VERSION);
-                let hash = URL_SAFE_NO_PAD.encode(Sha256::digest(input.as_bytes()));
-                format!("{account_id}/{hash}")
-            } else {
-                identity.clone()
-            };
+            let cache_key = self.ctx_cache_key.clone().unwrap_or_else(|| identity.clone());
             self.src.cache_key = Some(cache_key.clone());
 
             if let Some((cached, backend_name)) = self.runtime.cache.check(&cache_key).await {
@@ -1360,6 +1366,9 @@ impl<S: HttpStream> ThumbCook<S> {
     /// Uses the upstream `CacheHints::expires_at` if available, capped by
     /// `runtime.cache_max_ttl_secs`.  Falls back to a default TTL when the
     /// upstream provides no freshness window.
+    ///
+    /// The result is a *retention* deadline handed to the cache backend, not a
+    /// freshness window for clients - see [`crate::cache::CacheBackend`].
     fn cache_expires_at(&self) -> u64 {
         let now = web_time::SystemTime::now()
             .duration_since(web_time::SystemTime::UNIX_EPOCH)

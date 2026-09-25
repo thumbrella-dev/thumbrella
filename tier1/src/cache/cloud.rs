@@ -1,22 +1,64 @@
 //! Cloud-service cache backend.
 //!
-//! Forwards cache lookups and stores to the Thumbrella cloud service
-//! (`/cache/lookup` and `/cache/store` endpoints).  This lets a private
-//! server use the cloud as a distributed, shared cache layer.
+//! Delegates cache reads and writes to the Thumbrella cloud service, letting a
+//! private server use the cloud as a distributed, shared cache layer.
 //!
 //! ## DSN format
 //!
 //! `cloud:<connect-string>` — same grammar as `TBR_CONNECT` / `TBR_TIER2`:
-//! - `cloud:tbr_e_xxx` — bare auth token, uses default cloud host
-//! - `cloud:https://cloud.thumbrella.dev,tbr_e_xxx` — explicit host + token
+//! - `cloud:tbr_s_xxx` — bare auth token, uses default cloud host
+//! - `cloud:https://cloud.thumbrella.dev,tbr_s_xxx` — explicit host + token
 //! - `cloud:http://localhost:8787,tbr_s_xxx` — local / beta server
 //!
-//! ## Key model
+//! ## Who owns the cache key
 //!
-//! The cloud derives cache keys from the source URL + the auth token's
-//! account_id.  This backend sends the URL and lets the cloud own the key
-//! namespace — the standalone server never sees or supplies account-scoped
-//! keys.
+//! The cloud owns it.  Entries are addressed by the **canonical source URL**;
+//! the cloud hashes that into a storage key scoped to the auth token's account,
+//! with the writer's cache format version salted in.  A standalone server has no
+//! account of its own, so it never computes or transmits an account-scoped key -
+//! it sends the source URL and lets the cloud do the namespacing.
+//!
+//! Because of that, the `key` handed to this backend must *be* the canonical
+//! source identity.  That holds for every deployment able to configure `cloud:`:
+//! only a standalone server can, and it has no account, so
+//! `ThumbCook::ctx_cache_key` is `None` and the pipeline keys by identity.
+//! `is_source_identity` asserts it in debug builds, and a violation now fails
+//! loudly at the endpoint instead of silently missing.
+//!
+//! ## Protocol
+//!
+//! ```text
+//! POST /cache/lookup
+//!   request: { "url": "<canonical source url>", "cache_format": <u32> }
+//!   hit:     200 <ThumbMedia json, url restored>
+//!   miss:    200 { "status": "miss", "url": "<url>" }
+//!
+//! POST /cache/store
+//!   request: { "url": "<canonical source url>",
+//!              "cache_format": <u32>,
+//!              "retain_secs": <u64>,
+//!              "media": <ThumbMedia json, url omitted> }
+//!   success: 200 { "status": "stored", "url": "<url>", "ttl_secs": <u64> }
+//! ```
+//!
+//! `cache_format` is [`crate::TBR_CACHE_VERSION`]: the format this build writes.
+//! The cloud salts it into the storage key, so two incompatible server versions
+//! sharing one account never read each other's entries.  Omitting it means "the
+//! format the serving build speaks" - see the worker's request types.
+//!
+//! ## Retention is not freshness
+//!
+//! `retain_secs` comes from `put`'s `expires_at` and says how long the cloud
+//! should *keep* the entry.  It is deliberately independent of the freshness
+//! metadata inside `media.cache`, which the cloud stores and returns verbatim.
+//!
+//! The two must not be conflated.  A stale entry is still valuable: it carries
+//! the validators (`etag` / `last-modified`) that let the pipeline revalidate
+//! with a conditional request and reuse the stored thumbnail on `304`.  That is
+//! why an entry whose freshness window has already closed is still worth
+//! retaining, and why retention must never be derived from `media.cache`.
+//! The cloud caps retention at the account plan's maximum and rejects only
+//! writes with no retention left at all.
 //!
 //! ## Health check
 //!
@@ -74,57 +116,167 @@ impl CloudCacheBackend {
     }
 }
 
+/// Body of `POST /cache/store`.
+#[derive(serde::Serialize)]
+struct StoreRequest<'a> {
+    /// Canonical source URL.  The cloud derives the storage key from this.
+    url: &'a str,
+    /// The writer's cache format version - see [`crate::TBR_CACHE_VERSION`].
+    cache_format: u32,
+    /// Retention window in seconds - how long the cloud should keep the entry.
+    retain_secs: u64,
+    /// The stored media.  Its `url` field is cleared: the key already
+    /// identifies the source, so embedding it again would only leak the URL
+    /// into a KV dump.
+    media: &'a crate::result::ThumbMedia,
+}
+
+/// `true` when `key` looks like a source identity rather than an opaque
+/// storage key.
+///
+/// Route validation normalises every accepted URL, so an identity always
+/// carries a scheme (`https://...`, `file://...`).  The one key shape that
+/// would break this backend is the cloud's account-scoped `"{account}/{hash}"`,
+/// which a standalone server never produces because it has no account of its
+/// own - see the type-level docs.
+fn is_source_identity(key: &str) -> bool {
+    key.contains("://")
+}
+
+/// Truncate a response body for logging.
+fn snippet(text: &str) -> String {
+    const MAX: usize = 200;
+    let trimmed = text.trim();
+    if trimmed.len() <= MAX {
+        return trimmed.to_string();
+    }
+    let mut end = MAX;
+    while end > 0 && !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &trimmed[..end])
+}
+
 impl CacheBackend for CloudCacheBackend {
     fn name(&self) -> &'static str {
         "cloud"
     }
 
-    fn get<'a>(&'a self, source_url: &'a str) -> Pin<Box<dyn Future<Output = Option<crate::result::ThumbMedia>> + Send + 'a>> {
+    fn get<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = Option<crate::result::ThumbMedia>> + Send + 'a>> {
+        debug_assert!(
+            is_source_identity(key),
+            "cloud cache addresses entries by source identity, but got an opaque key {key:?}",
+        );
         let url = format!("{}/cache/lookup", self.base_url);
         let auth = self.auth_header.clone();
-        let body = serde_json::json!({"url": source_url}).to_string();
+        let body = serde_json::json!({
+            "url": key,
+            "cache_format": crate::TBR_CACHE_VERSION,
+        })
+        .to_string();
         let client = self.client.clone();
         Box::pin(async move {
-            let resp = client
+            let resp = match client
                 .post(&url)
                 .header("Authorization", &auth)
                 .header("Content-Type", "application/json")
                 .body(body)
                 .send()
                 .await
-                .ok()?;
+            {
+                Ok(resp) => resp,
+                Err(e) => {
+                    tracing::warn!("cloud cache: lookup for {key} failed - {e}");
+                    return None;
+                }
+            };
 
-            if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            if !status.is_success() {
+                tracing::warn!("cloud cache: lookup for {key} returned HTTP {status} - {}", snippet(&text));
                 return None;
             }
 
-            let json: serde_json::Value = resp.json().await.ok()?;
+            let json: serde_json::Value = match serde_json::from_str(&text) {
+                Ok(json) => json,
+                Err(e) => {
+                    tracing::warn!("cloud cache: lookup for {key} returned invalid JSON - {e}");
+                    return None;
+                }
+            };
 
             if json.get("status").and_then(|v| v.as_str()) == Some("miss") {
                 return None;
             }
 
-            serde_json::from_value::<crate::result::ThumbMedia>(json).ok()
+            match serde_json::from_value::<crate::result::ThumbMedia>(json) {
+                Ok(media) => Some(media),
+                Err(e) => {
+                    tracing::warn!("cloud cache: lookup for {key} returned an unusable entry - {e}");
+                    None
+                }
+            }
         })
     }
 
-    fn put(&self, _key: String, media: crate::result::ThumbMedia, _cost: u8, _expires_at: u64) -> DeferredFuture {
+    fn put(&self, key: String, media: crate::result::ThumbMedia, _cost: u8, expires_at: u64) -> DeferredFuture {
+        debug_assert!(
+            is_source_identity(&key),
+            "cloud cache addresses entries by source identity, but got an opaque key {key:?}",
+        );
         let url = format!("{}/cache/store", self.base_url);
         let auth = self.auth_header.clone();
         let client = self.client.clone();
 
-        let Ok(body) = serde_json::to_string(&media) else {
+        // Retention is the window the caller asked for.  Nothing to retain
+        // means nothing to write - the cloud is never asked to guess a TTL
+        // from the freshness metadata.
+        let now = web_time::SystemTime::now()
+            .duration_since(web_time::SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let Some(retain_secs) = expires_at.checked_sub(now).filter(|secs| *secs > 0) else {
+            tracing::debug!("cloud cache: skipping store for {key} - retention window already elapsed");
+            return Box::pin(async {});
+        };
+
+        let mut media = media;
+        media.url.clear();
+        let Ok(body) = serde_json::to_string(&StoreRequest {
+            url: &key,
+            cache_format: crate::TBR_CACHE_VERSION,
+            retain_secs,
+            media: &media,
+        }) else {
+            tracing::warn!("cloud cache: could not serialise the entry for {key}");
             return Box::pin(async {});
         };
 
         Box::pin(async move {
-            let _ = client
+            let resp = match client
                 .post(&url)
                 .header("Authorization", &auth)
                 .header("Content-Type", "application/json")
                 .body(body)
                 .send()
-                .await;
+                .await
+            {
+                Ok(resp) => resp,
+                Err(e) => {
+                    tracing::warn!("cloud cache: store for {key} failed - {e}");
+                    return;
+                }
+            };
+
+            let status = resp.status();
+            if status.is_success() {
+                tracing::debug!("cloud cache: stored {key} for {retain_secs}s");
+                return;
+            }
+
+            let text = resp.text().await.unwrap_or_default();
+            tracing::warn!("cloud cache: store for {key} rejected with HTTP {status} - {}", snippet(&text));
         })
     }
 }
@@ -151,11 +303,16 @@ pub async fn ping_cloud_backend(target: &ConnectTarget) -> Result<(), String> {
         .map_err(|e| format!("failed to create HTTP client: {e}"))?;
 
     let url = format!("{base_url}/cache/lookup");
+    let body = serde_json::json!({
+        "url": "https://thumbrella.dev/ping",
+        "cache_format": crate::TBR_CACHE_VERSION,
+    })
+    .to_string();
     let resp = client
         .post(&url)
         .header("Authorization", &auth_header)
         .header("Content-Type", "application/json")
-        .body(r#"{"url":"https://thumbrella.dev/ping"}"#)
+        .body(body)
         .send()
         .await
         .map_err(|e| format!("health check failed - {e}"))?;
