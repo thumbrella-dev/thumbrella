@@ -386,6 +386,30 @@ pub fn retention_deadline(
 //  - `sqlite:path[,size]` - persistent SQLite cache
 //  - `cloud:connect`     - cloud-service cache (single opaque value)
 
+/// Suggest `+` when a spec looks like it chained backends with `,`.
+///
+/// `,` separates the positional parameters *within* a link (for example
+/// `sqlite:path,size`); it is not a chain separator.  Catching this common
+/// mistake turns an error like "expected a number before 'gb'" into a message
+/// that points at the actual fix.
+#[cfg(feature = "native")]
+fn comma_chain_hint(spec: &str) -> Option<String> {
+    const SCHEMES: [&str; 4] = ["mem", "sqlite", "cloud", "none"];
+    let looks_like_link = |part: &str| {
+        let part = part.trim();
+        match part.split_once(':') {
+            Some((scheme, _)) => SCHEMES.contains(&scheme.trim()),
+            None => SCHEMES.contains(&part),
+        }
+    };
+    if spec.split(',').skip(1).any(looks_like_link) {
+        let suggestion = spec.replace(',', "+");
+        Some(format!(" - hint: chain backends with '+', not ',' (try '{suggestion}')"))
+    } else {
+        None
+    }
+}
+
 /// Open the backends described by a `TBR_CACHE` spec.
 ///
 /// Returns `Ok(None)` only for the explicit disable forms `none` (or legacy
@@ -412,7 +436,10 @@ pub fn open_from_dsn(dsn: &str) -> Result<Option<Arc<dyn CacheBackend>>, String>
         if link.is_empty() {
             return Err(format!("invalid cache spec '{dsn}' - empty link in chain"));
         }
-        backends.push(open_link(link)?);
+        backends.push(open_link(link).map_err(|e| match comma_chain_hint(spec) {
+            Some(hint) => format!("{e}{hint}"),
+            None => e,
+        })?);
     }
 
     if backends.len() == 1 {
@@ -524,7 +551,13 @@ pub fn validate_dsn(dsn: &str) -> (crate::check::Validation, Option<crate::check
                     file_check = check;
                 }
             }
-            Err(message) => return (crate::check::Validation::error(message), None),
+            Err(message) => {
+                let message = match comma_chain_hint(spec) {
+                    Some(hint) => format!("{message}{hint}"),
+                    None => message,
+                };
+                return (crate::check::Validation::error(message), None);
+            }
         }
     }
     (crate::check::Validation::ok(), file_check)
@@ -664,6 +697,30 @@ mod tests {
         assert!(open_from_dsn("sqlite:/tmp/x.db,20").is_err()); // size needs a byte unit
         assert!(open_from_dsn("mem++mem").is_err()); // empty link
         assert!(open_from_dsn("none+mem").is_err()); // none cannot chain
+    }
+
+    #[test]
+    fn comma_chain_hint_suggests_plus() {
+        // `,` is a positional separator, not a chain separator.  The user meant
+        // to chain a sqlite and a memory backend, so the hint should say so and
+        // show the corrected spec.
+        let err = open_from_dsn("sqlite:cache.db,mem:1gb").err().unwrap();
+        assert!(err.contains("chain backends with '+'"), "{err}");
+        assert!(err.contains("sqlite:cache.db+mem:1gb"), "{err}");
+
+        // A genuine (invalid) sqlite size must not trigger the chain hint.
+        let bad = open_from_dsn("sqlite:cache.db,20").err().unwrap();
+        assert!(!bad.contains("chain backends"), "{bad}");
+
+        // The check/validation path reports the same hint.
+        let (v, _) = validate_dsn("sqlite:cache.db,mem:1gb");
+        assert_eq!(v.status, ValidationStatus::Error);
+        let message = v.message.unwrap_or_default();
+        assert!(message.contains("chain backends with '+'"), "{message}");
+
+        // A valid `+` chain is unaffected.
+        let (ok, _) = validate_dsn("sqlite:/tmp/tbr-cache-hint-test.db+mem:1gb");
+        assert_eq!(ok.status, ValidationStatus::Ok);
     }
 
     #[test]
