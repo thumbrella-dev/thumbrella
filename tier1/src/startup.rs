@@ -18,7 +18,7 @@ pub async fn startup(cfg: &AppConfig) -> Arc<Runtime> {
     crate::http_buf::init_http_client();
 
     //  2. Cache backend
-    // Sticky-cache TTL (seconds).  Every successful result is held in a
+    // Sticky-cache TTL (seconds). Every final result is held in a
     // short-term in-memory cache for this duration regardless of upstream
     // Cache-Control.  Prevents duplicate fetches for near-simultaneous
     // identical requests and enables request coalescing.
@@ -28,10 +28,10 @@ pub async fn startup(cfg: &AppConfig) -> Arc<Runtime> {
         Some(dsn) => match cache::open_from_dsn(dsn) {
             Ok(Some(backend)) => CacheStore::new(backend, STICKY_TTL_SECS),
             // none / empty - caching disabled
-            Ok(None) => CacheStore::none(),
+            Ok(None) => CacheStore::debounce_only(STICKY_TTL_SECS),
             Err(e) => {
                 tracing::error!("cache: could not open {dsn}: {e} - running without cache");
-                CacheStore::none()
+                CacheStore::debounce_only(STICKY_TTL_SECS)
             }
         },
         None => {

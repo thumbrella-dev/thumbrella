@@ -94,7 +94,7 @@ pub struct CallRecord {
 ///
 /// Two results for the same source file share identical `ThumbMedia`.
 /// Clients can compare fields to deduplicate across requests; the server
-/// serialises this struct verbatim into its cache backends.
+/// stores this payload inside a cache entry, with its source URL cleared.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThumbMedia {
     /// `Content-Length` from the upstream server, or 0.

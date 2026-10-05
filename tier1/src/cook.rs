@@ -75,6 +75,10 @@ use crate::source::CacheHints;
 use crate::spec::ShortcutLimits;
 use crate::tracelog::TraceStore;
 
+#[cfg(all(test, feature = "native"))]
+#[path = "cook_freshness_tests.rs"]
+mod freshness_tests;
+
 //  CookStatus
 
 /// Internal pipeline gate.  Steps check `cook.status == CookStatus::Processing`
@@ -355,6 +359,8 @@ pub struct ThumbCook<S: HttpStream> {
     pub render_note: Option<String>,
     /// Cache outcome - `None` until the cache check runs.
     pub cache_hit: Option<String>,
+    debounce_result: Option<ThumbResult>,
+    debounce_leader: Option<crate::cache::DebounceLeader>,
     /// Wall-clock seconds to generate this result.
     pub out_duration: f64,
     /// Bytes read from the source to generate this result.
@@ -394,6 +400,10 @@ pub struct ThumbCook<S: HttpStream> {
     /// Defaults to the shared runtime maximum; cloud callers may lower it
     /// for free accounts without changing the isolate-wide runtime.
     pub cache_max_ttl_secs: u64,
+    /// Retention for validator-bearing media; initialized from the server maximum.
+    pub default_cache_ttl: u64,
+    /// Sliding pin lifetime in seconds. Zero disables pins.
+    pub default_pin_ttl: u64,
     /// True if the client connection dropped before this item completed.
     pub ctx_cancelled: bool,
     /// True when this cook was reconstructed from a higher-tier handoff.
@@ -455,6 +465,8 @@ impl<S: HttpStream> ThumbCook<S> {
             placeholder_source: None,
             render_note: None,
             cache_hit: None,
+            debounce_result: None,
+            debounce_leader: None,
             out_duration: 0.0,
             out_download_bytes: 0,
             render_bytes_consumed: None,
@@ -471,6 +483,8 @@ impl<S: HttpStream> ThumbCook<S> {
             ctx_session_id: None,
             ctx_cache_key: None,
             cache_max_ttl_secs,
+            default_cache_ttl: cache_max_ttl_secs,
+            default_pin_ttl: 0,
             ctx_cancelled: false,
             ctx_handoff: false,
             cache_resolved: false,
@@ -669,6 +683,11 @@ impl<S: HttpStream> ThumbCook<S> {
 
     /// Materialise the client-facing [`ThumbResult`].  Called once at end of `run()`.
     pub fn to_result(&self) -> ThumbResult {
+        if let Some(ref cached) = self.debounce_result {
+            let mut result = cached.clone();
+            result.duration = self.out_duration;
+            return result;
+        }
         let status = match self.status {
             CookStatus::Processing | CookStatus::Complete => ResultStatus::Success,
             CookStatus::Fresh => ResultStatus::Success,
@@ -891,8 +910,7 @@ impl<S: HttpStream> ThumbCook<S> {
         self.run_with_progress(None).await
     }
 
-    /// Run the cache-resolution phase: client freshness check, pre-connect
-    /// KV check, HTTP connect, cache-key derivation, post-connect KV check.
+    /// Run debounce, client freshness, durable freshness, and conditional GET.
     ///
     /// Returns `true` if the cook resolved to a terminal state (cache hit,
     /// 304 Not Modified, connect error, etc.) and `finish()` should be called.
@@ -902,101 +920,82 @@ impl<S: HttpStream> ThumbCook<S> {
     /// Sets `cache_resolved = true` so `run_with_progress` skips this phase
     /// when called afterwards.  The caller (cloud wrapper) can interpose
     /// rate-limit checks between this call and `run_with_progress`.
-    pub async fn resolve_cache(&mut self, _after: &mut AfterResponse, t0: web_time::Instant) -> bool
+    pub async fn resolve_cache(&mut self, after: &mut AfterResponse, t0: web_time::Instant) -> bool
     where
         S: Send + 'static,
     {
         self.cache_resolved = true;
 
-        //  Client-side freshness fast path
+        let identity = crate::source::canonical_url(&self.input.url).unwrap_or_else(|| self.input.url.clone());
+        let cache_key = self.ctx_cache_key.clone().unwrap_or(identity);
+        if !self.ctx_handoff {
+            self.src.cache_key = Some(cache_key.clone());
+            let (result, leader) = self.runtime.cache.debounce_lookup(&cache_key, self.input.cache.as_ref()).await;
+            self.debounce_leader = leader;
+            if let Some(mut result) = result {
+                if result.source != Some(ResultSource::NotModified) {
+                    result.source = Some(ResultSource::Cache);
+                }
+                self.status = match result.status {
+                    ResultStatus::Failed => CookStatus::Failed,
+                    ResultStatus::Overloaded => CookStatus::Overloaded,
+                    _ => CookStatus::Complete,
+                };
+                self.cache_hit = Some("sticky".to_string());
+                self.debounce_result = Some(result);
+                self.out_duration = t0.elapsed().as_secs_f64();
+                return true;
+            }
+        }
+
         if self.input.cache.as_ref().is_some_and(|h| h.is_fresh()) {
+            self.src.cache_hints = self.input.cache.clone();
             self.status = CookStatus::Fresh;
             self.out_duration = t0.elapsed().as_secs_f64();
             return true;
         }
 
-        //  Pre-connect cache check — always runs (handoffs skip via ctx_handoff).
-        // Sets pre_cached and pre_cache_backend for the post-connect path.
-        // Also pins the source identity and the local cache key into self.src
-        // before connect may change src.canonical_url due to redirects.  get
-        // and put must use the same identity for the whole cook or the write
-        // would land under a different key than the read looks for.
-        let mut pre_cached: Option<ThumbResult> = None;
-        let mut pre_cache_backend: Option<String> = None;
-        if !self.ctx_handoff {
-            use crate::source::canonical_url;
-
-            let identity = canonical_url(&self.input.url).unwrap_or_else(|| self.input.url.clone());
-            let cache_key = self.ctx_cache_key.clone().unwrap_or_else(|| identity.clone());
-            self.src.cache_key = Some(cache_key.clone());
-
-            if let Some((cached, backend_name)) = self.runtime.cache.check(&cache_key).await {
-                let decoded = cached
-                    .media
-                    .as_ref()
-                    .filter(|m| !m.cache.is_empty())
-                    .map(|m| m.cache.as_str())
-                    .and_then(CacheHints::decode);
-                if decoded.as_ref().is_some_and(|h| h.is_fresh()) {
-                    // Cache hints are fresh — return immediately.
-                    self.http_close().await;
-                    if let Some(ref media) = cached.media {
-                        self.out_thumbnail = media.thumbnail.clone();
-                        self.media.mime = Some(media.mime.clone());
-                        self.media.file_size = Some(media.file_size);
-                        self.media.kind = Some(media.kind);
-                        self.media.extension = Some(crate::pipeline::canonical_extension(&media.extension));
-                        self.media.properties = Some(media.properties.clone());
-                    }
-                    self.out_message = cached.message.unwrap_or_default();
-                    self.out_placeholder = cached.media.as_ref().and_then(|m| {
-                        if m.placeholder.is_empty() { None } else { Some(m.placeholder.clone()) }
-                    });
-                    self.out_download_bytes = cached.download_size;
-                    self.src.cache_hints = decoded;
-                    self.cache_hit = Some(backend_name.to_string());
-                    self.status = CookStatus::Complete;
-                    self.out_duration = t0.elapsed().as_secs_f64();
-                    return true;
+        let pre_cached = if self.ctx_handoff {
+            None
+        } else {
+            self.runtime.cache.check_entry(&cache_key, self.default_pin_ttl).await
+        };
+        let mut validates_stored = false;
+        if let Some((ref entry, backend)) = pre_cached {
+            if entry.is_fresh(crate::cache::unix_now_secs()) {
+                self.restore_cached_media(&entry.media, backend);
+                self.src.cache_hints = CacheHints::decode(&entry.media.cache);
+                self.status = CookStatus::Complete;
+                self.out_duration = t0.elapsed().as_secs_f64();
+                return true;
+            }
+            if let Some(hints) = CacheHints::decode(&entry.media.cache) {
+                if hints.to_conditional().is_some() {
+                    // Prefer the validator belonging to the bytes we can serve.
+                    self.input.cache = Some(hints);
+                    validates_stored = true;
                 }
-
-                // Not fresh — keep for post-connect check.
-                // Merge decoded hints with any client-supplied hints.
-                if self.input.cache.is_none() {
-                    self.input.cache = decoded;
-                }
-                pre_cached = Some(cached);
-                pre_cache_backend = Some(backend_name.to_string());
             }
         }
 
-        //  connect
         let t_step = web_time::Instant::now();
         pipeline::connect(self).await;
         self.tel_connect_secs = t_step.elapsed().as_secs_f64();
         if !self.status.is_processing() {
             if self.status == CookStatus::Fresh {
-                if let Some(cached) = pre_cached {
-                    if let Some(ref media) = cached.media {
-                        self.out_thumbnail = media.thumbnail.clone();
-                        self.media.mime = Some(media.mime.clone());
-                        self.media.file_size = Some(media.file_size);
-                        self.media.kind = Some(media.kind);
-                        self.media.extension = Some(crate::pipeline::canonical_extension(&media.extension));
-                        self.media.properties = Some(media.properties.clone());
+                let prior = self.input.cache.clone().expect("304 requires conditional hints");
+                let updated = prior.revalidated(&self.http_headers);
+                self.src.cache_hints = Some(updated.clone().unwrap_or(prior));
+                if validates_stored && let Some((mut entry, backend)) = pre_cached {
+                    let expected_cache = entry.media.cache.clone();
+                    self.restore_cached_media(&entry.media, backend);
+                    if updated.is_some() {
+                        entry.set_cache(self.src.cache_hints.as_ref().unwrap()
+                            .encode(self.runtime.cache_default_ttl_secs));
+                        entry.cache_until = self.cache_expires_at();
+                        entry.last_accessed_at = crate::cache::unix_now_secs();
+                        self.runtime.cache.revalidate(cache_key, entry, expected_cache, after);
                     }
-                    self.out_message = cached.message.unwrap_or_default();
-                    self.out_placeholder = cached.media.as_ref().and_then(|m| {
-                        if m.placeholder.is_empty() { None } else { Some(m.placeholder.clone()) }
-                    });
-                    self.out_download_bytes = cached.download_size;
-                    self.src.cache_hints = cached
-                        .media
-                        .as_ref()
-                        .filter(|m| !m.cache.is_empty())
-                        .map(|m| m.cache.as_str())
-                        .and_then(CacheHints::decode);
-                    self.cache_hit = pre_cache_backend.clone();
                 }
             }
             self.stamp_download_bytes();
@@ -1004,41 +1003,19 @@ impl<S: HttpStream> ThumbCook<S> {
             return true;
         }
 
-        //  Post-connect cache resolution — reuse pre_cached from above.
-        // If headers confirm the cached data is still valid, return it.
-        // Otherwise fall through to the full pipeline.
-        //
-        // cache_key was already set during pre-connect above; connect may
-        // have changed src.canonical_url (redirects) but the key is stable.
-        if !self.ctx_handoff
-            && let Some(ref cached) = pre_cached
-            && self.src.cache_hints.as_ref().is_some_and(|h| h.is_fresh())
-        {
-            self.http_close().await;
-            if let Some(ref media) = cached.media {
-                self.out_thumbnail = media.thumbnail.clone();
-                self.media.mime = Some(media.mime.clone());
-                self.media.file_size = Some(media.file_size);
-                self.media.kind = Some(media.kind);
-                self.media.extension = Some(media.extension.clone());
-                self.media.properties = Some(media.properties.clone());
-            }
-            self.out_message = cached.message.clone().unwrap_or_default();
-            self.out_placeholder = cached
-                .media
-                .as_ref()
-                .and_then(|m| if m.placeholder.is_empty() { None } else { Some(m.placeholder.clone()) });
-            self.out_download_bytes = cached.download_size;
-            self.cache_hit = pre_cache_backend.clone();
-            self.status = CookStatus::Complete;
-            self.out_duration = t0.elapsed().as_secs_f64();
-            return true;
-        }
-
-        // Cache did not resolve.  Connection is open, headers are set.
-        // Caller should check rate limits, then call run_with_progress to
-        // continue with inspect / shortcut / render.
+        // A 200 describes new content, never proof that prior bytes are valid.
         false
+    }
+
+    fn restore_cached_media(&mut self, media: &ThumbMedia, backend: &str) {
+        self.out_thumbnail = media.thumbnail.clone();
+        self.media.mime = Some(media.mime.clone());
+        self.media.file_size = Some(media.file_size);
+        self.media.kind = Some(media.kind);
+        self.media.extension = Some(crate::pipeline::canonical_extension(&media.extension));
+        self.media.properties = Some(media.properties.clone());
+        self.out_placeholder = (!media.placeholder.is_empty()).then(|| media.placeholder.clone());
+        self.cache_hit = Some(backend.to_string());
     }
 
     /// Run the full pipeline and optionally emit intermediate progress snapshots.
@@ -1117,7 +1094,7 @@ impl<S: HttpStream> ThumbCook<S> {
                     } else {
                         self.cache_expires_at()
                     };
-                    self.runtime.cache.store(key, &result, cost, expires, &mut after);
+                    self.runtime.cache.store(key, &result, cost, expires, self.default_pin_ttl, &mut after);
                 }
                 return self.finish(after);
             }
@@ -1140,7 +1117,7 @@ impl<S: HttpStream> ThumbCook<S> {
                 let result = self.to_result();
                 let cost = render_cost_from_secs(self.out_duration);
                 let expires = self.cache_expires_at();
-                self.runtime.cache.store(key, &result, cost, expires, &mut after);
+                self.runtime.cache.store(key, &result, cost, expires, self.default_pin_ttl, &mut after);
             }
             return self.finish(after);
         }
@@ -1202,7 +1179,7 @@ impl<S: HttpStream> ThumbCook<S> {
                         let result = self.to_result();
                         let cost = render_cost_from_secs(self.out_duration);
                         let expires = self.cache_expires_at();
-                        self.runtime.cache.store(key, &result, cost, expires, &mut after);
+                        self.runtime.cache.store(key, &result, cost, expires, self.default_pin_ttl, &mut after);
                     }
                 }
                 return self.finish(after);
@@ -1326,7 +1303,7 @@ impl<S: HttpStream> ThumbCook<S> {
                                 let result = self.to_result();
                                 let cost = render_cost_from_secs(self.out_duration);
                                 let expires = self.cache_expires_at();
-                                self.runtime.cache.store(key, &result, cost, expires, &mut after);
+                                self.runtime.cache.store(key, &result, cost, expires, self.default_pin_ttl, &mut after);
                             }
                             return self.finish(after);
                         }
@@ -1363,13 +1340,8 @@ impl<S: HttpStream> ThumbCook<S> {
 
     /// Compute the cache **retention** deadline for the current cook.
     ///
-    /// This is how long the backend should keep the entry, which is not how long
-    /// the upstream says it stays fresh.  The upstream freshness window is
-    /// treated as a lower bound so that a resource which is stale on arrival
-    /// still gets the default window - see [`crate::cache::retention_deadline`]
-    /// for why, and [`crate::cache::CacheBackend`] for the contract.
-    ///
-    /// Capped by `cache_max_ttl_secs`.
+    /// Validators permit long retention; otherwise retention follows freshness.
+    /// Client freshness remains independent of validator retention.
     fn cache_expires_at(&self) -> u64 {
         let now = web_time::SystemTime::now()
             .duration_since(web_time::SystemTime::UNIX_EPOCH)
@@ -1378,7 +1350,8 @@ impl<S: HttpStream> ThumbCook<S> {
 
         crate::cache::retention_deadline(
             now,
-            self.src.cache_hints.as_ref().and_then(|h| h.expires_at),
+            self.src.cache_hints.as_ref(),
+            self.default_cache_ttl,
             self.runtime.cache_default_ttl_secs,
             self.cache_max_ttl_secs,
         )
@@ -1392,7 +1365,7 @@ impl<S: HttpStream> ThumbCook<S> {
         // Always return a thumbnail.  If the pipeline didn't produce one,
         // fill in the appropriate placeholder JPEG - except for NotModified,
         // where an empty thumbnail tells the caller "use your cached copy".
-        if self.out_thumbnail.is_empty() && self.status != CookStatus::Fresh {
+        if self.debounce_result.is_none() && self.out_thumbnail.is_empty() && self.status != CookStatus::Fresh {
             if let Some(kind) = self.media.kind {
                 // Kind was identified: use the kind-specific placeholder.
                 // If the pipeline failed at the render step (e.g. unsupported
@@ -1435,6 +1408,17 @@ impl<S: HttpStream> ThumbCook<S> {
         }
 
         let result = self.to_result();
+        if self.debounce_result.is_none()
+            && let Some(ref key) = self.src.cache_key
+        {
+            if self.ctx_handoff {
+                self.debounce_leader.take();
+            } else if let Some(leader) = self.debounce_leader.take() {
+                leader.complete(&result);
+            } else {
+                self.runtime.cache.debounce_store(key, &result);
+            }
+        }
         let trace = self.to_trace();
         self.runtime.trace.record(trace.clone(), &mut after);
         (result, trace, after)

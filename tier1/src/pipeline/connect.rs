@@ -78,6 +78,7 @@ pub async fn connect<S: HttpStream>(cook: &mut ThumbCook<S>) {
     cook.http_headers = buf.headers.clone();
     cook.http_accepts_ranges = buf.accepts_ranges;
     cook.media.file_size = buf.content_length;
+    cook.src.cache_hints = CacheHints::from_response_headers(&buf.headers);
 
     // 429 / 503 - rate limiting: engage origin back-off, return Unavailable.
     // Parse `Retry-After` (integer seconds only); fall back to default TTL.
@@ -98,6 +99,10 @@ pub async fn connect<S: HttpStream>(cook: &mut ThumbCook<S>) {
     // Classify remaining non-2xx responses; record them in the URL failure cache.
     let fail_msg: Option<Arc<str>> = match buf.status {
         304 => {
+            if cook.input.cache.as_ref().and_then(CacheHints::to_conditional).is_none() {
+                cook.fail("source returned 304 without a conditional request");
+                return;
+            }
             cook.status = CookStatus::Fresh;
             return;
         }
@@ -118,7 +123,6 @@ pub async fn connect<S: HttpStream>(cook: &mut ThumbCook<S>) {
         return;
     }
 
-    cook.src.cache_hints = CacheHints::from_response_headers(&buf.headers);
     cook.src.final_url = Some(buf.url.clone());
     cook.src.canonical_url = canonical_url(&buf.url);
 

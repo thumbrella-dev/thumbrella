@@ -2,6 +2,10 @@
 
 ## Development
 
+- Fix cache freshness and revalidation on updated responses
+- Propogate entries across multiple cache backends
+- Internal cache entries better track lifetimes
+- Remove repeated render after cancellation
 
 ## 1.6.0 - 2026/09/26
 

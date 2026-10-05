@@ -236,6 +236,9 @@ pub struct CacheHints {
     /// The response is specific to one user and should not be shared.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub private: bool,
+    /// Storage is permitted, but reuse requires upstream validation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_cache: bool,
 }
 
 impl CacheHints {
@@ -282,6 +285,10 @@ impl CacheHints {
                         hints.no_store = true;
                         any = true;
                     }
+                    "no-cache" => {
+                        hints.no_cache = true;
+                        any = true;
+                    }
                     "private" => {
                         hints.private = true;
                         any = true;
@@ -294,7 +301,7 @@ impl CacheHints {
                 let age_consumed = headers.get("age").and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0);
                 let remaining = age_secs.saturating_sub(age_consumed);
                 let now = unix_now_secs();
-                hints.expires_at = Some(now + remaining);
+                hints.expires_at = Some(now.saturating_add(remaining));
                 any = true;
             }
         }
@@ -336,10 +343,35 @@ impl CacheHints {
 
     /// Returns `true` if the resource should still be considered fresh.
     ///
-    /// Freshness is determined solely from `expires_at`.  When `expires_at` is
-    /// `None` the resource has no explicit freshness window and is always stale.
+    /// Freshness requires a future `expires_at` and a policy permitting reuse.
+    /// `no-cache` requires revalidation even when a future expiry is supplied.
     pub fn is_fresh(&self) -> bool {
-        self.expires_at.is_some_and(|exp| unix_now_secs() < exp)
+        !self.no_cache && !self.disallow_caching()
+            && self.expires_at.is_some_and(|exp| unix_now_secs() < exp)
+    }
+
+    /// Merge metadata for the representation validated by a 304. A response
+    /// without cache metadata leaves the prior hints unchanged.
+    pub fn revalidated(&self, headers: &std::collections::HashMap<String, String>) -> Option<Self> {
+        let updated = Self::from_response_headers(headers)?;
+        let mut merged = self.clone();
+        if headers.contains_key("cache-control") {
+            merged.no_cache = updated.no_cache;
+            merged.no_store = updated.no_store;
+            merged.private = updated.private;
+            merged.immutable = updated.immutable;
+            merged.stale_while_revalidate = updated.stale_while_revalidate;
+        }
+        if updated.expires_at.is_some() {
+            merged.expires_at = updated.expires_at;
+        }
+        if updated.etag.is_some() {
+            merged.etag = updated.etag;
+        }
+        if updated.last_modified.is_some() {
+            merged.last_modified = updated.last_modified;
+        }
+        Some(merged)
     }
 
     /// Returns `true` if this resource must NOT be stored in any cache.
@@ -385,6 +417,8 @@ impl CacheHints {
     ///
     /// Format: `hex_epoch:base64(binary_blob)`.  Returns `""` (empty) when
     /// the response is uncacheable (`no-store` or `private`).
+    /// `no-cache` retains validators but uses stale epoch `1`, including for
+    /// older clients that do not understand the appended policy flag.
     ///
     /// Trailing zero bytes in the blob are trimmed to keep the string compact.
     ///
@@ -400,7 +434,9 @@ impl CacheHints {
         }
 
         let has_validator = self.etag.is_some() || self.last_modified.is_some();
-        let epoch = if let Some(e) = self.expires_at {
+        let epoch = if self.no_cache {
+            1
+        } else if let Some(e) = self.expires_at {
             e
         } else if has_validator {
             1 // stale immediately, but client should store for conditional revalidation
@@ -432,6 +468,9 @@ impl CacheHints {
 
         // Field 5: private (bool)
         buf.push(if self.private { 1 } else { 0 });
+
+        // Field 6: no_cache (old readers still see the stale epoch).
+        buf.push(if self.no_cache { 1 } else { 0 });
 
         // Trim trailing zero bytes (missing positional fields default to zero),
         // but keep at least one byte so the base64 portion is never empty.
@@ -499,6 +538,10 @@ impl CacheHints {
         // Field 5: private
         if pos < buf.len() {
             hints.private = buf[pos] != 0;
+            pos += 1;
+        }
+        if pos < buf.len() {
+            hints.no_cache = buf[pos] != 0;
         }
 
         Some(hints)
@@ -535,7 +578,7 @@ impl CacheHints {
 
 #[cfg(test)]
 mod tests {
-    use super::CacheHints;
+    use super::{CacheHints, unix_now_secs};
 
     #[test]
     fn round_trip_full() {
@@ -600,5 +643,64 @@ mod tests {
     #[test]
     fn decode_none_on_empty_blob() {
         assert!(CacheHints::decode("0:").is_none());
+    }
+
+    #[test]
+    fn no_cache_round_trips_and_forces_stale_epoch_for_older_readers() {
+        let headers = std::collections::HashMap::from([
+            ("cache-control".into(), "no-cache, max-age=3600".into()),
+            ("etag".into(), "\"A\"".into()),
+        ]);
+        let hints = CacheHints::from_response_headers(&headers).unwrap();
+        assert!(hints.no_cache);
+        assert!(!hints.no_store);
+        assert!(!hints.is_fresh());
+        let token = hints.encode(60);
+        assert!(token.starts_with("1:"));
+        let decoded = CacheHints::decode(&token).unwrap();
+        assert!(decoded.no_cache);
+        assert_eq!(decoded.etag, hints.etag);
+        assert!(!decoded.is_fresh());
+    }
+
+    #[test]
+    fn age_reduces_freshness_and_shared_max_age_wins_regardless_of_order() {
+        let now = unix_now_secs();
+        for cache_control in ["max-age=500, s-maxage=100", "s-maxage=100, max-age=500"] {
+            let headers = std::collections::HashMap::from([
+                ("cache-control".into(), cache_control.into()),
+                ("age".into(), "90".into()),
+            ]);
+            let hints = CacheHints::from_response_headers(&headers).unwrap();
+            assert!((now + 10..=unix_now_secs() + 10).contains(&hints.expires_at.unwrap()));
+        }
+        let headers = std::collections::HashMap::from([
+            ("cache-control".into(), "max-age=100".into()),
+            ("age".into(), "200".into()),
+        ]);
+        assert!(!CacheHints::from_response_headers(&headers).unwrap().is_fresh());
+    }
+
+    #[test]
+    fn revalidation_merges_only_supplied_metadata_and_preserves_missing_validators() {
+        let original = CacheHints {
+            expires_at: Some(1),
+            etag: Some("\"A\"".into()),
+            no_cache: true,
+            ..Default::default()
+        };
+        assert!(original.revalidated(&std::collections::HashMap::new()).is_none());
+        let only_validator = std::collections::HashMap::from([("etag".into(), "\"B\"".into())]);
+        let merged = original.revalidated(&only_validator).unwrap();
+        assert_eq!(merged.etag.as_deref(), Some("\"B\""));
+        assert_eq!(merged.expires_at, Some(1));
+        assert!(merged.no_cache);
+        let fresh = std::collections::HashMap::from([("cache-control".into(), "max-age=100".into())]);
+        let merged = original.revalidated(&fresh).unwrap();
+        assert_eq!(merged.etag.as_deref(), Some("\"A\""));
+        assert!(!merged.no_cache);
+        assert!(merged.is_fresh());
+        let must_validate = std::collections::HashMap::from([("cache-control".into(), "no-cache".into())]);
+        assert!(!merged.revalidated(&must_validate).unwrap().is_fresh());
     }
 }

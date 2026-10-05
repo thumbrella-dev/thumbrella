@@ -6,21 +6,21 @@
 //!
 //! ## Policy
 //!
-//! - `get` consults each tier in order and returns the first hit.
+//! - `get` returns the first hit. When refreshing pins it also consults later
+//!   tiers so durable copies receive the same lifetime extension.
+//! - `get_pin` returns the first entry with a live pin deadline.
 //! - `put` writes through to every tier, so each layer is populated together.
 //!
-//! Read-hits are intentionally *not* promoted back into earlier tiers: the
-//! backend trait and storage do not carry an entry's original `expires_at`
-//! across a read, so a faithful re-insert is impossible and write-through
-//! already keeps the front tiers warm in steady state.  The short sticky
-//! frontend above `CacheStore` handles burst de-duplication regardless.
+//! Both lookup paths asynchronously backfill earlier tiers that missed, without
+//! extending deadlines. Promotion uses the native [`AfterResponse`] scheduler
+//! and does not wait for writes. A destination with a live entry is left alone.
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use crate::after::DeferredFuture;
-use crate::cache::CacheBackend;
+use crate::after::{AfterResponse, DeferredFuture};
+use crate::cache::{CacheBackend, CacheEntry};
 use crate::result::ThumbMedia;
 
 /// A read-through, write-through chain of cache backends.
@@ -40,6 +40,191 @@ impl ChainCacheBackend {
         let names: Vec<&str> = self.tiers.iter().map(|t| t.name()).collect();
         names.join("+")
     }
+
+    fn backfill(&self, key: &str, entry: &CacheEntry, missed: &[usize]) {
+        let mut after = AfterResponse::new();
+        for &index in missed {
+            after.push(self.tiers[index].promote(key.to_string(), entry.clone()));
+        }
+        after.drain_spawn();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    use tokio::sync::Semaphore;
+    use crate::cache::{memory::MemoryCacheBackend, sqlite::SqliteCacheBackend, unix_now_secs};
+
+    struct ObservedBackend {
+        backend: Arc<dyn CacheBackend>,
+        reads: AtomicUsize,
+        started: Arc<Semaphore>,
+        completed: Arc<Semaphore>,
+        gate: Option<Arc<Semaphore>>,
+    }
+
+    impl ObservedBackend {
+        fn new(backend: Arc<dyn CacheBackend>, blocked: bool) -> Arc<Self> {
+            Arc::new(Self {
+                backend,
+                reads: AtomicUsize::new(0),
+                started: Arc::new(Semaphore::new(0)),
+                completed: Arc::new(Semaphore::new(0)),
+                gate: blocked.then(|| Arc::new(Semaphore::new(0))),
+            })
+        }
+
+        async fn wait(semaphore: &Semaphore) {
+            tokio::time::timeout(Duration::from_secs(2), semaphore.acquire())
+                .await.expect("background promotion timed out").unwrap().forget();
+        }
+    }
+
+    impl CacheBackend for ObservedBackend {
+        fn name(&self) -> &'static str { self.backend.name() }
+
+        fn get_entry<'a>(&'a self, key: &'a str, pin_ttl: u64) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + Send + 'a>> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.backend.get_entry(key, pin_ttl)
+        }
+
+        fn get_pin_entry<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + Send + 'a>> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.backend.get_pin_entry(key)
+        }
+
+        fn promote(&self, key: String, entry: CacheEntry) -> DeferredFuture {
+            let write = self.backend.promote(key, entry);
+            let started = self.started.clone();
+            let completed = self.completed.clone();
+            let gate = self.gate.clone();
+            Box::pin(async move {
+                started.add_permits(1);
+                if let Some(gate) = gate {
+                    gate.acquire().await.unwrap().forget();
+                }
+                write.await;
+                completed.add_permits(1);
+            })
+        }
+
+        fn revalidate(&self, key: String, entry: CacheEntry, expected_cache: String) -> DeferredFuture {
+            self.backend.revalidate(key, entry, expected_cache)
+        }
+
+        fn put(&self, key: String, media: ThumbMedia, cost: u8, cache_until: u64, pin_ttl: u64) -> DeferredFuture {
+            self.backend.put(key, media, cost, cache_until, pin_ttl)
+        }
+    }
+
+    fn memory() -> Arc<dyn CacheBackend> {
+        Arc::new(MemoryCacheBackend::with_max_entries(100))
+    }
+
+    fn entry() -> CacheEntry {
+        let now = unix_now_secs();
+        CacheEntry::new(ThumbMedia {
+            thumbnail: vec![1, 2, 3],
+            cache: crate::CacheHints::expiring_in(60).encode(60),
+            url: "https://example.com/source.jpg".into(),
+            ..Default::default()
+        }, 73, now + 300, 600, now)
+    }
+
+    #[tokio::test]
+    async fn sqlite_hit_backfills_memory_without_waiting_or_renewing_deadlines() {
+        let memory = ObservedBackend::new(memory(), true);
+        let sqlite = ObservedBackend::new(Arc::new(SqliteCacheBackend::open(":memory:").unwrap()), false);
+        let original = entry();
+        sqlite.backend.promote("key".into(), original.clone()).await;
+        let chain = ChainCacheBackend::new(vec![memory.clone(), sqlite.clone()]);
+        let hit = tokio::time::timeout(Duration::from_secs(2), chain.get("key", 0))
+            .await.expect("lookup waited for blocked promotion").unwrap();
+        assert_eq!(hit.thumbnail, original.media.thumbnail);
+        ObservedBackend::wait(&memory.started).await;
+        assert!(memory.backend.get("key", 0).await.is_none());
+        memory.gate.as_ref().unwrap().add_permits(1);
+        ObservedBackend::wait(&memory.completed).await;
+        let copy = memory.backend.get_entry("key", 0).await.unwrap();
+        assert_eq!(copy.cache_until, original.cache_until);
+        assert_eq!(copy.fresh_until, original.fresh_until);
+        assert_eq!(copy.pin_until, original.pin_until);
+        assert_eq!(copy.render_cost, original.render_cost);
+        assert!(copy.media.url.is_empty());
+        assert!(chain.get("key", 0).await.is_some());
+        assert_eq!(sqlite.reads.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn backfills_all_earlier_misses_independently_and_leaves_later_tiers_alone() {
+        let first = ObservedBackend::new(memory(), true);
+        let second = ObservedBackend::new(Arc::new(SqliteCacheBackend::open(":memory:").unwrap()), false);
+        let source = ObservedBackend::new(memory(), false);
+        let later = ObservedBackend::new(memory(), false);
+        source.backend.promote("key".into(), entry()).await;
+        let chain = ChainCacheBackend::new(vec![first.clone(), second.clone(), source.clone(), later.clone()]);
+        assert!(chain.get("key", 0).await.is_some());
+        ObservedBackend::wait(&second.completed).await;
+        assert!(second.backend.get("key", 0).await.is_some());
+        assert!(first.backend.get("key", 0).await.is_none());
+        assert_eq!(later.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(source.started.available_permits(), 0);
+        assert_eq!(later.started.available_permits(), 0);
+        first.gate.as_ref().unwrap().add_permits(1);
+        ObservedBackend::wait(&first.completed).await;
+    }
+
+    #[tokio::test]
+    async fn pin_hits_backfill_without_extending_pin_or_enabling_cache_lookups() {
+        let destination = ObservedBackend::new(memory(), false);
+        let source = memory();
+        let mut original = entry();
+        original.cache_until = 0;
+        original.set_cache(String::new());
+        source.promote("pin".into(), original.clone()).await;
+        let chain = ChainCacheBackend::new(vec![destination.clone(), source]);
+        assert!(chain.get_pin("pin").await.is_some());
+        ObservedBackend::wait(&destination.completed).await;
+        let copy = destination.backend.get_pin_entry("pin").await.unwrap();
+        assert_eq!(copy.pin_until, original.pin_until);
+        assert_eq!(copy.cache_until, 0);
+        assert_eq!(copy.render_cost, original.render_cost);
+        assert!(destination.backend.get("pin", 0).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn cache_hits_promote_the_refreshed_pin_deadline() {
+        let destination = ObservedBackend::new(memory(), false);
+        let source = memory();
+        source.promote("key".into(), entry()).await;
+        let chain = ChainCacheBackend::new(vec![destination.clone(), source.clone()]);
+        let hit = chain.get_entry("key", 1200).await.unwrap();
+        ObservedBackend::wait(&destination.completed).await;
+        let copy = destination.backend.get_entry("key", 0).await.unwrap();
+        assert_eq!(copy.pin_until, hit.pin_until);
+        assert_eq!(copy.pin_until, source.get_entry("key", 0).await.unwrap().pin_until);
+    }
+
+    #[tokio::test]
+    async fn misses_do_not_schedule_backfill_and_definition_order_is_preserved() {
+        let first = ObservedBackend::new(Arc::new(SqliteCacheBackend::open(":memory:").unwrap()), false);
+        let second = ObservedBackend::new(memory(), false);
+        let chain = ChainCacheBackend::new(vec![first.clone(), second.clone()]);
+        assert!(chain.get("missing", 0).await.is_none());
+        assert!(chain.get_pin("missing").await.is_none());
+        assert_eq!(first.started.available_permits(), 0);
+        assert_eq!(second.started.available_permits(), 0);
+        let mut disk_entry = entry();
+        disk_entry.media.thumbnail = vec![7];
+        first.backend.promote("key".into(), disk_entry).await;
+        second.backend.promote("key".into(), entry()).await;
+        assert_eq!(chain.describe(), "sqlite+memory");
+        assert_eq!(chain.get("key", 0).await.unwrap().thumbnail, vec![7]);
+        assert_eq!(second.reads.load(Ordering::SeqCst), 2);
+    }
 }
 
 impl CacheBackend for ChainCacheBackend {
@@ -47,25 +232,66 @@ impl CacheBackend for ChainCacheBackend {
         "chain"
     }
 
-    fn get<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = Option<ThumbMedia>> + Send + 'a>> {
-        let tiers = self.tiers.clone();
+    fn get_entry<'a>(&'a self, key: &'a str, pin_ttl: u64) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + Send + 'a>> {
         Box::pin(async move {
-            for tier in tiers.iter() {
-                if let Some(media) = tier.get(key).await {
-                    return Some(media);
+            let mut hit = None;
+            let mut missed = Vec::new();
+            for (index, tier) in self.tiers.iter().enumerate() {
+                if let Some(entry) = tier.get_entry(key, pin_ttl).await {
+                    if hit.is_none() {
+                        self.backfill(key, &entry, &missed);
+                        hit = Some(entry);
+                    }
+                    if pin_ttl == 0 {
+                        break;
+                    }
+                } else if hit.is_none() {
+                    missed.push(index);
                 }
+            }
+            hit
+        })
+    }
+
+    fn get_pin_entry<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut missed = Vec::new();
+            for (index, tier) in self.tiers.iter().enumerate() {
+                if let Some(entry) = tier.get_pin_entry(key).await {
+                    self.backfill(key, &entry, &missed);
+                    return Some(entry);
+                }
+                missed.push(index);
             }
             None
         })
     }
 
-    fn put(&self, key: String, media: ThumbMedia, cost: u8, expires_at: u64) -> DeferredFuture {
+    fn promote(&self, key: String, entry: CacheEntry) -> DeferredFuture {
+        let tiers = self.tiers.clone();
+        Box::pin(async move {
+            for tier in tiers {
+                tier.promote(key.clone(), entry.clone()).await;
+            }
+        })
+    }
+
+    fn put(&self, key: String, media: ThumbMedia, cost: u8, cache_until: u64, pin_ttl: u64) -> DeferredFuture {
         let tiers = self.tiers.clone();
         Box::pin(async move {
             for tier in tiers.iter() {
                 // Each tier returns an already-deferred write; run them in
                 // order.  Backends swallow their own errors.
-                tier.put(key.clone(), media.clone(), cost, expires_at).await;
+                tier.put(key.clone(), media.clone(), cost, cache_until, pin_ttl).await;
+            }
+        })
+    }
+
+    fn revalidate(&self, key: String, entry: CacheEntry, expected_cache: String) -> DeferredFuture {
+        let tiers = self.tiers.clone();
+        Box::pin(async move {
+            for tier in tiers {
+                tier.revalidate(key.clone(), entry.clone(), expected_cache.clone()).await;
             }
         })
     }

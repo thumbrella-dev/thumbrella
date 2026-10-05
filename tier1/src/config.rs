@@ -75,6 +75,9 @@ pub struct AppConfig {
     /// Cache backend spec (`TBR_CACHE`).  Zero or more backends chained with
     /// `+`, fastest first.  Links: `mem[:size]`, `sqlite:path[,size]`,
     /// `cloud:connect`, or `none` to disable.
+    /// Lookup order is exactly the definition order. Later hits asynchronously
+    /// backfill earlier missed backends while preserving entry deadlines.
+    /// Backend size limits are best-effort eviction budgets, not strict bounds.
     pub cache_url: Option<String>,
     /// Maximum server-side cache TTL in seconds.  Upstream `max-age` values
     /// are capped at this duration.  Default: 7 days (604800).

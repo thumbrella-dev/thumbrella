@@ -29,17 +29,33 @@
 //!
 //! ```text
 //! POST /cache/lookup
-//!   request: { "url": "<canonical source url>", "cache_format": <u32> }
+//!   request: { "url": "<canonical source url>", "cache_format": <u32>,
+//!              "pin_ttl_secs": <u64, defaults to 0> }
 //!   hit:     200 <ThumbMedia json, url restored>
 //!   miss:    200 { "status": "miss", "url": "<url>" }
+//!   internal callers add "include_entry": true to receive CacheEntry metadata
+//!   with absolute deadlines and render cost, with the media URL still omitted
+//!
+//! POST /cache/pin
+//!   request and response: same as lookup, but checks pin expiration only
+//!   and does not extend it. This is authenticated backend access, not a
+//!   public pin URL endpoint.
 //!
 //! POST /cache/store
 //!   request: { "url": "<canonical source url>",
 //!              "cache_format": <u32>,
 //!              "retain_secs": <u64>,
+//!              "pin_ttl_secs": <u64, defaults to 0>,
 //!              "media": <ThumbMedia json, url omitted> }
 //!   success: 200 { "status": "stored", "url": "<url>", "ttl_secs": <u64> }
 //! ```
+//!
+//! Backfill writes set the relative TTLs to zero and supply `promotion` with
+//! `fresh_until`, `cache_until`, `pin_until`, `last_accessed_at`, and `render_cost`. The cloud
+//! caps, but never extends, these deadlines and skips existing live entries.
+//! Conditional insertion is best-effort across cloud isolates.
+//! Revalidation supplies the same metadata plus `expected_cache`; it replaces
+//! only that stored representation, preserving pin lifetime and render cost.
 //!
 //! `cache_format` is [`crate::TBR_CACHE_VERSION`]: the format this build writes.
 //! The cloud salts it into the storage key, so two incompatible server versions
@@ -48,8 +64,8 @@
 //!
 //! ## Retention is not freshness
 //!
-//! `retain_secs` comes from `put`'s `expires_at` and says how long the cloud
-//! should *keep* the entry.  It is deliberately independent of the freshness
+//! `retain_secs` comes from `put`'s `cache_until` and controls cache lookups.
+//! Physical retention uses the longer cache or pin lifetime. It is independent of the freshness
 //! metadata inside `media.cache`, which the cloud stores and returns verbatim.
 //!
 //! The two must not be conflated.  A stale entry is still valuable: it carries
@@ -58,7 +74,8 @@
 //! why an entry whose freshness window has already closed is still worth
 //! retaining, and why retention must never be derived from `media.cache`.
 //! The cloud caps retention at the account plan's maximum and rejects only
-//! writes with no retention left at all.
+//! writes with neither cache retention nor pin lifetime. Pin refreshes in KV
+//! are best-effort read/modify/write operations, not cross-isolate transactions.
 //!
 //! ## Health check
 //!
@@ -71,13 +88,14 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use crate::after::DeferredFuture;
-use crate::cache::CacheBackend;
+use crate::cache::{CacheBackend, CacheEntry, CacheEntryMetadata, unix_now_secs};
 use crate::connect::ConnectTarget;
 
 /// Default cloud service host.
 const DEFAULT_CLOUD_HOST: &str = "https://cloud.thumbrella.dev";
 
 /// Cache backend that delegates to the Thumbrella cloud service.
+#[derive(Clone)]
 pub struct CloudCacheBackend {
     base_url: String,
     auth_header: String,
@@ -125,6 +143,11 @@ struct StoreRequest<'a> {
     cache_format: u32,
     /// Retention window in seconds - how long the cloud should keep the entry.
     retain_secs: u64,
+    pin_ttl_secs: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    promotion: Option<CacheEntryMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected_cache: Option<String>,
     /// The stored media.  Its `url` field is cleared: the key already
     /// identifies the source, so embedding it again would only leak the URL
     /// into a KV dump.
@@ -157,21 +180,20 @@ fn snippet(text: &str) -> String {
     format!("{}...", &trimmed[..end])
 }
 
-impl CacheBackend for CloudCacheBackend {
-    fn name(&self) -> &'static str {
-        "cloud"
-    }
-
-    fn get<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = Option<crate::result::ThumbMedia>> + Send + 'a>> {
+impl CloudCacheBackend {
+    fn lookup<'a>(&'a self, key: &'a str, pin: bool, pin_ttl: u64) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + Send + 'a>> {
         debug_assert!(
             is_source_identity(key),
             "cloud cache addresses entries by source identity, but got an opaque key {key:?}",
         );
-        let url = format!("{}/cache/lookup", self.base_url);
+        let endpoint = if pin { "pin" } else { "lookup" };
+        let url = format!("{}/cache/{endpoint}", self.base_url);
         let auth = self.auth_header.clone();
         let body = serde_json::json!({
             "url": key,
             "cache_format": crate::TBR_CACHE_VERSION,
+            "pin_ttl_secs": pin_ttl,
+            "include_entry": true,
         })
         .to_string();
         let client = self.client.clone();
@@ -210,8 +232,8 @@ impl CacheBackend for CloudCacheBackend {
                 return None;
             }
 
-            match serde_json::from_value::<crate::result::ThumbMedia>(json) {
-                Ok(media) => Some(media),
+            match serde_json::from_value::<CacheEntry>(json) {
+                Ok(entry) => Some(entry),
                 Err(e) => {
                     tracing::warn!("cloud cache: lookup for {key} returned an unusable entry - {e}");
                     None
@@ -219,8 +241,7 @@ impl CacheBackend for CloudCacheBackend {
             }
         })
     }
-
-    fn put(&self, key: String, media: crate::result::ThumbMedia, _cost: u8, expires_at: u64) -> DeferredFuture {
+    fn store(&self, key: String, mut media: crate::result::ThumbMedia, cache_until: u64, pin_ttl: u64, promotion: Option<CacheEntryMetadata>, expected_cache: Option<String>) -> DeferredFuture {
         debug_assert!(
             is_source_identity(&key),
             "cloud cache addresses entries by source identity, but got an opaque key {key:?}",
@@ -229,31 +250,31 @@ impl CacheBackend for CloudCacheBackend {
         let auth = self.auth_header.clone();
         let client = self.client.clone();
 
-        // Retention is the window the caller asked for.  Nothing to retain
-        // means nothing to write - the cloud is never asked to guess a TTL
-        // from the freshness metadata.
-        let now = web_time::SystemTime::now()
-            .duration_since(web_time::SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let Some(retain_secs) = expires_at.checked_sub(now).filter(|secs| *secs > 0) else {
-            tracing::debug!("cloud cache: skipping store for {key} - retention window already elapsed");
-            return Box::pin(async {});
-        };
-
-        let mut media = media;
-        media.url.clear();
-        let Ok(body) = serde_json::to_string(&StoreRequest {
-            url: &key,
-            cache_format: crate::TBR_CACHE_VERSION,
-            retain_secs,
-            media: &media,
-        }) else {
-            tracing::warn!("cloud cache: could not serialise the entry for {key}");
-            return Box::pin(async {});
-        };
-
         Box::pin(async move {
+            let now = unix_now_secs();
+            let retain_secs = cache_until.saturating_sub(now);
+            if expected_cache.is_none() && promotion.as_ref().map_or(retain_secs == 0 && pin_ttl == 0, |metadata|
+                metadata.cache_until.max(metadata.pin_until) <= now)
+            {
+                tracing::debug!("cloud cache: skipping store for {key} - retention window already elapsed");
+                return;
+            }
+            media.url.clear();
+            let body = match serde_json::to_string(&StoreRequest {
+                url: &key,
+                cache_format: crate::TBR_CACHE_VERSION,
+                retain_secs,
+                pin_ttl_secs: pin_ttl,
+                promotion,
+                expected_cache,
+                media: &media,
+            }) {
+                Ok(body) => body,
+                Err(e) => {
+                    tracing::warn!("cloud cache: could not serialise the entry for {key} - {e}");
+                    return;
+                }
+            };
             let resp = match client
                 .post(&url)
                 .header("Authorization", &auth)
@@ -271,13 +292,121 @@ impl CacheBackend for CloudCacheBackend {
 
             let status = resp.status();
             if status.is_success() {
-                tracing::debug!("cloud cache: stored {key} for {retain_secs}s");
+                tracing::debug!("cloud cache: store accepted for {key}");
                 return;
             }
 
             let text = resp.text().await.unwrap_or_default();
             tracing::warn!("cloud cache: store for {key} rejected with HTTP {status} - {}", snippet(&text));
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{Json, Router, extract::State, routing::post};
+    use parking_lot::Mutex;
+    use std::sync::Arc;
+
+    #[derive(Clone)]
+    struct TestService {
+        entry: CacheEntry,
+        requests: Arc<Mutex<Vec<serde_json::Value>>>,
+    }
+
+    async fn lookup(State(service): State<TestService>, Json(body): Json<serde_json::Value>) -> Json<CacheEntry> {
+        service.requests.lock().push(body);
+        Json(service.entry)
+    }
+
+    async fn store(State(service): State<TestService>, Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
+        service.requests.lock().push(body);
+        Json(serde_json::json!({"status": "stored"}))
+    }
+
+    #[tokio::test]
+    async fn cloud_transport_carries_promotion_metadata_without_duplicate_media_or_new_ttls() {
+        let now = unix_now_secs();
+        let entry = CacheEntry::new(crate::result::ThumbMedia {
+            cache: crate::CacheHints::expiring_in(60).encode(60),
+            thumbnail: vec![1, 2, 3],
+            ..Default::default()
+        }, 73, now + 300, 600, now);
+        let requests = Arc::new(Mutex::new(vec![]));
+        let service = TestService { entry: entry.clone(), requests: requests.clone() };
+        let app = Router::new()
+            .route("/cache/lookup", post(lookup))
+            .route("/cache/pin", post(lookup))
+            .route("/cache/store", post(store))
+            .with_state(service);
+        let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let backend = CloudCacheBackend {
+            base_url: format!("http://127.0.0.1:{port}"),
+            auth_header: "Bearer test-token".into(),
+            client: reqwest::Client::builder().no_proxy().build().unwrap(),
+        };
+        let hit = backend.get_entry("https://example.com/a.jpg", 0).await.unwrap();
+        assert_eq!(hit.cache_until, entry.cache_until);
+        assert_eq!(hit.fresh_until, entry.fresh_until);
+        assert_eq!(hit.pin_until, entry.pin_until);
+        assert_eq!(hit.render_cost, entry.render_cost);
+        assert!(backend.get_pin("https://example.com/a.jpg").await.is_some());
+        backend.promote("https://example.com/a.jpg".into(), hit).await;
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        let requests = requests.lock();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0]["include_entry"], true);
+        assert_eq!(requests[1]["include_entry"], true);
+        let promotion = &requests[2];
+        assert_eq!(promotion["retain_secs"], 0);
+        assert_eq!(promotion["pin_ttl_secs"], 0);
+        assert_eq!(promotion["promotion"]["cache_until"], entry.cache_until);
+        assert_eq!(promotion["promotion"]["fresh_until"], entry.fresh_until);
+        assert_eq!(promotion["promotion"]["pin_until"], entry.pin_until);
+        assert_eq!(promotion["promotion"]["render_cost"], 73);
+        assert_eq!(promotion["media"]["url"], "");
+        assert!(promotion["promotion"].get("media").is_none());
+    }
+}
+
+impl CacheBackend for CloudCacheBackend {
+    fn name(&self) -> &'static str { "cloud" }
+
+    fn get_entry<'a>(&'a self, key: &'a str, pin_ttl: u64) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + Send + 'a>> {
+        self.lookup(key, false, pin_ttl)
+    }
+
+    fn get_pin_entry<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + Send + 'a>> {
+        self.lookup(key, true, 0)
+    }
+
+    fn promote(&self, key: String, entry: CacheEntry) -> DeferredFuture {
+        let metadata = entry.metadata();
+        self.store(key, entry.media, 0, 0, Some(metadata), None)
+    }
+
+    fn revalidate(&self, key: String, entry: CacheEntry, expected_cache: String) -> DeferredFuture {
+        let metadata = entry.metadata();
+        self.store(key, entry.media, 0, 0, Some(metadata), Some(expected_cache))
+    }
+
+    fn put(&self, key: String, media: crate::result::ThumbMedia, _cost: u8, cache_until: u64, pin_ttl: u64) -> DeferredFuture {
+        if cache_until <= unix_now_secs() && pin_ttl == 0 {
+            let backend = self.clone();
+            return Box::pin(async move {
+                if let Some(existing) = backend.get_entry(&key, 0).await {
+                    let expected_cache = existing.media.cache.clone();
+                    let mut entry = CacheEntry::new(media, existing.render_cost, cache_until, 0, unix_now_secs());
+                    entry.pin_until = existing.pin_until;
+                    backend.revalidate(key, entry, expected_cache).await;
+                }
+            });
+        }
+        self.store(key, media, cache_until, pin_ttl, None, None)
     }
 }
 

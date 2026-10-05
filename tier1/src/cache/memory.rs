@@ -1,7 +1,8 @@
 //! In-memory LRU cache backend.
 //!
-//! Bounded by total approximate byte size or entry count.  Entries are
-//! automatically evicted after their `expires_at` timestamp passes.
+//! Bounded by total approximate byte size or entry count.
+//! Lookups enforce independent cache and pin deadlines. Fully expired entries
+//! are removed on reads and writes; capacity eviction remains managed by Moka.
 //!
 //! ## Spec format
 //!
@@ -13,14 +14,14 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::time::Duration;
+use std::sync::Arc;
 
 use crate::after::DeferredFuture;
-use crate::cache::CacheBackend;
-use web_time::SystemTime;
+use crate::cache::{CacheBackend, CacheEntry, unix_now_secs};
+use parking_lot::Mutex;
 
 pub struct MemoryCacheBackend {
-    cache: moka::sync::Cache<String, String>,
+    cache: Arc<Mutex<moka::sync::Cache<String, CacheEntry>>>,
 }
 
 impl MemoryCacheBackend {
@@ -28,30 +29,41 @@ impl MemoryCacheBackend {
         let max_bytes = max_bytes.max(1024 * 1024);
         let cap_hint = (max_bytes / 512).min(100_000);
         let cache = moka::sync::Cache::builder()
+            .support_invalidation_closures()
             .max_capacity(cap_hint.max(1))
-            .weigher(|_key: &String, value: &String| -> u32 {
-                (value.len() as u64).min(u32::MAX as u64) as u32
+            .weigher(|_key: &String, value: &CacheEntry| -> u32 {
+                let size = value.media.thumbnail.len()
+                    + value.media.cache.len()
+                    + value.media.properties.to_string().len()
+                    + 512;
+                size.min(u32::MAX as usize) as u32
             })
             .build();
-        Self { cache }
+        Self { cache: Arc::new(Mutex::new(cache)) }
     }
 
     pub fn with_max_entries(max_entries: u64) -> Self {
         let max_entries = max_entries.max(10);
-        let cache = moka::sync::Cache::builder().max_capacity(max_entries).build();
-        Self { cache }
+        let cache = moka::sync::Cache::builder().support_invalidation_closures().max_capacity(max_entries).build();
+        Self { cache: Arc::new(Mutex::new(cache)) }
     }
 
     pub fn default_cache() -> Self {
         Self::with_max_bytes(100 * 1024 * 1024)
     }
-}
 
-fn unix_now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    fn lookup(&self, key: &str, pin: bool, pin_ttl: u64) -> Option<CacheEntry> {
+        let cache = self.cache.lock();
+        let mut entry = cache.get(key)?;
+        let now = unix_now_secs();
+        let hit = entry.access(now, pin, pin_ttl);
+        if entry.retain_until() <= now {
+            cache.invalidate(key);
+        } else if hit {
+            cache.insert(key.to_string(), entry.clone());
+        }
+        hit.then_some(entry)
+    }
 }
 
 impl CacheBackend for MemoryCacheBackend {
@@ -59,30 +71,64 @@ impl CacheBackend for MemoryCacheBackend {
         "memory"
     }
 
-    fn get<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = Option<crate::result::ThumbMedia>> + Send + 'a>> {
-        let cache = self.cache.clone();
-        let key = key.to_string();
+    fn get_entry<'a>(&'a self, key: &'a str, pin_ttl: u64) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + Send + 'a>> {
+        Box::pin(async move { self.lookup(key, false, pin_ttl) })
+    }
+
+    fn get_pin_entry<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + Send + 'a>> {
+        Box::pin(async move { self.lookup(key, true, 0) })
+    }
+
+    fn promote(&self, key: String, mut entry: CacheEntry) -> DeferredFuture {
+        let cache = Arc::clone(&self.cache);
         Box::pin(async move {
-            let json = tokio::task::spawn_blocking(move || cache.get(&key)).await.ok().flatten()?;
-            serde_json::from_str(&json).ok()
+            let now = unix_now_secs();
+            let cache = cache.lock();
+            if entry.retain_until() <= now
+                || cache.get(&key).is_some_and(|existing| existing.retain_until() > now)
+            {
+                return;
+            }
+            entry.media.url.clear();
+            cache.insert(key, entry);
         })
     }
 
-    fn put(&self, key: String, media: crate::result::ThumbMedia, _cost: u8, expires_at: u64) -> DeferredFuture {
-        let cache = self.cache.clone();
+    fn revalidate(&self, key: String, mut entry: CacheEntry, expected_cache: String) -> DeferredFuture {
+        let cache = Arc::clone(&self.cache);
+        Box::pin(async move {
+            let cache = cache.lock();
+            if let Some(existing) = cache.get(&key) {
+                if existing.media.cache != expected_cache {
+                    return;
+                }
+                entry.pin_until = entry.pin_until.max(existing.pin_until);
+            }
+            entry.media.url.clear();
+            if entry.retain_until() <= unix_now_secs() {
+                cache.invalidate(&key);
+            } else {
+                cache.insert(key, entry);
+            }
+        })
+    }
+
+    fn put(&self, key: String, media: crate::result::ThumbMedia, cost: u8, cache_until: u64, pin_ttl: u64) -> DeferredFuture {
+        let cache = Arc::clone(&self.cache);
         Box::pin(async move {
             let now = unix_now_secs();
-            if expires_at <= now {
+            let cache = cache.lock();
+            let mut entry = CacheEntry::new(media, cost, cache_until, pin_ttl, now);
+            if let Some(existing) = cache.get(&key) {
+                entry.pin_until = entry.pin_until.max(existing.pin_until);
+            }
+            if entry.retain_until() <= now {
+                cache.invalidate(&key);
                 return;
             }
-            let Ok(json) = serde_json::to_string(&media) else { return };
-            let ttl = Duration::from_secs(expires_at - now);
-            let _ = ttl;
-            tokio::task::spawn_blocking(move || {
-                cache.insert(key, json);
-            })
-            .await
-            .ok();
+            cache.invalidate_entries_if(move |_, entry| entry.retain_until() <= now)
+                .expect("memory cache invalidation is enabled");
+            cache.insert(key, entry);
         })
     }
 }

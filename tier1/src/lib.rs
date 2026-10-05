@@ -108,8 +108,8 @@ pub use http_buf::SyncHttpReader;
 pub const TBR_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Cache format version.  Increment when a change makes the cached payload
-/// unreadable to older builds - the `ThumbMedia`/`ThumbResult` shape, thumbnail
-/// dimensions, or image quality settings.
+/// unreadable to older builds - the stored entry envelope, media/result shape,
+/// thumbnail dimensions, or image quality settings.
 ///
 /// Its job is to scope every cache that outlives a single process, so two
 /// incompatible builds can share the same storage without reading each other's
@@ -122,7 +122,7 @@ pub const TBR_VERSION: &str = env!("CARGO_PKG_VERSION");
 ///
 /// Per-process caches - the memory backend and the sticky frontend - do not
 /// need it: they cannot outlive the build that wrote them.
-pub const TBR_CACHE_VERSION: u32 = 5;
+pub const TBR_CACHE_VERSION: u32 = 6;
 
 //  Runtime builder helpers
 
