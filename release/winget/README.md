@@ -26,6 +26,35 @@ For us that is `manifests/t/Thumbrella/Server/<version>/`.
 
 ## Per-release workflow
 
+Before preparing a new submission, reset the existing sparse clone and your
+fork's `master` to the latest upstream `master`:
+
+```bash
+bash release/winget/reset-repo.sh
+```
+
+The default checkout is `/workspaces/winget-pkgs-tbr`; pass a different checkout
+directory as the first argument if needed. The script requires a clean working
+tree and an existing cone-mode sparse clone with the `blob:none` filter, whose
+`origin` points to `PeterShinners/winget-pkgs-tbr`. For first-time setup:
+
+```bash
+git clone --depth 1 --filter=blob:none --sparse \
+  https://github.com/PeterShinners/winget-pkgs-tbr \
+  /workspaces/winget-pkgs-tbr
+git -C /workspaces/winget-pkgs-tbr sparse-checkout set manifests/t/Thumbrella
+```
+
+**Warning:** The reset removes fork-only commits from local and remote `master`
+without a backup. Finish any open PR using that branch first. Uncommitted and
+untracked changes cause the script to stop rather than discard them. The push
+uses an explicit force-with-lease; if it fails because the fork changed, inspect
+that change before retrying, and do not substitute `--force`.
+
+The reset fetches only the latest commits with `--depth=1 --filter=blob:none`
+and checks out only `manifests/t/Thumbrella` plus root files. It does not generate
+or copy manifests, commit a release, or open a PR.
+
 1. Run `release/winget/update-manifest.sh <tag>` (from the repo root this is
    `release/winget/update-manifest.sh v1.4.0`). The script:
    - downloads the Windows archive from the GitHub release,
