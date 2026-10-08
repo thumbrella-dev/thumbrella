@@ -13,6 +13,11 @@ use image;
 /// Call once from `main`, after the logger is initialised but before the
 /// axum listener is bound.
 pub async fn startup(cfg: &AppConfig) -> Arc<Runtime> {
+    if let Some(error) = &cfg.pin_ttl_error {
+        crate::ux::get().fatal(error,
+            "set TBR_PIN to a whole number of seconds (0 disables pinning), or unset it to use the default");
+    }
+
     //  1. HTTP client warmup
     tracing::debug!("startup: initialising HTTP client");
     crate::http_buf::init_http_client();
@@ -24,19 +29,13 @@ pub async fn startup(cfg: &AppConfig) -> Arc<Runtime> {
     // identical requests and enables request coalescing.
     const STICKY_TTL_SECS: u64 = 5;
 
-    let cache = match cfg.cache_url.as_deref() {
-        Some(dsn) => match cache::open_from_dsn(dsn) {
-            Ok(Some(backend)) => CacheStore::new(backend, STICKY_TTL_SECS),
-            // none / empty - caching disabled
-            Ok(None) => CacheStore::debounce_only(STICKY_TTL_SECS),
-            Err(e) => {
-                tracing::error!("cache: could not open {dsn}: {e} - running without cache");
-                CacheStore::debounce_only(STICKY_TTL_SECS)
-            }
-        },
-        None => {
-            let backend = Arc::new(cache::memory::MemoryCacheBackend::default_cache());
-            CacheStore::new(backend, STICKY_TTL_SECS)
+    let dsn = cfg.cache_url.as_deref().unwrap_or("mem");
+    let cache = match cache::open_from_dsn(dsn) {
+        Ok(Some(backend)) => CacheStore::new(backend, STICKY_TTL_SECS),
+        Ok(None) => CacheStore::debounce_only(STICKY_TTL_SECS),
+        Err(e) => {
+            tracing::error!("cache: could not open {dsn}: {e} - running without cache");
+            CacheStore::debounce_only(STICKY_TTL_SECS)
         }
     };
 
@@ -74,7 +73,7 @@ pub async fn startup(cfg: &AppConfig) -> Arc<Runtime> {
         tracing::warn!("startup: failed to decode background.png - transparency will use solid colour");
     }
 
-    Runtime::new(
+    let mut runtime = Runtime::new(
         cache,
         trace,
         cfg.server.clone(),
@@ -88,5 +87,7 @@ pub async fn startup(cfg: &AppConfig) -> Arc<Runtime> {
         cfg.backoff_ceiling as u64,
         cfg.cache_max_ttl_secs,
         cfg.cache_default_ttl_secs,
-    )
+    );
+    Arc::get_mut(&mut runtime).expect("new runtime is uniquely owned").pin_ttl_secs = cfg.pin_ttl_secs;
+    runtime
 }

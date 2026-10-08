@@ -10,6 +10,8 @@
 //!   tiers so durable copies receive the same lifetime extension.
 //! - `get_pin` returns the first entry with a live pin deadline.
 //! - `put` writes through to every tier, so each layer is populated together.
+//! - Public pin aliases belong to the final (coldest) tier. One authoritative
+//!   index prevents cross-layer collisions and survives loss of a memory front.
 //!
 //! Both lookup paths asynchronously backfill earlier tiers that missed, without
 //! extending deadlines. Promotion uses the native [`AfterResponse`] scheduler
@@ -21,6 +23,7 @@ use std::sync::Arc;
 
 use crate::after::{AfterResponse, DeferredFuture};
 use crate::cache::{CacheBackend, CacheEntry};
+use crate::cache::{PinFuture, pins::PinClaim};
 use crate::result::ThumbMedia;
 
 /// A read-through, write-through chain of cache backends.
@@ -47,6 +50,16 @@ impl ChainCacheBackend {
             after.push(self.tiers[index].promote(key.to_string(), entry.clone()));
         }
         after.drain_spawn();
+    }
+
+    async fn refresh_pin_layers(&self, key: &str) -> Result<(), String> {
+        let tier = self.tiers.last().ok_or("pin cache chain is empty")?;
+        let entry = tier.get_pin_entry(key).await
+            .ok_or("claimed pin entry disappeared from its backend")?;
+        for earlier in &self.tiers[..self.tiers.len() - 1] {
+            earlier.revalidate(key.to_string(), entry.clone(), entry.media.cache.clone()).await;
+        }
+        Ok(())
     }
 }
 
@@ -121,7 +134,7 @@ mod tests {
     }
 
     fn memory() -> Arc<dyn CacheBackend> {
-        Arc::new(MemoryCacheBackend::with_max_entries(100))
+        Arc::new(MemoryCacheBackend::with_max_entries(100).unwrap())
     }
 
     fn entry() -> CacheEntry {
@@ -230,6 +243,39 @@ mod tests {
 impl CacheBackend for ChainCacheBackend {
     fn name(&self) -> &'static str {
         "chain"
+    }
+
+    fn pin_candidate(&self, kind: crate::media::FileKind, key: &str, attempt: u32) -> Result<String, String> {
+        self.tiers.last().ok_or("pin cache chain is empty")?.pin_candidate(kind, key, attempt)
+    }
+
+    fn issue_pin<'a>(&'a self, kind: crate::media::FileKind, key: &'a str, ttl: u64) -> PinFuture<'a, Option<String>> {
+        Box::pin(async move {
+            let tier = self.tiers.last().ok_or("pin cache chain is empty")?;
+            let id = tier.issue_pin(kind, key, ttl).await?;
+            if id.is_some() {
+                self.refresh_pin_layers(key).await?;
+            }
+            Ok(id)
+        })
+    }
+
+    fn claim_pin<'a>(&'a self, id: &'a str, key: &'a str, ttl: u64) -> PinFuture<'a, PinClaim> {
+        Box::pin(async move {
+            let tier = self.tiers.last().ok_or("pin cache chain is empty")?;
+            let claim = tier.claim_pin(id, key, ttl).await?;
+            if claim == PinClaim::Claimed {
+                self.refresh_pin_layers(key).await?;
+            }
+            Ok(claim)
+        })
+    }
+
+    fn pin_thumbnail<'a>(&'a self, id: &'a str) -> PinFuture<'a, Option<Vec<u8>>> {
+        Box::pin(async move {
+            let tier = self.tiers.last().ok_or("pin cache chain is empty")?;
+            tier.pin_thumbnail(id).await
+        })
     }
 
     fn get_entry<'a>(&'a self, key: &'a str, pin_ttl: u64) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + Send + 'a>> {

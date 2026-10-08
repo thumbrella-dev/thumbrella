@@ -121,7 +121,7 @@ impl Validation {
 /// Produced by `check_file_path` during [`collect`].  Never sent to clients.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileCheck {
-    /// The path as written in the DSN (may be relative).
+    /// The expanded filesystem path (may still be relative).
     pub path: String,
     /// Whether the process can write to this path.
     ///
@@ -234,7 +234,7 @@ pub struct CheckReport {
     pub port_available: bool,
     /// Server identifier (colo code or operator label).
     /// Developer / debug mode enabled.
-    /// Whether local-URL access is enabled (`TBR_ALLOW_LOCAL`).
+    /// Whether local-URL access is enabled (`TBR_LOCAL`).
     pub allow_local: bool,
     /// Trace sink DSN if configured, or `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -282,6 +282,16 @@ pub struct CheckReport {
     /// uses a file-backed scheme such as `sqlite:`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_file_check: Option<FileCheck>,
+    /// Effective sliding pin TTL in seconds; zero disables pin URLs.
+    #[serde(default)]
+    pub pin_ttl_secs: u64,
+    /// Whether the pin TTL uses the configured cache maximum as its default.
+    pub pin_default: bool,
+    /// Whether pinning is enabled by a valid, positive TTL setting.
+    /// A configured cache backend is still required to publish pins.
+    pub pin_enabled: bool,
+    /// Validation result for TBR_PIN.
+    pub pin_validation: Validation,
 
     //  Overall
     /// `true` if every required component passed validation.
@@ -372,6 +382,10 @@ pub fn collect(cfg: &crate::config::AppConfig) -> CheckReport {
             (Some(default_line), Validation::ok(), None)
         }
     };
+    let pin_validation = match &cfg.pin_ttl_error {
+        Some(error) => Validation::error(error),
+        None => Validation::ok(),
+    };
 
     let build_timestamp = option_env!("TBR_BUILD_TIMESTAMP").map(str::to_owned);
 
@@ -406,6 +420,7 @@ pub fn collect(cfg: &crate::config::AppConfig) -> CheckReport {
         && !matches!(tier2_validation.status, ValidationStatus::Error)
         && !matches!(tier3_validation.status, ValidationStatus::Error)
         && !matches!(cache_validation.status, ValidationStatus::Error)
+        && !matches!(pin_validation.status, ValidationStatus::Error)
         && !matches!(trace_validation.status, ValidationStatus::Error)
         && !matches!(handshake_validation.status, ValidationStatus::Error)
         && port_available
@@ -437,6 +452,10 @@ pub fn collect(cfg: &crate::config::AppConfig) -> CheckReport {
         cache_config,
         cache_validation,
         cache_file_check,
+        pin_ttl_secs: cfg.pin_ttl_secs,
+        pin_default: cfg.pin_ttl_default,
+        pin_enabled: cfg.pin_ttl_error.is_none() && cfg.pin_ttl_secs > 0,
+        pin_validation,
         healthy,
         container_image,
         build_tier: None,
@@ -673,15 +692,28 @@ impl CheckReport {
             print_env_default("TBR_HANDSHAKE", "none");
         }
 
-        // TBR_ALLOW_LOCAL
+        // TBR_LOCAL
         let local_val = if self.allow_local { "allowed" } else { "denied" };
-        print_env_line("TBR_ALLOW_LOCAL", local_val, "");
+        print_env_line("TBR_LOCAL", local_val, "");
 
         // TBR_TRACE
         print_dsn_var("TBR_TRACE", &self.trace_url, &self.trace_validation, &self.trace_file_check);
 
         // TBR_CACHE
         print_dsn_var("TBR_CACHE", &self.cache_config, &self.cache_validation, &self.cache_file_check);
+        if matches!(self.pin_validation.status, ValidationStatus::Error) {
+            print_env_line("TBR_PIN", "invalid", "");
+            println!("  {}: {}", ux.red("error"),
+                self.pin_validation.message.as_deref().unwrap_or("invalid pin TTL"));
+        } else {
+            let value = format!("{} seconds", self.pin_ttl_secs);
+            let state = if self.pin_enabled { "enabled" } else { "pinning disabled" };
+            if self.pin_default {
+                print_env_default("TBR_PIN", &format!("{value} ({state})"));
+            } else {
+                print_env_line("TBR_PIN", &value, state);
+            }
+        }
 
         // TBR_TIER2
         print_tier_var("TBR_TIER2", &self.tier2, &self.tier2_validation);

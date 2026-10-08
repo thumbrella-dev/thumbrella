@@ -1,6 +1,6 @@
 //! Local filesystem paths and their `file://` URL form.
 //!
-//! Local files are only accepted when `TBR_ALLOW_LOCAL` is set.  A path travels
+//! Local files are only accepted when `TBR_LOCAL` is set.  A path travels
 //! through the pipeline as a `file://` URL and is turned back into a native path
 //! when the file is opened, so both directions live here.  The canonical form is
 //! `file://`, a `/`, then an absolute path:

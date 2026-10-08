@@ -14,6 +14,8 @@
 //!
 //! Handoff cooks receive [`CacheStore::none()`] - no reads, no writes.
 //! The originating tier-1 node owns cache population for that request.
+//! Missing-handler placeholders are never stored in the backend, including
+//! pins. Client freshness tokens and the short debounce window are unchanged.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -145,6 +147,15 @@ pub mod cloud;
 #[cfg(feature = "native")]
 pub mod chain;
 
+#[cfg(feature = "native")]
+pub mod pins;
+
+#[cfg(feature = "native")]
+pub type PinFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>;
+
+#[cfg(all(test, feature = "native"))]
+mod pins_tests;
+
 //  Backend trait
 
 /// A single cache storage backend.
@@ -173,6 +184,42 @@ pub mod chain;
 pub trait CacheBackend: Send + Sync {
     /// Human-readable name used in logs (e.g. `"sqlite"`, `"memory"`).
     fn name(&self) -> &'static str;
+
+    /// Derive a local identifier without exposing the backend's secret.
+    /// Remote backends issue their identifiers through `issue_pin` instead.
+    fn pin_candidate(&self, _kind: crate::media::FileKind, _key: &str, _attempt: u32) -> Result<String, String> {
+        Err("cache backend does not support local pin derivation".into())
+    }
+
+    /// Issue or refresh a raw pin identifier. Missing entries and disabled
+    /// pinning return `None`; identifier collisions are retried by the owner.
+    fn issue_pin<'a>(&'a self, kind: crate::media::FileKind, key: &'a str, ttl: u64) -> PinFuture<'a, Option<String>> {
+        Box::pin(async move {
+            if ttl == 0 {
+                return Ok(None);
+            }
+            for attempt in 0..256 {
+                let id = self.pin_candidate(kind, key, attempt)?;
+                match self.claim_pin(&id, key, ttl).await? {
+                    pins::PinClaim::Claimed => return Ok(Some(id)),
+                    pins::PinClaim::Missing => return Ok(None),
+                    pins::PinClaim::Conflict => {}
+                }
+            }
+            Err("pin identifier collision limit exceeded".into())
+        })
+    }
+
+    /// Atomically reserve an alias for a live entry and refresh its pin
+    /// deadline. A collision must never replace another live alias.
+    fn claim_pin<'a>(&'a self, _id: &'a str, _key: &'a str, _ttl: u64) -> PinFuture<'a, pins::PinClaim> {
+        Box::pin(async { Err("cache backend does not support pin aliases".into()) })
+    }
+
+    /// Resolve an alias to JPEG bytes, without extending the pin deadline.
+    fn pin_thumbnail<'a>(&'a self, _id: &'a str) -> PinFuture<'a, Option<Vec<u8>>> {
+        Box::pin(async { Err("cache backend does not support pin aliases".into()) })
+    }
 
     /// Async lookup.  Returns the deserialized [`ThumbMedia`] on hit, `None` on miss.
     fn get<'a>(&'a self, key: &'a str, pin_ttl: u64) -> Pin<Box<dyn Future<Output = Option<ThumbMedia>> + Send + 'a>> {
@@ -574,6 +621,7 @@ impl CacheStore {
     ///
     /// `expires_at` controls cache lookup retention, not client freshness.
     /// Uncacheable media can still be stored for pins when `pin_ttl` is positive.
+    /// Missing-handler placeholders are excluded from both cache and pin storage.
     pub fn store(
         &self,
         key: &str,
@@ -583,8 +631,9 @@ impl CacheStore {
         pin_ttl: u64,
         after: &mut AfterResponse,
     ) {
-        // Progress snapshots are response-only and must never become cache entries.
-        if result.status == ResultStatus::Intermediate {
+        if result.status == ResultStatus::Intermediate
+            || result.source == Some(ResultSource::Placeholder)
+        {
             return;
         }
 
@@ -735,7 +784,7 @@ fn open_link(spec: &str) -> Result<Arc<dyn CacheBackend>, String> {
                     "entries" => memory::MemoryCacheBackend::with_max_entries(value),
                     _ => unreachable!(),
                 }
-            };
+            }.map_err(|e| format!("mem cache: {e}"))?;
             Ok(Arc::new(backend))
         }
         "sqlite" => {
@@ -764,7 +813,8 @@ fn open_link(spec: &str) -> Result<Arc<dyn CacheBackend>, String> {
                     }
                 }
             };
-            let backend = sqlite::SqliteCacheBackend::open_with_limit(path, max_bytes)
+            let path = crate::config_path::expand(path).map_err(|e| format!("sqlite cache path: {e}"))?;
+            let backend = sqlite::SqliteCacheBackend::open_with_limit(&path, max_bytes)
                 .map_err(|e| format!("sqlite cache: {e}"))?;
             Ok(Arc::new(backend))
         }
@@ -865,7 +915,8 @@ fn validate_link(spec: &str) -> Result<Option<crate::check::FileCheck>, String> 
                     }
                 }
             }
-            Ok(Some(sqlite::SqliteCacheBackend::check(path)))
+            let path = crate::config_path::expand(path).map_err(|e| format!("sqlite cache path: {e}"))?;
+            Ok(Some(sqlite::SqliteCacheBackend::check(&path)))
         }
         other => Err(format!(
             "unsupported cache scheme '{other}' - supported: mem:, sqlite:, cloud:, none"
@@ -908,6 +959,10 @@ fn describe_link(spec: &str) -> String {
             let mut parts = rest.split(',');
             let path = parts.next().unwrap_or("").trim();
             let size = parts.next().map(|s| s.trim()).unwrap_or("");
+            let path = match crate::config_path::expand(path) {
+                Ok(path) => path,
+                Err(error) => return format!("sqlite:{path} (invalid path: {error})"),
+            };
             if size.is_empty() {
                 format!("sqlite:{path}")
             } else {
@@ -1126,7 +1181,7 @@ mod tests {
 
     #[tokio::test]
     async fn memory_and_sqlite_share_payloads_and_enforce_deadlines() {
-        check_backend_lifetimes(Arc::new(memory::MemoryCacheBackend::with_max_entries(100))).await;
+        check_backend_lifetimes(Arc::new(memory::MemoryCacheBackend::with_max_entries(100).unwrap())).await;
         check_backend_lifetimes(Arc::new(sqlite::SqliteCacheBackend::open(":memory:").unwrap())).await;
     }
 
@@ -1163,14 +1218,14 @@ mod tests {
 
     #[tokio::test]
     async fn native_promotion_preserves_newer_entries_and_does_not_revive_expired_data() {
-        check_conditional_promotion(Arc::new(memory::MemoryCacheBackend::with_max_entries(100))).await;
+        check_conditional_promotion(Arc::new(memory::MemoryCacheBackend::with_max_entries(100).unwrap())).await;
         check_conditional_promotion(Arc::new(sqlite::SqliteCacheBackend::open(":memory:").unwrap())).await;
     }
 
     #[tokio::test]
     async fn revalidation_preserves_cost_and_pins_and_cannot_overwrite_newer_tokens() {
         for backend in [
-            Arc::new(memory::MemoryCacheBackend::with_max_entries(100)) as Arc<dyn CacheBackend>,
+            Arc::new(memory::MemoryCacheBackend::with_max_entries(100).unwrap()) as Arc<dyn CacheBackend>,
             Arc::new(sqlite::SqliteCacheBackend::open(":memory:").unwrap()) as Arc<dyn CacheBackend>,
         ] {
             let now = unix_now_secs();
@@ -1218,7 +1273,7 @@ mod tests {
 
     #[tokio::test]
     async fn chain_refreshes_pins_in_every_layer() {
-        let memory = Arc::new(memory::MemoryCacheBackend::with_max_entries(100));
+        let memory = Arc::new(memory::MemoryCacheBackend::with_max_entries(100).unwrap());
         let sqlite = Arc::new(sqlite::SqliteCacheBackend::open(":memory:").unwrap());
         let chain = chain::ChainCacheBackend::new(vec![memory.clone(), sqlite.clone()]);
         chain.put("cache".into(), media(), 0, unix_now_secs() + 600, 0).await;
@@ -1229,7 +1284,7 @@ mod tests {
 
     #[tokio::test]
     async fn store_keeps_uncacheable_media_only_for_pins() {
-        let backend = Arc::new(memory::MemoryCacheBackend::with_max_entries(100));
+        let backend = Arc::new(memory::MemoryCacheBackend::with_max_entries(100).unwrap());
         let store = CacheStore::new(backend.clone(), 5);
         let mut pinned = media();
         pinned.cache.clear();
@@ -1246,8 +1301,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_handler_placeholders_skip_storage_but_keep_debounce() {
+        for backend in [
+            Arc::new(memory::MemoryCacheBackend::with_max_entries(100).unwrap()) as Arc<dyn CacheBackend>,
+            Arc::new(sqlite::SqliteCacheBackend::open(":memory:").unwrap()),
+        ] {
+            let store = CacheStore::new(backend.clone(), 5);
+            let original = media();
+            let expires = unix_now_secs() + 600;
+            backend.put("existing".into(), original.clone(), 0, expires, 600).await;
+            let result = ThumbResult {
+                status: ResultStatus::Success,
+                source: Some(ResultSource::Placeholder),
+                media: Some(ThumbMedia { placeholder: "image".into(), ..media() }),
+                ..Default::default()
+            };
+            let mut after = AfterResponse::new();
+            store.store("missing", &result, 0, expires, 600, &mut after);
+            store.store("existing", &result, 0, expires, 600, &mut after);
+            assert!(after.is_empty());
+            assert!(backend.get_entry("missing", 0).await.is_none());
+            assert!(backend.get_pin("missing").await.is_none());
+            assert_eq!(backend.get_entry("existing", 0).await.unwrap().media.placeholder, original.placeholder);
+            store.debounce_store("missing", &result);
+            let cached = store.debounce_check("missing", None).unwrap();
+            assert_eq!(cached.media.unwrap().cache, result.media.as_ref().unwrap().cache);
+
+            let fallback = ThumbResult { source: Some(ResultSource::Fallback), ..result };
+            store.store("fallback", &fallback, 0, expires, 600, &mut after);
+            for task in after.drain() {
+                task.await;
+            }
+            assert!(backend.get_entry("fallback", 0).await.is_some());
+        }
+    }
+
+    #[tokio::test]
     async fn debounce_precedes_pin_refresh_and_pin_reads_ignore_sticky_results() {
-        let backend = Arc::new(memory::MemoryCacheBackend::with_max_entries(100));
+        let backend = Arc::new(memory::MemoryCacheBackend::with_max_entries(100).unwrap());
         let store = CacheStore::new(backend.clone(), 5);
         let result = ThumbResult { status: ResultStatus::Success, media: Some(media()), ..Default::default() };
         let mut after = AfterResponse::new();

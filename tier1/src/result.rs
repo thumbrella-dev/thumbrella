@@ -68,7 +68,8 @@ pub enum ResultSource {
     NotModified,
     /// A registered renderer tried but could not handle this format.
     Fallback,
-    /// No renderer was registered for this format at all.
+    /// No usable renderer or handoff target was available for this format.
+    /// Will not be stored in any cache backends (but will land in the debouncer)
     Placeholder,
     /// Not used by server, but defined and reserved for client handling.
     Client,
@@ -154,6 +155,10 @@ pub struct ThumbResult {
     /// How the thumbnail was produced (render, shortcut, cache, …).
     #[serde(default)]
     pub source: Option<ResultSource>,
+    /// Relative JPEG pin URL. Null when pinning is disabled or no server
+    /// thumbnail could be pinned. Pin reads do not extend its lifetime.
+    #[serde(default)]
+    pub pin: Option<String>,
     /// Wall-clock seconds to produce this result.
     pub duration: f64,
     /// Bytes fetched from the upstream source.
@@ -173,6 +178,7 @@ impl Default for ThumbResult {
             status: ResultStatus::Failed,
             message: None,
             source: None,
+            pin: None,
             duration: 0.0,
             download_size: 0,
             http_status: None,
@@ -191,6 +197,7 @@ impl ThumbResult {
                 "batch limited to {limit} items per request"
             )),
             source: None,
+            pin: None,
             duration: 0.0,
             download_size: 0,
             http_status: None,

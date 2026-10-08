@@ -53,7 +53,7 @@ services:
 
       # Uncomment to let the server thumbnail local files and localhost
       # URLs. Only enable this on a machine you fully control.
-      # - TBR_ALLOW_LOCAL=true
+      # - TBR_LOCAL=true
 
       # Uncomment together with the tmpfs option below to keep renderer
       # temp files in RAM instead of on disk.

@@ -9,12 +9,13 @@
 //! | Variable                   | Default | Description                                      |
 //! |----------------------------|---------|--------------------------------------------------|
 //! | `TBR_PORT`                 | 3114    | HTTP listener port                               |
-//! | `TBR_ALLOW_LOCAL`          | false   | Accept `file://` URLs, bare paths, and localhost |
+//! | `TBR_LOCAL`                | false   | Accept `file://` URLs, bare paths, and localhost |
 //! | `TBR_SCRATCH`              | $TMPDIR/thumbrella | Scratch root for tier3 CLI tool staging   |
 //! | `TBR_TIER2`                | -       | Tier-2 connect string (URL + optional headers)   |
 //! | `TBR_TIER3`                | -       | Tier-3 connect string (URL + optional headers)   |
 //! | `TBR_HANDSHAKE`            | -       | Shared secret required on all endpoints          |
 //! | `TBR_CACHE`                | mem:     | Cache spec - chained links with `+` (`none`, `mem[:size]`, `sqlite:path[,size]`, `cloud:connect`) |
+//! | `TBR_PIN`                  | 604800  | Sliding pin TTL in seconds; 0 disables pin URLs |
 //! | `TBR_TRACE`                | -       | Trace sink DSN - `ndjson:<path>`, …              |
 //! | `TBR_LOG`                  | standard| Output level: `standard`, `minimal`, `full`      |
 //!
@@ -85,6 +86,13 @@ pub struct AppConfig {
     /// Default cache TTL when upstream provides no freshness hints.
     /// Default: 1 hour (3600).
     pub cache_default_ttl_secs: u64,
+    /// Sliding pin TTL. Defaults to the maximum cache TTL; zero disables pins.
+    pub pin_ttl_secs: u64,
+    /// Whether pin TTL comes from the default rather than an explicit value.
+    pub pin_ttl_default: bool,
+    /// Invalid pin TTL configuration, retained so `check` can report it.
+    /// Startup must reject this before constructing a runtime.
+    pub pin_ttl_error: Option<String>,
 
     //  Trace sink
     /// Trace sink DSN (`TBR_TRACE`).  Scheme determines backend type:
@@ -113,6 +121,9 @@ impl Default for AppConfig {
             cache_url: None,
             cache_max_ttl_secs: 604_800,   // 7 days
             cache_default_ttl_secs: 3_600, // 1 hour
+            pin_ttl_secs: 604_800,
+            pin_ttl_default: true,
+            pin_ttl_error: None,
             trace_url: None,
             failure_ttl: 5,
             backoff_default: 60,
@@ -126,10 +137,19 @@ impl AppConfig {
     pub fn from_env() -> Self {
         let tier2 = parse_connect_target(env_opt_string("TBR_TIER2"));
         let tier3 = parse_connect_target(env_opt_string("TBR_TIER3"));
+        let cache_max_ttl_secs = env_opt_u32("TBR_CACHE_MAX_TTL").unwrap_or(604_800) as u64;
+        let (pin_ttl_secs, pin_ttl_default, pin_ttl_error) = match env_pin_ttl() {
+            Ok(Some(ttl)) => (ttl, false, None),
+            Ok(None) => (cache_max_ttl_secs, true, None),
+            Err(error) => (0, false, Some(error)),
+        };
         Self {
             port: env_u16("TBR_PORT", 3114),
-            allow_local: env_bool("TBR_ALLOW_LOCAL", false),
-            scratch_dir: env_scratch("TBR_SCRATCH"),
+            allow_local: env_bool("TBR_LOCAL", false),
+            scratch_dir: configured_scratch_dir().unwrap_or_else(|error| {
+                crate::ux::get().fatal(&format!("invalid TBR_SCRATCH: {error}"),
+                    "set TBR_SCRATCH to a path with defined variables, or unset it to use the default")
+            }).unwrap_or_else(default_scratch_dir),
             tier2,
             tier3,
             handshake: env_opt_string("TBR_HANDSHAKE"),
@@ -137,8 +157,11 @@ impl AppConfig {
             cache_url: std::env::var("TBR_CACHE")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
-            cache_max_ttl_secs: env_opt_u32("TBR_CACHE_MAX_TTL").unwrap_or(604_800) as u64,
+            cache_max_ttl_secs,
             cache_default_ttl_secs: env_opt_u32("TBR_CACHE_DEFAULT_TTL").unwrap_or(3_600) as u64,
+            pin_ttl_secs,
+            pin_ttl_default,
+            pin_ttl_error,
             trace_url: std::env::var("TBR_TRACE").ok(),
             // Hardcoded - not exposed as env vars.
             failure_ttl: 5,
@@ -149,6 +172,19 @@ impl AppConfig {
 }
 
 //  Env helpers
+
+fn env_pin_ttl() -> Result<Option<u64>, String> {
+    match std::env::var("TBR_PIN") {
+        Ok(value) if value.trim().is_empty() => Ok(None),
+        Ok(value) => value.trim().parse::<u32>().map(|ttl| Some(u64::from(ttl)))
+            .map_err(|_| format!(
+                "TBR_PIN is set to \"{}\": expected a whole number of seconds between 0 and {}; 0 disables pinning",
+                value.trim(), u32::MAX,
+            )),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(format!("invalid TBR_PIN: {error}")),
+    }
+}
 
 fn env_u16(name: &str, default: u16) -> u16 {
     match std::env::var(name) {
@@ -211,10 +247,12 @@ fn default_scratch_dir() -> String {
     format!("{}/thumbrella", tmp.trim_end_matches('/'))
 }
 
-fn env_scratch(name: &str) -> String {
-    std::env::var(name)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(default_scratch_dir)
+/// Resolve only the configured scratch path. Callers keep their existing
+/// default when TBR_SCRATCH is unset or blank.
+pub fn configured_scratch_dir() -> Result<Option<String>, String> {
+    match std::env::var("TBR_SCRATCH") {
+        Ok(path) if !path.trim().is_empty() => crate::config_path::expand(path.trim()).map(Some),
+        Ok(_) | Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
 }

@@ -32,7 +32,7 @@ pub fn warn_file_url_denied() {
         let ux = get();
         ux.warn(
             "a file:// URL was requested, but local file access is disabled",
-            "set TBR_ALLOW_LOCAL=true to enable file://, local-path, and localhost URLs",
+            "set TBR_LOCAL=true to enable file://, local-path, and localhost URLs",
         );
     }
 }
@@ -43,7 +43,7 @@ pub fn warn_localhost_denied() {
         let ux = get();
         ux.warn(
             "a localhost or private-network URL was requested, but is denied by default",
-            "set TBR_ALLOW_LOCAL=true to allow these URLs",
+            "set TBR_LOCAL=true to allow these URLs",
         );
     }
 }

@@ -148,7 +148,7 @@ pub struct Runtime {
     pub handshake: Option<String>,
     /// Allow `file://` URLs and bare absolute paths in HTTP endpoint requests.
     ///
-    /// Set from [`crate::config::AppConfig::allow_local`] (`TBR_ALLOW_LOCAL`).
+    /// Set from [`crate::config::AppConfig::allow_local`] (`TBR_LOCAL`).
     /// Propagated
     /// to each [`InputSpec`] by the route handlers.  The second-line guard
     /// in `pipeline::connect` also checks `InputSpec::allow_local` directly.
@@ -170,6 +170,9 @@ pub struct Runtime {
     pub cache_max_ttl_secs: u64,
     /// Default cache TTL when upstream provides no freshness hints.
     pub cache_default_ttl_secs: u64,
+    /// Default pin lifetime for this runtime. Embedders opt in; native startup
+    /// sets this from TBR_PIN.
+    pub pin_ttl_secs: u64,
     /// Single-flight deduplication for concurrent handoffs to the same cache key.
     pub handoff_inflight: HandoffInflight,
 }
@@ -214,6 +217,7 @@ impl Runtime {
             backoff_default,
             cache_max_ttl_secs,
             cache_default_ttl_secs,
+            pin_ttl_secs: 0,
             handoff_inflight: HandoffInflight::new(),
         })
     }
@@ -441,6 +445,7 @@ impl<S: HttpStream> ThumbCook<S> {
     /// Create a new cook from a fully-specified [`InputSpec`].
     pub fn from_input(input: InputSpec, runtime: Arc<Runtime>) -> Self {
         let cache_max_ttl_secs = runtime.cache_max_ttl_secs;
+        let default_pin_ttl = runtime.pin_ttl_secs;
         Self {
             status: CookStatus::Processing,
             runtime,
@@ -484,7 +489,7 @@ impl<S: HttpStream> ThumbCook<S> {
             ctx_cache_key: None,
             cache_max_ttl_secs,
             default_cache_ttl: cache_max_ttl_secs,
-            default_pin_ttl: 0,
+            default_pin_ttl,
             ctx_cancelled: false,
             ctx_handoff: false,
             cache_resolved: false,
@@ -500,6 +505,7 @@ impl<S: HttpStream> ThumbCook<S> {
         cook.media = handoff.media;
         cook.src = handoff.src;
         cook.ctx_handoff = true;
+        cook.default_pin_ttl = 0;
         cook
     }
 
@@ -700,6 +706,7 @@ impl<S: HttpStream> ThumbCook<S> {
             status,
             duration: self.out_duration,
             download_size: self.out_download_bytes,
+            pin: None,
             message: if self.out_message.is_empty() { None } else { Some(self.out_message.clone()) },
             http_status: self.http_status,
             source: if self.cache_hit.is_some() {
@@ -751,6 +758,7 @@ impl<S: HttpStream> ThumbCook<S> {
             message: None,
             http_status: self.http_status,
             source: None,
+            pin: None,
             media: Some(ThumbMedia {
                 url: self.input.url.clone(),
                 thumbnail: crate::assets::placeholder_for_kind(kind).to_vec(),
@@ -869,6 +877,9 @@ impl<S: HttpStream> ThumbCook<S> {
             .media
             .as_ref()
             .and_then(|m| if m.placeholder.is_empty() { None } else { Some(m.placeholder.clone()) });
+        self.placeholder_source = res.source.filter(|source| {
+            matches!(source, ResultSource::Placeholder | ResultSource::Fallback)
+        });
         self.out_download_bytes = local_bytes.saturating_add(res.download_size);
 
         if let Some(ref media) = res.media {
@@ -1034,13 +1045,13 @@ impl<S: HttpStream> ThumbCook<S> {
         // calls it to interpose rate-limit checks between cache and render).
         if !self.cache_resolved {
             if self.resolve_cache(&mut after, t0).await {
-                return self.finish(after);
+                return self.finish(after).await;
             }
         } else {
             // resolve_cache already ran; the cook is either at Processing
             // (continue) or a terminal state.
             if !self.status.is_processing() {
-                return self.finish(after);
+                return self.finish(after).await;
             }
         }
 
@@ -1055,7 +1066,7 @@ impl<S: HttpStream> ThumbCook<S> {
             if !self.status.is_processing() {
                 self.stamp_download_bytes();
                 self.out_duration = t0.elapsed().as_secs_f64();
-                return self.finish(after);
+                return self.finish(after).await;
             }
         }
 
@@ -1096,7 +1107,7 @@ impl<S: HttpStream> ThumbCook<S> {
                     };
                     self.runtime.cache.store(key, &result, cost, expires, self.default_pin_ttl, &mut after);
                 }
-                return self.finish(after);
+                return self.finish(after).await;
             }
 
             // Intermediate progress: only emit when there's a real async gap
@@ -1119,7 +1130,7 @@ impl<S: HttpStream> ThumbCook<S> {
                 let expires = self.cache_expires_at();
                 self.runtime.cache.store(key, &result, cost, expires, self.default_pin_ttl, &mut after);
             }
-            return self.finish(after);
+            return self.finish(after).await;
         }
 
         //  render-disabled gate - over quota: no handoff or render
@@ -1130,7 +1141,7 @@ impl<S: HttpStream> ThumbCook<S> {
             self.status = CookStatus::Failed;
             self.out_message = "render quota reached".to_string();
             self.out_duration = t0.elapsed().as_secs_f64();
-            return self.finish(after);
+            return self.finish(after).await;
         }
 
         //  handoff to higher tier
@@ -1182,7 +1193,7 @@ impl<S: HttpStream> ThumbCook<S> {
                         self.runtime.cache.store(key, &result, cost, expires, self.default_pin_ttl, &mut after);
                     }
                 }
-                return self.finish(after);
+                return self.finish(after).await;
             }
             // Renderer returned false (format not recognised).
             // Contract: the renderer did not call take_reader(), so the
@@ -1305,7 +1316,7 @@ impl<S: HttpStream> ThumbCook<S> {
                                 let expires = self.cache_expires_at();
                                 self.runtime.cache.store(key, &result, cost, expires, self.default_pin_ttl, &mut after);
                             }
-                            return self.finish(after);
+                            return self.finish(after).await;
                         }
                         // Remote tier returned a non-OK status - escalate.
                         self.out_message.clear();
@@ -1324,7 +1335,7 @@ impl<S: HttpStream> ThumbCook<S> {
             if tried_any {
                 self.status = CookStatus::Failed;
                 self.out_duration = t0.elapsed().as_secs_f64();
-                return self.finish(after);
+                return self.finish(after).await;
             }
 
             self.status = CookStatus::Complete;
@@ -1334,7 +1345,7 @@ impl<S: HttpStream> ThumbCook<S> {
                 .clone()
                 .unwrap_or_else(|| "no higher-tier renderer is configured".to_string());
             self.out_duration = t0.elapsed().as_secs_f64();
-            self.finish(after)
+            self.finish(after).await
         }
     }
 
@@ -1357,7 +1368,7 @@ impl<S: HttpStream> ThumbCook<S> {
         )
     }
 
-    fn finish(mut self, mut after: AfterResponse) -> (ThumbResult, ThumbTrace, AfterResponse) {
+    async fn finish(mut self, mut after: AfterResponse) -> (ThumbResult, ThumbTrace, AfterResponse) {
         // Final snapshot of I/O counters - safe to call multiple times since
         // stamp_download_bytes is idempotent on the bytes field.
         self.stamp_download_bytes();
@@ -1407,7 +1418,26 @@ impl<S: HttpStream> ThumbCook<S> {
             }
         }
 
-        let result = self.to_result();
+        #[allow(unused_mut)]
+        let mut result = self.to_result();
+        if self.ctx_handoff || self.default_pin_ttl == 0 {
+            result.pin = None;
+        }
+        #[cfg(feature = "native")]
+        if self.debounce_result.is_none() && !self.ctx_handoff && self.default_pin_ttl > 0
+            && result.status == ResultStatus::Success
+            && result.media.as_ref().is_some_and(|media| media.placeholder.is_empty())
+            && let Some(key) = self.src.cache_key.as_deref()
+        {
+            // Publish the entry before advertising a resolvable pin URL.
+            for task in after.drain() {
+                task.await;
+            }
+            match self.runtime.cache.pin_result(key, &result, self.default_pin_ttl).await {
+                Ok(pin) => result.pin = pin,
+                Err(error) => tracing::warn!("pin creation failed: {error}"),
+            }
+        }
         if self.debounce_result.is_none()
             && let Some(ref key) = self.src.cache_key
         {

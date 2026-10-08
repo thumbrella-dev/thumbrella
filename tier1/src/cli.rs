@@ -38,6 +38,7 @@ enum Command {
     /// TBR_HANDSHAKE shared secret required on all endpoints (when set)
     /// TBR_TIER2 downstream tier2 connect string (URL + optional comma-separated headers)
     /// TBR_TIER3 downstream tier3 connect string (URL + optional comma-separated headers)
+    /// TBR_PIN pin TTL in seconds (0 disables; defaults to the maximum cache TTL)
     Serve,
 
     /// Thumbnail a single source and write the JPEG to a file.
@@ -223,6 +224,7 @@ async fn run_server(runtime: Arc<Runtime>) {
             Router::new()
                 .route("/health", get(routes::health))
                 .route("/placeholder/{kind}", get(routes::placeholder))
+                .route("/pin/{filename}", get(routes::pin))
                 .route("/thumb.jpeg", get(routes::thumb))
                 .route("/thumb", get(routes::thumb))
                 .route("/handoff", post(routes::handoff))
@@ -559,9 +561,13 @@ async fn run_check(json: bool, tier: u8) {
         report.healthy = !matches!(report.tier2_validation.status, check::ValidationStatus::Error)
             && !matches!(report.tier3_validation.status, check::ValidationStatus::Error)
             && !matches!(report.cache_validation.status, check::ValidationStatus::Error)
+            && !matches!(report.pin_validation.status, check::ValidationStatus::Error)
             && !matches!(report.trace_validation.status, check::ValidationStatus::Error)
             && !matches!(report.handshake_validation.status, check::ValidationStatus::Error)
-            && report.port_available;
+            && report.port_available
+            && report.cache_file_check.as_ref()
+                .and_then(|fc| fc.sqlite_validation.as_ref())
+                .is_none_or(|validation| validation.status != check::ValidationStatus::Error);
     }
 
     if json {

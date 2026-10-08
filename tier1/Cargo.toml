@@ -32,6 +32,9 @@ native = [
     "dep:time",
     "dep:clap",
     "dep:libc",
+    "dep:sha2",
+    "dep:hmac",
+    "dep:getrandom",
 ]
 
 [dependencies]
@@ -82,4 +85,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"],          opti
 time            = { version = "0.3", features = ["formatting"],              optional = true }
 clap            = { version = "4", features = ["derive"],                    optional = true }
 libc            = { version = "0.2",                                         optional = true }
+sha2            = { version = "0.10",                                        optional = true }
+hmac            = { version = "0.12",                                        optional = true }
+getrandom       = { version = "0.4",                                         optional = true }
 moka            = { version = "0.12", features = ["sync", "future"],          optional = true }

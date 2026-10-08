@@ -1,7 +1,12 @@
 # Thumbrella Server 1.x changelog
-
 ## Development
 
+- Add `Result.pin` with url path for sharable image link
+- Use $TBR_PIN to control pinning lifetime, or disable
+- Config paths support envvar and tilde expansion
+- Rename $TBR_ALLOW_LOCAL to $TBR_LOCAL
+- Cache backends can track persistent secret for hashing
+- Do not cache entries for placeholder thumbnails unrendered
 
 ## 1.7.0 - 2026/10/06
 

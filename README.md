@@ -150,6 +150,81 @@ The server is organized into three tiers of increasing capability:
 The binary output (from any tier) is always named `thumbrella`.
 Build with `cargo build -p tier3` for a full-featured server.
 
+### Pinned thumbnails
+
+Native servers publish a nullable top-level `pin` field in thumbnail results:
+
+```json
+{ "pin": "pin/i123456789012.jpeg" }
+```
+
+Resolve this relative URL against the server base URL. `GET /pin/<id>.jpeg`
+returns only JPEG bytes, never result or media metadata. A missing, expired,
+malformed, or disabled pin redirects to its kind's placeholder. Pin responses
+are not HTTP-cacheable, so their retention and updated content remain
+server-controlled. Existing `TBR_HANDSHAKE` protection also applies to pins.
+
+`TBR_PIN` is a sliding TTL in seconds; `0` disables pinning. By default it
+uses `TBR_CACHE_MAX_TTL` (seven days). Ordinary thumbnail requests refresh
+pin retention, including backend cache hits and client freshness checks when
+the server has a matching entry. Debounce hits reuse their pin without backend
+reads or retention updates. Pin fetches do not refresh it. Pin retention
+can outlive ordinary cache retention and keeps the shared entry available.
+No cache backend (`TBR_CACHE=none`) means no pin URLs.
+`check` reports the effective `TBR_PIN` TTL in seconds, whether it is the
+default, and whether pinning is enabled or disabled. Unset or blank values use
+the maximum cache TTL. Explicit values must be whole seconds from 0 through
+4294967295; `0` disables pinning. Invalid values fail `check` and startup.
+
+Pins follow the latest thumbnail for a source URL. Identifiers use a kind
+letter followed by the first 12 URL-safe base64 characters of an HMAC-SHA-256
+over the cache identity, media kind, cache format version, and collision counter.
+Each local backend owns a secret of 32 bytes from OS cryptographic randomness,
+so knowing a source URL does not reveal its pin. Collisions
+are checked atomically by the backend and retried with a new hash input.
+The kind letters are `i` image, `v` video, `a` audio, `s` vector, `d` document,
+`g` geometry, `r` archive, `t` text, `b` binary, and `u` unknown.
+
+Memory aliases disappear on restart or eviction; SQLite aliases persist with
+the cached entry. Memory backends generate a fresh secret at construction;
+SQLite stores its secret in `thumbrella_metadata`, initializes it atomically
+when absent, and reuses it across opens and cache eviction. Invalid stored
+secrets fail setup rather than silently rotating the pin identity.
+In cache chains the final (coldest) backend owns both pin derivation and the
+alias index, and the other layers share its refreshed pin lifetime. Pins are
+best-effort under cache capacity limits, not permanent storage. Missing-handler
+placeholders are not pinned or stored durably; their client cache tokens and
+five-second debounce remain unchanged.
+
+The native `cloud:` backend requests remote pin issuance rather than receiving
+a cloud secret or deriving pins locally. Its new issue/resolve endpoints
+require the separate cloud pin implementation, which owns the secret and
+account/token namespace. Pins are bearer links, not a replacement for access
+control on the thumbnail-generation API.
+
+For v2, local-file and localhost access is enabled with `TBR_LOCAL=1`.
+This replaces `TBR_ALLOW_LOCAL`, which is no longer read.
+
+Filesystem configuration paths support `~` and `~/...` for the current user's
+home directory, `$VAR` and `${VAR}` for environment variables, and `%VAR%`
+on Windows (where `~\...` also works). This applies to `TBR_SCRATCH`,
+`TBR_TRACE=ndjson:<path>`, and the path in `TBR_CACHE=sqlite:<path>[,size]`.
+Unset variables, malformed `${VAR}` references, and empty expanded paths
+produce configuration errors. Use `$$` for a literal dollar sign, or `%%`
+for a literal percent sign on Windows. Relative paths remain relative;
+directories need not already exist for expansion itself to succeed.
+
+Expansion is single-pass and never invokes a shell. Substituted values are
+literal, and cache directives are parsed before expanding the SQLite path.
+Cloud tokens, handoff URLs, and media request URLs are not expanded.
+Quote values to defer expansion to Thumbrella, for example:
+
+```sh
+export TBR_SCRATCH='${DATA_DIR}/thumbrella'
+export TBR_TRACE='ndjson:~/trace.ndjson'
+export TBR_CACHE='mem:100mb+sqlite:${DATA_DIR}/cache.db,1gb'
+```
+
 ## Cloud
 
 Thumbrella Cloud makes a fully featured Thumbrella server available for

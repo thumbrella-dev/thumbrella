@@ -48,6 +48,20 @@
 //!              "pin_ttl_secs": <u64, defaults to 0>,
 //!              "media": <ThumbMedia json, url omitted> }
 //!   success: 200 { "status": "stored", "url": "<url>", "ttl_secs": <u64> }
+//!
+//! POST /cache/pin/issue
+//!   request: { "kind": "<media kind>", "url": "<source identity>",
+//!              "cache_format": <u32>, "pin_ttl_secs": <u64> }
+//!   response: 200 { "status": "claimed", "pin": "<kind><12-character hash>" }
+//!             or { "status": "missing" }
+//!   Derive with the cloud's secret and account namespace, atomically claim
+//!   the alias, retry collisions, and refresh pin retention. Never return a secret.
+//!
+//! POST /cache/pin/resolve
+//!   request: { "pin": "<kind><12-character hash>", "cache_format": <u32> }
+//!   response: 200 image/jpeg bytes, or 404 for a missing/expired pin.
+//!   Must not refresh pin retention. These two endpoints are wired here for
+//!   the cloud worker's subsequent pin implementation.
 //! ```
 //!
 //! Backfill writes set the relative TTLs to zero and supply `promotion` with
@@ -89,6 +103,7 @@ use std::time::Duration;
 
 use crate::after::DeferredFuture;
 use crate::cache::{CacheBackend, CacheEntry, CacheEntryMetadata, unix_now_secs};
+use crate::cache::{PinFuture, pins::{pin_kind, valid_pin}};
 use crate::connect::ConnectTarget;
 
 /// Default cloud service host.
@@ -103,6 +118,15 @@ pub struct CloudCacheBackend {
 }
 
 impl CloudCacheBackend {
+    /// Alias transport for the cloud pin endpoints. The cloud worker implements
+    /// these independently of the native router.
+    async fn pin_request(&self, endpoint: &str, body: serde_json::Value) -> Result<reqwest::Response, String> {
+        self.client.post(format!("{}/cache/pin/{endpoint}", self.base_url))
+            .header("Authorization", &self.auth_header)
+            .json(&body).send().await
+            .map_err(|e| format!("cloud pin {endpoint}: {e}"))
+    }
+
     /// Create a new cloud cache backend from a parsed [`ConnectTarget`].
     /// Does NOT perform a health check - use [`ping_cloud_backend`] for
     /// upfront validation.
@@ -325,6 +349,121 @@ mod tests {
         Json(serde_json::json!({"status": "stored"}))
     }
 
+    async fn issue(
+        State(service): State<TestService>,
+        headers: axum::http::HeaderMap,
+        Json(body): Json<serde_json::Value>,
+    ) -> Json<serde_json::Value> {
+        assert!(headers.contains_key(axum::http::header::AUTHORIZATION));
+        let pin = match body["url"].as_str().unwrap() {
+            "https://example.com/missing" => {
+                service.requests.lock().push(body);
+                return Json(serde_json::json!({"status": "missing"}));
+            }
+            "https://example.com/malformed" => "not-a-pin",
+            "https://example.com/wrong-kind" => "v123456789012",
+            _ => "i123456789012",
+        };
+        service.requests.lock().push(body);
+        Json(serde_json::json!({"status": "claimed", "pin": pin}))
+    }
+
+    async fn resolve(State(service): State<TestService>, Json(body): Json<serde_json::Value>) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        let missing = body["pin"] == "i000000000000";
+        service.requests.lock().push(body);
+        if missing {
+            return axum::http::StatusCode::NOT_FOUND.into_response();
+        }
+        ([(axum::http::header::CONTENT_TYPE, "image/jpeg")], service.entry.media.thumbnail).into_response()
+    }
+
+    #[tokio::test]
+    async fn cloud_pin_transport_requests_remote_issuance_and_returns_jpeg_bytes_only() {
+        let requests = Arc::new(Mutex::new(vec![]));
+        let service = TestService {
+            entry: CacheEntry::new(crate::ThumbMedia {
+                thumbnail: vec![0xff, 0xd8, 0xff, 0xd9], ..Default::default()
+            }, 0, unix_now_secs() + 60, 60, unix_now_secs()),
+            requests: requests.clone(),
+        };
+        let app = Router::new()
+            .route("/cache/pin/issue", post(issue))
+            .route("/cache/pin/resolve", post(resolve))
+            .with_state(service);
+        let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let backend = CloudCacheBackend {
+            base_url: format!("http://127.0.0.1:{port}"),
+            auth_header: "Bearer test-token".into(),
+            client: reqwest::Client::builder().no_proxy().build().unwrap(),
+        };
+        assert_eq!(backend.issue_pin(crate::FileKind::Image, "https://example.com/a.jpg", 600).await.unwrap(),
+            Some("i123456789012".into()));
+        assert_eq!(backend.pin_thumbnail("i123456789012").await.unwrap(), Some(vec![0xff, 0xd8, 0xff, 0xd9]));
+        assert!(backend.pin_thumbnail("i000000000000").await.unwrap().is_none());
+        let mut other = backend.clone();
+        other.auth_header = "Bearer other-token".into();
+        assert_eq!(other.issue_pin(crate::FileKind::Image, "https://example.com/a.jpg", 600).await.unwrap(),
+            Some("i123456789012".into()));
+        assert!(backend.pin_candidate(crate::FileKind::Image, "https://example.com/a.jpg", 0).is_err());
+        assert!(backend.issue_pin(crate::FileKind::Image, "https://example.com/a.jpg", 0).await.unwrap().is_none());
+        assert!(backend.issue_pin(crate::FileKind::Image, "https://example.com/missing", 600).await.unwrap().is_none());
+        for url in ["https://example.com/malformed", "https://example.com/wrong-kind"] {
+            assert!(backend.issue_pin(crate::FileKind::Image, url, 600).await.unwrap_err().contains("invalid identifier"));
+        }
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        let requests = requests.lock();
+        assert!(requests[0].get("pin").is_none());
+        assert_eq!(requests[0]["kind"], "image");
+        assert_eq!(requests[0]["url"], "https://example.com/a.jpg");
+        assert_eq!(requests[0]["pin_ttl_secs"], 600);
+        assert_eq!(requests[0]["cache_format"], crate::TBR_CACHE_VERSION);
+        assert!(requests[1].get("pin_ttl_secs").is_none());
+        assert!(requests[1].get("url").is_none());
+        assert_eq!(requests.len(), 7);
+    }
+
+    #[tokio::test]
+    async fn a_cloud_backed_chain_issues_pins_remotely_and_refreshes_its_memory_front() {
+        let now = unix_now_secs();
+        let source = "https://example.com/a.jpg";
+        let entry = CacheEntry::new(crate::ThumbMedia {
+            kind: crate::FileKind::Image,
+            thumbnail: vec![0xff, 0xd8, 0xff, 0xd9],
+            ..Default::default()
+        }, 0, now + 60, 600, now);
+        let requests = Arc::new(Mutex::new(vec![]));
+        let service = TestService { entry: entry.clone(), requests: requests.clone() };
+        let app = Router::new()
+            .route("/cache/pin/issue", post(issue))
+            .route("/cache/pin", post(lookup))
+            .route("/cache/pin/resolve", post(resolve))
+            .with_state(service);
+        let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let cloud = Arc::new(CloudCacheBackend {
+            base_url: format!("http://127.0.0.1:{port}"),
+            auth_header: "Bearer cloud-chain-test".into(),
+            client: reqwest::Client::builder().no_proxy().build().unwrap(),
+        });
+        let memory = Arc::new(super::super::memory::MemoryCacheBackend::with_max_entries(100).unwrap());
+        memory.put(source.into(), entry.media.clone(), 0, now + 60, 0).await;
+        let chain = super::super::chain::ChainCacheBackend::new(vec![memory.clone(), cloud]);
+        assert!(chain.pin_candidate(crate::FileKind::Image, source, 0).is_err());
+        let id = chain.issue_pin(crate::FileKind::Image, source, 600).await.unwrap().unwrap();
+        assert_eq!(id, "i123456789012");
+        assert_eq!(memory.get_pin_entry(source).await.unwrap().pin_until, entry.pin_until);
+        assert_eq!(chain.pin_thumbnail(&id).await.unwrap(), Some(entry.media.thumbnail));
+        assert!(chain.issue_pin(crate::FileKind::Image, source, 0).await.unwrap().is_none());
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        assert_eq!(requests.lock().len(), 3);
+    }
+
     #[tokio::test]
     async fn cloud_transport_carries_promotion_metadata_without_duplicate_media_or_new_ttls() {
         let now = unix_now_secs();
@@ -375,6 +514,50 @@ mod tests {
 
 impl CacheBackend for CloudCacheBackend {
     fn name(&self) -> &'static str { "cloud" }
+
+    fn issue_pin<'a>(&'a self, kind: crate::media::FileKind, key: &'a str, ttl: u64) -> PinFuture<'a, Option<String>> {
+        debug_assert!(is_source_identity(key), "cloud pins require a source identity");
+        Box::pin(async move {
+            if ttl == 0 {
+                return Ok(None);
+            }
+            let response = self.pin_request("issue", serde_json::json!({
+                "kind": kind, "url": key, "pin_ttl_secs": ttl,
+                "cache_format": crate::TBR_CACHE_VERSION,
+            })).await?;
+            let response = response.error_for_status().map_err(|e| format!("cloud pin issue: {e}"))?;
+            #[derive(serde::Deserialize)]
+            #[serde(tag = "status", rename_all = "snake_case")]
+            enum Reply {
+                Claimed { pin: String },
+                Missing,
+            }
+            match response.json::<Reply>().await.map_err(|e| format!("cloud pin issue response: {e}"))? {
+                Reply::Claimed { pin } if valid_pin(&pin) && pin_kind(&pin) == kind => Ok(Some(pin)),
+                Reply::Claimed { .. } => Err("cloud pin issue returned an invalid identifier or media kind".into()),
+                Reply::Missing => Ok(None),
+            }
+        })
+    }
+
+    fn pin_thumbnail<'a>(&'a self, id: &'a str) -> PinFuture<'a, Option<Vec<u8>>> {
+        Box::pin(async move {
+            let response = self.pin_request("resolve", serde_json::json!({
+                "pin": id, "cache_format": crate::TBR_CACHE_VERSION,
+            })).await?;
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                return Ok(None);
+            }
+            let response = response.error_for_status().map_err(|e| format!("cloud pin resolve: {e}"))?;
+            let content_type = response.headers().get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok());
+            if content_type != Some("image/jpeg") {
+                return Err("cloud pin resolve returned a non-JPEG content type".into());
+            }
+            response.bytes().await.map(|bytes| Some(bytes.to_vec()))
+                .map_err(|e| format!("cloud pin resolve body: {e}"))
+        })
+    }
 
     fn get_entry<'a>(&'a self, key: &'a str, pin_ttl: u64) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + Send + 'a>> {
         self.lookup(key, false, pin_ttl)

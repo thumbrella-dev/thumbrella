@@ -43,14 +43,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Checks `TBR_SCRATCH` first (the canonical Thumbrella env var for tier3
 /// scratch space).  Falls back to the system temp directory (`$TMPDIR`,
 /// `$TMP`, `$TEMP`, or `/tmp`).
-pub fn scratch_root() -> PathBuf {
-    if let Ok(v) = std::env::var("TBR_SCRATCH") {
-        let v = v.trim();
-        if !v.is_empty() {
-            return PathBuf::from(v);
-        }
-    }
-    std::env::temp_dir()
+/// Invalid configured expansions return an `InvalidInput` error.
+pub fn scratch_root() -> io::Result<PathBuf> {
+    tier1::config::configured_scratch_dir()
+        .map(|path| path.map(PathBuf::from).unwrap_or_else(std::env::temp_dir))
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, format!("TBR_SCRATCH: {error}")))
 }
 
 //  ScratchArena
@@ -78,7 +75,7 @@ impl ScratchArena {
     /// `max_bytes` of 0 disables the limit.
     pub fn new(max_bytes: u64) -> io::Result<Self> {
         use tempfile::Builder as TmpBuilder;
-        let root = scratch_root();
+        let root = scratch_root()?;
         std::fs::create_dir_all(&root)?;
         let dir = TmpBuilder::new()
             .prefix("thumbrella-tier3-")

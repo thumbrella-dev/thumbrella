@@ -49,6 +49,9 @@ pub mod ux;
 pub mod config;
 
 #[cfg(feature = "native")]
+pub mod config_path;
+
+#[cfg(feature = "native")]
 pub mod check;
 
 #[cfg(feature = "native")]

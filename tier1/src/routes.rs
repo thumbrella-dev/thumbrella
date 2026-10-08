@@ -5,6 +5,7 @@
 //! - `GET  /placeholder/:kind.jpeg`       - static placeholder thumbnail for a file kind
 //! - `GET  /thumb.jpeg?url=<url>`         - single thumbnail; returns raw JPEG bytes (canonical)
 //! - `GET  /thumb?url=<url>`              - same handler; alias without extension
+//! - `GET  /pin/:id.jpeg`                 - pinned JPEG or kind placeholder redirect
 //! - `POST /handoff`                      - trusted tier-to-tier thumbnail handoff
 //! - `POST /batch`                        - batch thumbnail + describe; waits for all items, returns one JSON object
 //!
@@ -22,7 +23,7 @@ use axum::{
     extract::{ConnectInfo, Query, Request, State},
     http::{HeaderMap, Method, StatusCode, header},
     middleware::Next,
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Redirect, Response},
 };
 use bytes::Bytes;
 use futures::stream::{self, FuturesUnordered, StreamExt};
@@ -271,6 +272,82 @@ pub async fn placeholder(axum::extract::Path(kind): axum::extract::Path<String>)
 
 //  GET /thumb
 
+/// Resolve a pin without extending its retention. Missing, expired, malformed
+/// and disabled pins redirect to the kind encoded in their first character.
+pub async fn pin(
+    State(runtime): State<Arc<Runtime>>,
+    axum::extract::Path(filename): axum::extract::Path<String>,
+) -> Response {
+    use crate::cache::pins::{pin_kind, valid_pin};
+    if runtime.pin_ttl_secs > 0
+        && let Some(id) = filename.strip_suffix(".jpeg").filter(|id| valid_pin(id))
+    {
+        match runtime.cache.pin_thumbnail(id).await {
+            Ok(Some(bytes)) if !bytes.is_empty() => {
+                return (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, "image/jpeg"), (header::CACHE_CONTROL, "no-store")],
+                    Bytes::from(bytes),
+                ).into_response();
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!("pin lookup failed: {error}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    [(header::CACHE_CONTROL, "no-store")],
+                    Json(json!({ "error": "pin lookup failed" })),
+                ).into_response();
+            }
+        }
+    }
+    let mut response = Redirect::temporary(&format!("/placeholder/{}.jpeg", kind_str(pin_kind(&filename)))).into_response();
+    response.headers_mut().insert(header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+    response
+}
+
+#[cfg(test)]
+mod pin_tests {
+    use super::*;
+    use crate::cache::{CacheBackend, memory::MemoryCacheBackend, unix_now_secs};
+    use crate::result::{ResultStatus, ThumbMedia};
+
+    #[tokio::test]
+    async fn pin_route_returns_only_jpeg_and_redirects_missing_or_disabled_pins() {
+        let backend = Arc::new(MemoryCacheBackend::with_max_entries(100).unwrap());
+        let cache = CacheStore::backend_only(backend.clone());
+        let media = ThumbMedia {
+            thumbnail: vec![0xff, 0xd8, 0xff, 0xd9],
+            kind: FileKind::Image,
+            ..Default::default()
+        };
+        backend.put("source".into(), media.clone(), 0, unix_now_secs() + 60, 60).await;
+        let result = ThumbResult { status: ResultStatus::Success, media: Some(media.clone()), ..Default::default() };
+        let url = cache.pin_result("source", &result, 60).await.unwrap().unwrap();
+        let id = url.strip_prefix("pin/").unwrap().strip_suffix(".jpeg").unwrap();
+        let mut runtime = Runtime::new(cache, Default::default(), None, None,
+            Default::default(), Default::default(), None, false, 5, 60, 60, 1000, 60);
+        Arc::make_mut(&mut runtime).pin_ttl_secs = 60;
+        let before = backend.get_pin_entry("source").await.unwrap().pin_until;
+        let response = pin(State(runtime.clone()), axum::extract::Path(format!("{id}.jpeg"))).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "image/jpeg");
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(axum::body::to_bytes(response.into_body(), 100).await.unwrap().as_ref(), media.thumbnail);
+        assert_eq!(backend.get_pin_entry("source").await.unwrap().pin_until, before);
+        for (invalid, kind) in [("v123456789012.jpeg", "video"), ("g-invalid.jpeg", "geometry"), ("invalid", "image"), ("x", "unknown")] {
+            let response = pin(State(runtime.clone()), axum::extract::Path(invalid.into())).await;
+            assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+            assert_eq!(response.headers()[header::LOCATION], format!("/placeholder/{kind}.jpeg"));
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        }
+        Arc::make_mut(&mut runtime).pin_ttl_secs = 0;
+        let response = pin(State(runtime), axum::extract::Path(format!("{id}.jpeg"))).await;
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(response.headers()[header::LOCATION], "/placeholder/image.jpeg");
+    }
+}
+
 /// Single-URL thumbnail endpoint.
 ///
 /// # Request
@@ -516,7 +593,7 @@ pub async fn batch(
 /// - `file://` URLs → rejected with 400.
 /// - Bare paths (no `://` scheme) → rejected with 400.
 ///
-/// When `allow_local` is `true` (`TBR_ALLOW_LOCAL=1`):
+/// When `allow_local` is `true` (`TBR_LOCAL=1`):
 /// - `file://` URLs → accepted unchanged.
 /// - Bare absolute paths → promoted to `file://` URLs (e.g. `/data/img.png`
 ///   becomes `file:///data/img.png`, and on Windows `C:/data/img.png` becomes

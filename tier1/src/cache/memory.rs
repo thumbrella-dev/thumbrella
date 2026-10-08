@@ -15,17 +15,22 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::collections::HashMap;
 
 use crate::after::DeferredFuture;
 use crate::cache::{CacheBackend, CacheEntry, unix_now_secs};
+use crate::cache::{PinFuture, pins::{PinClaim, PinSecret}};
 use parking_lot::Mutex;
 
 pub struct MemoryCacheBackend {
     cache: Arc<Mutex<moka::sync::Cache<String, CacheEntry>>>,
+    pins: Arc<Mutex<HashMap<String, String>>>,
+    pin_secret: PinSecret,
 }
 
 impl MemoryCacheBackend {
-    pub fn with_max_bytes(max_bytes: u64) -> Self {
+    pub fn with_max_bytes(max_bytes: u64) -> Result<Self, String> {
+        let pin_secret = PinSecret::generate().map_err(|e| format!("cannot generate pin secret: {e}"))?;
         let max_bytes = max_bytes.max(1024 * 1024);
         let cap_hint = (max_bytes / 512).min(100_000);
         let cache = moka::sync::Cache::builder()
@@ -39,16 +44,17 @@ impl MemoryCacheBackend {
                 size.min(u32::MAX as usize) as u32
             })
             .build();
-        Self { cache: Arc::new(Mutex::new(cache)) }
+        Ok(Self { cache: Arc::new(Mutex::new(cache)), pins: Default::default(), pin_secret })
     }
 
-    pub fn with_max_entries(max_entries: u64) -> Self {
+    pub fn with_max_entries(max_entries: u64) -> Result<Self, String> {
+        let pin_secret = PinSecret::generate().map_err(|e| format!("cannot generate pin secret: {e}"))?;
         let max_entries = max_entries.max(10);
         let cache = moka::sync::Cache::builder().support_invalidation_closures().max_capacity(max_entries).build();
-        Self { cache: Arc::new(Mutex::new(cache)) }
+        Ok(Self { cache: Arc::new(Mutex::new(cache)), pins: Default::default(), pin_secret })
     }
 
-    pub fn default_cache() -> Self {
+    pub fn default_cache() -> Result<Self, String> {
         Self::with_max_bytes(100 * 1024 * 1024)
     }
 
@@ -69,6 +75,39 @@ impl MemoryCacheBackend {
 impl CacheBackend for MemoryCacheBackend {
     fn name(&self) -> &'static str {
         "memory"
+    }
+
+    fn pin_candidate(&self, kind: crate::media::FileKind, key: &str, attempt: u32) -> Result<String, String> {
+        Ok(self.pin_secret.candidate(kind, key, attempt))
+    }
+
+    fn claim_pin<'a>(&'a self, id: &'a str, key: &'a str, ttl: u64) -> PinFuture<'a, PinClaim> {
+        Box::pin(async move {
+            let cache = self.cache.lock();
+            let now = unix_now_secs();
+            let mut pins = self.pins.lock();
+            pins.retain(|_, key| cache.get(key).is_some_and(|entry| entry.pin_until > now));
+            if pins.get(id).is_some_and(|owner| owner != key) {
+                return Ok(PinClaim::Conflict);
+            }
+            let Some(mut entry) = cache.get(key).filter(|entry| entry.retain_until() > now) else {
+                return Ok(PinClaim::Missing);
+            };
+            entry.pin_until = entry.pin_until.max(now.saturating_add(ttl));
+            cache.insert(key.to_string(), entry);
+            pins.insert(id.to_string(), key.to_string());
+            Ok(PinClaim::Claimed)
+        })
+    }
+
+    fn pin_thumbnail<'a>(&'a self, id: &'a str) -> PinFuture<'a, Option<Vec<u8>>> {
+        Box::pin(async move {
+            let cache = self.cache.lock();
+            let pins = self.pins.lock();
+            Ok(pins.get(id).and_then(|key| cache.get(key))
+                .filter(|entry| entry.pin_until > unix_now_secs())
+                .map(|entry| entry.media.thumbnail))
+        })
     }
 
     fn get_entry<'a>(&'a self, key: &'a str, pin_ttl: u64) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + Send + 'a>> {

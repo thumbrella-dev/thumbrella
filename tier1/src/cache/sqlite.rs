@@ -14,6 +14,8 @@
 //!     pin_until        INTEGER NOT NULL DEFAULT 0,
 //!     expires_at       INTEGER NOT NULL         -- max(cache_until, pin_until)
 //! )
+//! thumbrella_pins(pin_id TEXT PRIMARY KEY, cache_key TEXT REFERENCES thumbrella(cache_key) ON DELETE CASCADE)
+//! thumbrella_metadata(name TEXT PRIMARY KEY, value BLOB NOT NULL)
 //! ```
 //!
 //! # Format versioning
@@ -58,12 +60,14 @@ use rusqlite::{Connection, params};
 
 use crate::after::DeferredFuture;
 use crate::cache::{CacheBackend, CacheEntry, unix_now_secs};
+use crate::cache::{PinFuture, pins::{PinClaim, PinSecret}};
 
 //  Backend
 
 /// SQLite-backed cache.  Thread-safe via an internal `Mutex<Connection>`.
 pub struct SqliteCacheBackend {
     conn: Arc<Mutex<Connection>>,
+    pin_secret: PinSecret,
     /// Maximum total size in bytes before eviction kicks in.
     /// `None` means unbounded (manual maintenance only).
     max_bytes: Option<u64>,
@@ -72,19 +76,21 @@ pub struct SqliteCacheBackend {
 impl SqliteCacheBackend {
     /// Open (or create) a SQLite database at `path`, run migrations, and
     /// populate the maintenance table.  No size limit; cache grows unbounded.
-    pub fn open(path: &str) -> rusqlite::Result<Self> {
+    pub fn open(path: &str) -> Result<Self, String> {
         Self::open_with_limit(path, None)
     }
 
     /// Open with an optional byte-size limit.  After each `put()` the backend
     /// checks total stored bytes; if over `max_bytes`, the oldest entries
     /// (by `last_accessed_at`) are deleted until the total fits.
-    pub fn open_with_limit(path: &str, max_bytes: Option<u64>) -> rusqlite::Result<Self> {
-        let conn = Connection::open(path)?;
-        apply_pragmas(&conn)?;
-        migrate(&conn)?;
+    pub fn open_with_limit(path: &str, max_bytes: Option<u64>) -> Result<Self, String> {
+        let mut conn = Connection::open(path).map_err(|e| format!("open database: {e}"))?;
+        apply_pragmas(&conn).map_err(|e| format!("configure database: {e}"))?;
+        migrate(&conn).map_err(|e| format!("migrate database: {e}"))?;
+        let pin_secret = load_pin_secret(&mut conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            pin_secret,
             max_bytes,
         })
     }
@@ -234,6 +240,64 @@ impl CacheBackend for SqliteCacheBackend {
         "sqlite"
     }
 
+    fn pin_candidate(&self, kind: crate::media::FileKind, key: &str, attempt: u32) -> Result<String, String> {
+        Ok(self.pin_secret.candidate(kind, key, attempt))
+    }
+
+    fn claim_pin<'a>(&'a self, id: &'a str, key: &'a str, ttl: u64) -> PinFuture<'a, PinClaim> {
+        let conn = self.conn.clone();
+        let id = format_scoped_key(id);
+        let key = format_scoped_key(key);
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || -> rusqlite::Result<PinClaim> {
+                use rusqlite::OptionalExtension;
+                let mut conn = conn.lock().expect("SQLite cache mutex poisoned");
+                let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                tx.execute("DELETE FROM thumbrella_pins WHERE NOT EXISTS (
+                    SELECT 1 FROM thumbrella WHERE thumbrella.cache_key = thumbrella_pins.cache_key
+                    AND pin_until > unixepoch())", [])?;
+                let owner: Option<String> = tx.query_row(
+                    "SELECT cache_key FROM thumbrella_pins WHERE pin_id = ?1", [&id], |row| row.get(0),
+                ).optional()?;
+                if owner.is_some_and(|owner| owner != key) {
+                    return Ok(PinClaim::Conflict);
+                }
+                let deadline = i64::try_from(unix_now_secs().saturating_add(ttl)).unwrap_or(i64::MAX);
+                let updated = tx.execute(
+                    "UPDATE thumbrella SET pin_until = max(pin_until, ?2),
+                        expires_at = max(cache_until, pin_until, ?2)
+                     WHERE cache_key = ?1 AND expires_at > unixepoch()",
+                    params![key, deadline],
+                )?;
+                if updated == 0 {
+                    return Ok(PinClaim::Missing);
+                }
+                tx.execute("INSERT INTO thumbrella_pins(pin_id, cache_key) VALUES (?1, ?2)
+                    ON CONFLICT(pin_id) DO NOTHING", params![id, key])?;
+                tx.commit()?;
+                Ok(PinClaim::Claimed)
+            }).await.map_err(|e| format!("sqlite pin claim task: {e}"))?
+                .map_err(|e| format!("sqlite pin claim: {e}"))
+        })
+    }
+
+    fn pin_thumbnail<'a>(&'a self, id: &'a str) -> PinFuture<'a, Option<Vec<u8>>> {
+        let conn = self.conn.clone();
+        let id = format_scoped_key(id);
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, String> {
+                use rusqlite::OptionalExtension;
+                let conn = conn.lock().expect("SQLite cache mutex poisoned");
+                let value: Option<String> = conn.query_row(
+                    "SELECT value FROM thumbrella JOIN thumbrella_pins USING(cache_key)
+                     WHERE pin_id = ?1 AND pin_until > unixepoch()", [&id], |row| row.get(0),
+                ).optional().map_err(|e| format!("sqlite pin lookup: {e}"))?;
+                value.map(|value| serde_json::from_str::<crate::ThumbMedia>(&value)
+                    .map(|media| media.thumbnail).map_err(|e| format!("sqlite pin payload: {e}"))).transpose()
+            }).await.map_err(|e| format!("sqlite pin lookup task: {e}"))?
+        })
+    }
+
     fn get_entry<'a>(&'a self, key: &'a str, pin_ttl: u64) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + Send + 'a>> {
         self.lookup(key, false, pin_ttl)
     }
@@ -253,8 +317,9 @@ impl CacheBackend for SqliteCacheBackend {
     fn put(&self, key: String, media: crate::result::ThumbMedia, cost: u8, cache_until: u64, pin_ttl: u64) -> DeferredFuture {
         let conn = Arc::clone(&self.conn);
         let max_bytes = self.max_bytes;
+        let pin_secret = self.pin_secret.clone();
         Box::pin(async move {
-            let backend = Self { conn, max_bytes };
+            let backend = Self { conn, max_bytes, pin_secret };
             backend.write_entry(key, CacheEntry::new(media, cost, cache_until, pin_ttl, unix_now_secs()), false, None).await;
         })
     }
@@ -359,13 +424,57 @@ fn check_schema(path: &str) -> crate::check::Validation {
         ));
     }
 
+    let metadata: bool = match conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'thumbrella_metadata')",
+        [], |row| row.get(0),
+    ) {
+        Ok(exists) => exists,
+        Err(error) => return crate::check::Validation::error(format!("checking pin metadata: {error}")),
+    };
+    if !metadata {
+        return crate::check::Validation::warn("pin secret will be initialized when the cache opens");
+    }
+    use rusqlite::OptionalExtension;
+    match conn.query_row(
+        "SELECT value FROM thumbrella_metadata WHERE name = 'pin_secret'", [], |row| row.get::<_, Vec<u8>>(0),
+    ).optional() {
+        Ok(Some(bytes)) => {
+            if let Err(error) = PinSecret::from_bytes(bytes) {
+                return crate::check::Validation::error(error);
+            }
+        }
+        Ok(None) => return crate::check::Validation::warn("pin secret will be initialized when the cache opens"),
+        Err(error) => return crate::check::Validation::error(format!("reading pin secret: {error}")),
+    }
+
     crate::check::Validation::ok()
 }
 
 fn apply_pragmas(conn: &Connection) -> rusqlite::Result<()> {
     // WAL mode: concurrent readers don't block a writer.
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;")?;
     Ok(())
+}
+
+fn load_pin_secret(conn: &mut Connection) -> Result<PinSecret, String> {
+    use rusqlite::OptionalExtension;
+
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("pin secret transaction: {e}"))?;
+    let bytes: Option<Vec<u8>> = tx.query_row(
+        "SELECT value FROM thumbrella_metadata WHERE name = 'pin_secret'", [], |row| row.get(0),
+    ).optional().map_err(|e| format!("read pin secret: {e}"))?;
+    let secret = match bytes {
+        Some(bytes) => PinSecret::from_bytes(bytes)?,
+        None => {
+            let secret = PinSecret::generate().map_err(|e| format!("cannot generate pin secret: {e}"))?;
+            tx.execute("INSERT INTO thumbrella_metadata(name, value) VALUES ('pin_secret', ?1)", [secret.as_bytes()])
+                .map_err(|e| format!("store pin secret: {e}"))?;
+            secret
+        }
+    };
+    tx.commit().map_err(|e| format!("commit pin secret: {e}"))?;
+    Ok(secret)
 }
 
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
@@ -387,10 +496,21 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_thumbrella_expiry
             ON thumbrella(expires_at);
 
+        CREATE TABLE IF NOT EXISTS thumbrella_pins (
+            pin_id TEXT NOT NULL PRIMARY KEY,
+            cache_key TEXT NOT NULL REFERENCES thumbrella(cache_key) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_thumbrella_pins_key ON thumbrella_pins(cache_key);
+
+        CREATE TABLE IF NOT EXISTS thumbrella_metadata (
+            name TEXT NOT NULL PRIMARY KEY,
+            value BLOB NOT NULL
+        );
+
         -- Human-readable stats view.
         CREATE VIEW IF NOT EXISTS cache_stats AS
         SELECT
-            count(*)                                      AS entry_count,
+            count(*)                                     AS entry_count,
             round(sum(size_bytes) / 1048576.0, 2)        AS total_mb,
             datetime(min(last_accessed_at), 'unixepoch') AS oldest_access,
             datetime(max(last_accessed_at), 'unixepoch') AS newest_access
@@ -478,6 +598,110 @@ mod tests {
     use super::*;
     use crate::result::ThumbMedia;
     use crate::source::CacheHints;
+
+    fn temporary_database(label: &str) -> std::path::PathBuf {
+        let suffix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        std::env::temp_dir().join(format!("thumbrella-{label}-{}-{suffix}.db", std::process::id()))
+    }
+
+    #[tokio::test]
+    async fn pin_indices_persist_across_reopen_and_are_removed_with_their_entry() {
+        let path = temporary_database("pin");
+        let filename = path.to_str().unwrap();
+        let id;
+        {
+            let backend = SqliteCacheBackend::open(filename).unwrap();
+            backend.put("source".into(), ThumbMedia { thumbnail: vec![1, 2], kind: crate::FileKind::Image, ..Default::default() },
+                0, unix_now_secs() + 60, 60).await;
+            id = backend.issue_pin(crate::FileKind::Image, "source", 60).await.unwrap().unwrap();
+        }
+        {
+            let backend = SqliteCacheBackend::open(filename).unwrap();
+            assert_eq!(id, backend.pin_candidate(crate::FileKind::Image, "source", 0).unwrap());
+            assert_eq!(backend.pin_thumbnail(&id).await.unwrap(), Some(vec![1, 2]));
+            let conn = backend.conn.lock().unwrap();
+            conn.execute("DELETE FROM thumbrella", []).unwrap();
+            let count: i64 = conn.query_row("SELECT count(*) FROM thumbrella_pins", [], |row| row.get(0)).unwrap();
+            assert_eq!(count, 0);
+            let length: i64 = conn.query_row(
+                "SELECT length(value) FROM thumbrella_metadata WHERE name = 'pin_secret'", [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(length, 32);
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn concurrent_openers_initialize_one_persisted_pin_secret() {
+        let path = temporary_database("pin-secret");
+        {
+            let conn = Connection::open(&path).unwrap();
+            apply_pragmas(&conn).unwrap();
+            migrate(&conn).unwrap();
+        }
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let threads: Vec<_> = (0..8).map(|_| {
+            let path = path.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                let backend = SqliteCacheBackend::open(path.to_str().unwrap()).unwrap();
+                backend.pin_candidate(crate::FileKind::Image, "source", 0).unwrap()
+            })
+        }).collect();
+        let ids: Vec<_> = threads.into_iter().map(|thread| thread.join().unwrap()).collect();
+        assert!(ids.iter().all(|id| id == &ids[0]));
+        let other = SqliteCacheBackend::open(":memory:").unwrap();
+        assert_ne!(ids[0], other.pin_candidate(crate::FileKind::Image, "source", 0).unwrap());
+        let conn = Connection::open(&path).unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT count(*) FROM thumbrella_metadata WHERE name = 'pin_secret' AND length(value) = 32",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 1);
+        drop(conn);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn invalid_persisted_pin_secrets_fail_setup_and_diagnostics_without_replacing_them() {
+        let path = temporary_database("invalid-pin-secret");
+        {
+            let conn = Connection::open(&path).unwrap();
+            migrate(&conn).unwrap();
+            conn.execute("INSERT INTO thumbrella_metadata VALUES ('pin_secret', ?1)", [vec![1u8; 31]]).unwrap();
+        }
+        let error = match SqliteCacheBackend::open(path.to_str().unwrap()) {
+            Ok(_) => panic!("invalid secret was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.contains("exactly 32 bytes"), "{error}");
+        assert_eq!(check_schema(path.to_str().unwrap()).status, crate::check::ValidationStatus::Error);
+        let conn = Connection::open(&path).unwrap();
+        let bytes: Vec<u8> = conn.query_row(
+            "SELECT value FROM thumbrella_metadata WHERE name = 'pin_secret'", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(bytes, vec![1u8; 31]);
+        drop(conn);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn eviction_does_not_remove_or_rotate_the_pin_secret() {
+        let backend = SqliteCacheBackend::open_with_limit(":memory:", Some(1)).unwrap();
+        let id = backend.pin_candidate(crate::FileKind::Image, "source", 0).unwrap();
+        backend.put("source".into(), ThumbMedia { thumbnail: vec![1, 2], ..Default::default() },
+            0, unix_now_secs() + 60, 60).await;
+        backend.put("other".into(), ThumbMedia { thumbnail: vec![1, 2], ..Default::default() },
+            1, unix_now_secs() + 60, 60).await;
+        assert!(backend.get_entry("source", 0).await.is_none());
+        assert_eq!(id, backend.pin_candidate(crate::FileKind::Image, "source", 0).unwrap());
+        let conn = backend.conn.lock().unwrap();
+        let length: i64 = conn.query_row(
+            "SELECT length(value) FROM thumbrella_metadata WHERE name = 'pin_secret'", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(length, 32);
+    }
 
     #[test]
     fn migration_preserves_existing_cache_deadlines() {
