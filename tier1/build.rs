@@ -58,7 +58,11 @@ fn main() {
         println!("cargo:rerun-if-changed={}", path.display());
         let bytes =
             std::fs::read(&path).unwrap_or_else(|e| panic!("read placeholder {}: {e}", path.display()));
-        let etag = format!("\"{:x}\"", Sha256::digest(&bytes));
+        let hash = Sha256::digest(&bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let etag = format!("\"{hash}\"");
         source.push_str(&format!(
             "    PlaceholderAsset {{ bytes: placeholders::{}, etag: {etag:?} }},\n",
             kind.to_ascii_uppercase(),

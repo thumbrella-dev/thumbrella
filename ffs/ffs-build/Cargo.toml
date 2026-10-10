@@ -16,4 +16,4 @@ vcpkg = "0.2"
 
 [dependencies]
 ffs-check = { path = "../ffs-check" }
-ffmpeg-next = "8"
+ffmpeg-next = "9"

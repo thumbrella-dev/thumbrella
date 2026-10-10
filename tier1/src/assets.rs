@@ -96,7 +96,11 @@ mod tests {
         assert!(std::ptr::eq(asset, placeholder_asset("image")));
         assert_eq!(asset.bytes, placeholders::IMAGE);
         for asset in &PLACEHOLDER_ASSETS {
-            assert_eq!(asset.etag, format!("\"{:x}\"", Sha256::digest(asset.bytes)));
+            let hash = Sha256::digest(asset.bytes)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            assert_eq!(asset.etag, format!("\"{hash}\""));
         }
         assert!(std::ptr::eq(placeholder_asset("future-kind"), placeholder_asset("unknown")));
         assert_ne!(asset.etag, placeholder_asset("video").etag);

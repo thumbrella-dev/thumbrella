@@ -193,7 +193,7 @@ fn missing_tools_tip(env: &tier3::env_check::EnvReport) -> Option<String> {
         list.push_str(" and more");
     }
     Some(format!(
-        "install external tools or set TBR_TIER3 to your Cloud token to enable {list}"
+        "install external tools or use TBR_TIER3 to enable {list}"
     ))
 }
 

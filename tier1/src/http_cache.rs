@@ -65,7 +65,13 @@ impl PinnedThumbnail {
         } else {
             CacheHints::decode(&self.cache).ok_or("invalid cached thumbnail cache hints")?
         };
-        let etag = hints.etag.unwrap_or_else(|| format!("\"{:x}\"", Sha256::digest(&self.bytes)));
+        let etag = hints.etag.unwrap_or_else(|| {
+            let hash = Sha256::digest(&self.bytes)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            format!("\"{hash}\"")
+        });
         if !etag.bytes().all(|b| b >= 0x20 && b != 0x7f)
             || !etag.strip_prefix("W/").unwrap_or(&etag).starts_with('"')
             || !etag.ends_with('"')
@@ -164,6 +170,10 @@ mod tests {
         });
         assert_eq!(stale.headers(1000, None, None).unwrap().cache_control, "public, max-age=0");
         let headers = stale.headers(1000, None, None).unwrap();
+        assert_eq!(
+            headers.etag,
+            "\"039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81\""
+        );
         assert!(stale.headers(1000, Some(&headers.etag), None).unwrap().not_modified);
         let uncacheable = thumbnail(CacheHints {
             no_store: true,

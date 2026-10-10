@@ -11,19 +11,34 @@ $ProjectRoot = Split-Path -Parent $ScriptDir
 Set-Location $ProjectRoot
 
 $vcpkgDir = Join-Path $ScriptDir "vcpkg"
+$vcpkgCommit = "e456309491fd875487bf02b8a0dca76c1b1b00cc" # FFmpeg 9.0.2, port revision 1
 
 # ---- Clone vcpkg if not already present ----
 if (-not (Test-Path $vcpkgDir)) {
     Write-Host "==> Cloning vcpkg into $vcpkgDir ..."
-    # Pinned to vcpkg release with Ffmpeg 8.1.2
-    git clone --depth 1 --branch 2026.06.24 https://github.com/Microsoft/vcpkg.git $vcpkgDir
+    git init $vcpkgDir
+    if ($LASTEXITCODE -ne 0) { throw "Could not initialize vcpkg" }
+    git -C $vcpkgDir remote add origin https://github.com/Microsoft/vcpkg.git
+    if ($LASTEXITCODE -ne 0) { throw "Could not configure vcpkg remote" }
+    git -C $vcpkgDir fetch --depth 1 origin $vcpkgCommit
+    if ($LASTEXITCODE -ne 0) { throw "Could not fetch pinned vcpkg commit" }
+    git -C $vcpkgDir checkout --detach $vcpkgCommit
+    if ($LASTEXITCODE -ne 0) { throw "Could not check out pinned vcpkg commit" }
 }
+
+$head = git -C $vcpkgDir rev-parse HEAD
+if ($LASTEXITCODE -ne 0 -or $head -ne $vcpkgCommit) {
+    throw "Existing ffs/vcpkg is not the FFmpeg 9.0.2 baseline. Move it aside or remove it, then rerun this script."
+}
+$port = Get-Content (Join-Path $vcpkgDir "ports/ffmpeg/vcpkg.json") -Raw | ConvertFrom-Json
+if ($port.version -ne "9.0.2") { throw "Pinned vcpkg port must provide FFmpeg 9.0.2" }
 
 # ---- Bootstrap vcpkg ----
 Write-Host "==> Bootstrapping vcpkg ..."
 Push-Location $vcpkgDir
 try {
     .\bootstrap-vcpkg.bat
+    if ($LASTEXITCODE -ne 0) { throw "vcpkg bootstrap failed" }
 } finally {
     Pop-Location
 }
@@ -34,7 +49,15 @@ Push-Location $vcpkgDir
 try {
     foreach ($patch in Get-ChildItem (Join-Path $ScriptDir "ports/ffmpeg/*.patch")) {
         Write-Host "  Applying $($patch.Name)"
-        git apply $patch.FullName
+        git apply --check $patch.FullName
+        if ($LASTEXITCODE -eq 0) {
+            git apply $patch.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Could not apply $($patch.Name)" }
+        } else {
+            git apply --reverse --check $patch.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Port patch $($patch.Name) does not match the pinned vcpkg tree" }
+            Write-Host "  Already applied"
+        }
     }
 } finally {
     Pop-Location
@@ -46,6 +69,7 @@ $vcpkgExe = Join-Path $vcpkgDir "vcpkg.exe"
 & $vcpkgExe install ffmpeg[avcodec,avdevice,avfilter,avformat,swresample,swscale,zlib,bzip2,lzma] `
     --overlay-triplets="$ScriptDir/triplets" `
     --triplet=x64-windows-static
+if ($LASTEXITCODE -ne 0) { throw "vcpkg FFmpeg install failed" }
 
 Write-Host ""
 Write-Host "============================================"

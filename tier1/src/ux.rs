@@ -290,10 +290,7 @@ impl Ux {
             && !crate::check::has_builtin_renderer()
         {
             lines.push(format!(
-                "  # hint: {} {} {}",
-                "No higher tiers configured - only basic formats will render.",
-                Colour::dim("Set"),
-                Colour::bold("TBR_TIER2=http://tier2:8000"),
+                "  # tier1 server needs render handoffs, use TBR_TIER2 and TBR_TIER3"
             ));
         }
 

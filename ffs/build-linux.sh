@@ -3,17 +3,17 @@
 #
 # Goals
 #  - Software decoders and demuxers (no hardware acceleration)
-#  - Static archives (.a) installed to target/ffmpeg-static (or --prefix DIR)
+#  - Static archives (.a) installed to ffs/build (or --prefix DIR)
 #  - No network protocols (we handle HTTP via reqwest)
 #  - No encoders, muxers, filters, or device APIs
 #  - No external library dependencies (LGPL clean, no dav1d)
 #
 # Usage:
-#   ./build_static_ffmpeg.sh                 # -> ffs/build
-#   ./build_static_ffmpeg.sh --prefix ~/ffmpeg  # custom dir
+#   ./ffs/build-linux.sh                       # -> ffs/build
+#   ./ffs/build-linux.sh --prefix ~/ffmpeg      # custom dir
 #
 # After this script runs, cargo build just works, PKG_CONFIG_PATH
-# is configured in .cargo/config.toml with relative=true + force=true.
+# is configured in the generated .cargo/ffs.toml.
 
 set -euo pipefail
 
@@ -25,16 +25,16 @@ if [[ "${1:-}" == "--prefix" ]]; then
 fi
 
 #  FFmpeg 
-FFMPEG_VERSION=8.1.3
+FFMPEG_VERSION=9.0.2
 FFMPEG_TARBALL=ffmpeg-${FFMPEG_VERSION}.tar.gz
 FFMPEG_SRC_URL="https://ffmpeg.org/releases/${FFMPEG_TARBALL}"
-FFMPEG_BUILD_DIR="${PROJECT_ROOT}/target/ffmpeg-build"
+FFMPEG_BUILD_DIR="${PROJECT_ROOT}/target/ffmpeg-build/${FFMPEG_VERSION}"
 
 #  Download 
 echo "[ffmpeg-static] Downloading FFmpeg ${FFMPEG_VERSION}..."
 mkdir -p "${FFMPEG_BUILD_DIR}"
 if [[ ! -f "${FFMPEG_BUILD_DIR}/${FFMPEG_TARBALL}" ]]; then
-    curl -L --retry 3 -o "${FFMPEG_BUILD_DIR}/${FFMPEG_TARBALL}" "${FFMPEG_SRC_URL}"
+    curl --fail -L --retry 3 -o "${FFMPEG_BUILD_DIR}/${FFMPEG_TARBALL}" "${FFMPEG_SRC_URL}"
 fi
 
 echo "[ffmpeg-static] Extracting..."

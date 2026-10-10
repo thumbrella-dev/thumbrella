@@ -2,7 +2,7 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
 use super::CacheStore;
@@ -148,7 +148,9 @@ impl CacheStore {
     }
 
     pub async fn pin_data(&self, id: &str) -> Result<Option<crate::http_cache::PinnedThumbnail>, String> {
-        let Some(backend) = self.backend.as_ref() else { return Ok(None) };
+        let Some(backend) = self.backend.as_ref() else {
+            return Ok(None);
+        };
         backend.pin_data(id).await
     }
 }

@@ -66,7 +66,7 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 # thumbnails and page count).  WASM-compatible; default features pull in
 # chrono/rayon/time which tier1 does not need and which do not build on wasm.
 # `wasm_js` provides getrandom's wasm32 backend (required on wasm32-unknown-unknown).
-lopdf = { version = "0.44", default-features = false, features = ["wasm_js"] }
+lopdf = { version = "0.45", default-features = false, features = ["wasm_js"] }
 
 # Bytes - zero-copy buffer primitive.  WASM-compatible; used by the native
 # streaming handler and transitively by tokio/axum/reqwest.
@@ -74,7 +74,7 @@ bytes = "1"
 url = "2"
 web-time = "1"
 parking_lot = "0.12"
-sha2 = "0.10"
+sha2 = "0.11"
 httpdate = "1"
 
 #  Native-only
@@ -88,9 +88,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"],          opti
 time            = { version = "0.3", features = ["formatting"],              optional = true }
 clap            = { version = "4", features = ["derive"],                    optional = true }
 libc            = { version = "0.2",                                         optional = true }
-hmac            = { version = "0.12",                                        optional = true }
+hmac            = { version = "0.13",                                        optional = true }
 getrandom       = { version = "0.4",                                         optional = true }
 moka            = { version = "0.12", features = ["sync", "future"],          optional = true }
 
 [build-dependencies]
-sha2 = "0.10"
+sha2 = "0.11"
