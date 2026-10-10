@@ -1,12 +1,27 @@
-//! Embeds Windows version metadata and an application manifest into
+//! Embeds a Windows icon, version metadata, and an application manifest into
 //! thumbrella.exe. A bare Rust binary ships neither a version resource nor a
 //! supportedOS manifest, which makes AV scanners and SmartScreen treat it as
 //! more suspicious than a normal Windows app. The version strings are derived
 //! from CARGO_PKG_VERSION, so they track the workspace version automatically.
 
+// The committed `tier3/thumbrella.ico` is generated from
+// the root `thumbrella.png` and contains 16, 24, 32, 48, 64, 128, and 256-pixel
+// square images for Windows Explorer and shortcuts. Normal builds require no
+// image-conversion tools. After changing the logo, regenerate the icon with Pillow:
+// ```powershell
+// python -m pip install Pillow
+// python -c "from PIL import Image; Image.open('thumbrella.png').convert('RGBA').resize((256, 256), Image.Resampling.LANCZOS).save('tier3\\thumbrella.ico', sizes=[(s, s) for s in (16, 24, 32, 48, 64, 128, 256)])"
+// ```
+
+
 #[cfg(windows)]
 fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=thumbrella.ico");
+    println!("cargo:rerun-if-changed=thumbrella.manifest");
+
     let mut res = winres::WindowsResource::new();
+    res.set_icon("thumbrella.ico");
     res.set_manifest(include_str!("thumbrella.manifest"));
 
     res.set("FileDescription", "Thumbrella server");
