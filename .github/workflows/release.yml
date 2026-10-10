@@ -164,7 +164,7 @@ jobs:
           path: |
             ffs/vcpkg/
             .cargo/ffs.toml
-          key: ffmpeg-windows-v1-${{ hashFiles('ffs/build-windows.ps1', 'ffs/ports/ffmpeg/*.patch') }}
+          key: ffmpeg-windows-v1-${{ hashFiles('ffs/build-windows.ps1', 'ffs/ports/ffmpeg/*.patch', 'ffs/triplets/*.cmake') }}
 
       - name: Build static FFmpeg (vcpkg)
         if: steps.cache-ffmpeg-windows.outputs.cache-hit != 'true'
@@ -248,7 +248,7 @@ jobs:
             $0 ~ "^## " ver " - " { in_section=1; next }
             $0 ~ "^## " && in_section { exit }
             in_section { print }
-          ' CHANGELOG-1.md)
+          ' CHANGELOG-2.md)
           # Write to file to avoid newline issues with GITHUB_OUTPUT
           echo "${BODY}" > /tmp/release-notes.md
           # Use EOF delimiter for multi-line output

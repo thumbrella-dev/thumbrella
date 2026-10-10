@@ -1,0 +1,40 @@
+# Thumbrella Server 2.x changelog
+
+## Development
+
+- Update ffmpeg 9 and other Rust dependencies
+- Add `pin` to results with url path for sharable image link
+- Use $TBR_PIN to control pinning lifetime, or disable
+- Config envvar paths support envvar and tilde expansion
+- Placeholder images served as cachable static media
+- Rename $TBR_ALLOW_LOCAL to $TBR_LOCAL
+- Enable tower concurrency limits
+
+## Summary of 1.x Changes  2026/07/22 - 2026/10/06
+
+- Fix cache freshness and revalidation on updated responses
+- Propagate entries across multiple cache backends
+- Internal cache entries better track lifetimes
+- Cleanup absolute file path logic for Windows
+- Cloud cache fixes ttl values to agree with cloud service
+- Update ffmpeg 8.1.3 (on linux), rustls, and other indirect dependencies
+- Simplify cache configuration strings
+- Add 'service' subcommand to generate service configurations
+- External processes drop priveledges and use restrictions
+- Compiler flags reduce build by 35% (about 9MB smaller on Linux)
+- Support pdf, with or without embedded thumbnails
+- Add optional 'pages' property for documents
+- Add rendered border estimating page count for documents
+- Server cli new 'thumb' mode writes thumbnail file
+- Server cli new 'result' subcommand replaces the old 'thumb'
+- Different view angle for 3d renders for better "front" representation
+- Fix regression for files with wrong extension
+- Cleanup the media properties for 3d geometries (now empty)
+- Simplify User-Agent to 'thumbrella/major.minor'
+- TBR_TIER2 and TBR_TIER3 can override server builtin handling
+- TBR_CACHE can set `cloud:` with a connect string to cache to cloud service
+- Batch size limited to 12 requests
+- Streamed intermediates use proper placeholder
+- Ensure ThumbResult `source` sets `cache` for cached lookups  /tier1
+- Empty ThumbResult `http_status` uses `null` instead of `0`  /tier1
+- Full subprocess output shown when `$TBR_LOG=full`  /tier3

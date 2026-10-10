@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-CHANGELOG_PATH = REPO / "CHANGELOG-1.md"
+CHANGELOG_PATH = REPO / "CHANGELOG-2.md"
 NPM_RELEASE_DIR = REPO / "release" / "npmjs"
 
 # Version-bearing files.
