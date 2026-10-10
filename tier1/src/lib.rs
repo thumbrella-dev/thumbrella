@@ -39,6 +39,7 @@ pub mod source;
 pub mod spec;
 pub mod tracelog;
 pub mod url_safety;
+pub mod http_cache;
 
 //  Native-only modules
 

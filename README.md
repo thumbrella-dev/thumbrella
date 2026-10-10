@@ -159,10 +159,10 @@ Native servers publish a nullable top-level `pin` field in thumbnail results:
 ```
 
 Resolve this relative URL against the server base URL. `GET /pin/<id>.jpeg`
-returns only JPEG bytes, never result or media metadata. A missing, expired,
-malformed, or disabled pin redirects to its kind's placeholder. Pin responses
-are not HTTP-cacheable, so their retention and updated content remain
-server-controlled. Existing `TBR_HANDSHAKE` protection also applies to pins.
+returns only JPEG bytes, never result or media metadata. A well-formed missing,
+or expired pin redirects to its kind's placeholder, or returns 404 if malformed.
+Pins and placeholder images are public and do not require
+`TBR_HANDSHAKE`.
 
 `TBR_PIN` is a sliding TTL in seconds; `0` disables pinning. By default it
 uses `TBR_CACHE_MAX_TTL` (seven days). Ordinary thumbnail requests refresh
@@ -192,13 +192,11 @@ when absent, and reuses it across opens and cache eviction. Invalid stored
 secrets fail setup rather than silently rotating the pin identity.
 In cache chains the final (coldest) backend owns both pin derivation and the
 alias index, and the other layers share its refreshed pin lifetime. Pins are
-best-effort under cache capacity limits, not permanent storage. Missing-handler
-placeholders are not pinned or stored durably; their client cache tokens and
-five-second debounce remain unchanged.
+best-effort under cache capacity limits, not permanent storage. 
 
-The native `cloud:` backend requests remote pin issuance rather than receiving
-a cloud secret or deriving pins locally. Its new issue/resolve endpoints
-require the separate cloud pin implementation, which owns the secret and
+The native `cloud` backend requests remote pin issuance rather than receiving
+a cloud secret or deriving pins locally. Its new issue, resolve, and candidate
+endpoints require the separate cloud pin implementation, which owns the secret and
 account/token namespace. Pins are bearer links, not a replacement for access
 control on the thumbnail-generation API.
 

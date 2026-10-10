@@ -245,7 +245,8 @@ pub struct CheckReport {
     /// uses a file-backed scheme such as `ndjson:`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_file_check: Option<FileCheck>,
-    /// Whether this server requires a handshake on all endpoints (`TBR_HANDSHAKE`).
+    /// Whether service endpoints require a handshake (`TBR_HANDSHAKE`).
+    /// Pins and placeholder images remain public.
     pub handshake_set: bool,
     /// Validation result for the handshake value.
     ///

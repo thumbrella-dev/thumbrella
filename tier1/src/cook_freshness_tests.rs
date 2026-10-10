@@ -396,19 +396,68 @@ async fn generated_and_cached_thumbnails_publish_resolvable_pins_before_returnin
 }
 
 #[tokio::test]
-async fn missing_handlers_client_only_tokens_and_disabled_cache_return_null_pins() {
+async fn missing_handlers_publish_untracked_placeholder_pins_but_client_only_tokens_do_not() {
     let url = register_path("pin-missing-handler", "image.svg", vec![vector_reply()]);
     let backend = memory();
     let mut rt = runtime(CacheStore::new(backend.clone(), 5));
     Arc::make_mut(&mut rt).pin_ttl_secs = 60;
-    assert!(run(&url, rt.clone(), None).await.pin.is_none());
+    let first = run(&url, rt.clone(), None).await;
+    assert_eq!(first.source, Some(ResultSource::Placeholder));
+    let id = backend.pin_candidate(FileKind::Vector, &url, 0).unwrap();
+    assert_eq!(first.pin, Some(format!("pin/{id}.jpeg")));
+    let debounced = run(&url, rt.clone(), None).await;
+    assert_eq!(debounced.pin, first.pin);
+    Arc::make_mut(&mut rt).pin_ttl_secs = 0;
     assert!(run(&url, rt, None).await.pin.is_none());
     assert!(backend.get_pin(&url).await.is_none());
+    assert!(backend.get_entry(&url, 0).await.is_none());
 
     let url = register("pin-client-only", vec![]);
     let mut rt = runtime(CacheStore::backend_only(backend));
     Arc::make_mut(&mut rt).pin_ttl_secs = 60;
     assert!(run(&url, rt, Some(hints(None, true))).await.pin.is_none());
+}
+
+#[tokio::test]
+async fn a_handler_upgrade_activates_the_previously_untracked_placeholder_pin() {
+    let url = register_path("pin-placeholder-no-cache", "image.svg", vec![vector_reply()]);
+    let mut rt = runtime(CacheStore::none());
+    Arc::make_mut(&mut rt).pin_ttl_secs = 60;
+    let fallback = run(&url, rt, None).await;
+    assert!(fallback.pin.is_none());
+
+    let url = register_path("pin-placeholder-upgrade", "image.svg", vec![vector_reply(), vector_reply()]);
+    let backend = memory();
+    let mut rt = runtime(CacheStore::backend_only(backend.clone()));
+    Arc::make_mut(&mut rt).pin_ttl_secs = 60;
+    let fallback = run(&url, rt.clone(), None).await;
+    let expected = backend.pin_candidate(FileKind::Vector, &url, 0).unwrap();
+    assert_eq!(fallback.pin, Some(format!("pin/{expected}.jpeg")));
+    assert!(backend.get_entry(&url, 0).await.is_none());
+    assert!(backend.get_pin_entry(&url).await.is_none());
+    Arc::make_mut(&mut rt).renderer = Some(capability_renderer(true));
+    let rendered = run(&url, rt.clone(), None).await;
+    let pin = rendered.pin.as_deref().unwrap();
+    assert_eq!(Some(pin), fallback.pin.as_deref());
+    let id = pin.strip_prefix("pin/").unwrap().strip_suffix(".jpeg").unwrap();
+    assert_eq!(rt.cache.pin_thumbnail(id).await.unwrap().unwrap(), rendered.media.unwrap().thumbnail);
+}
+
+#[tokio::test]
+async fn deriving_a_placeholder_pin_does_not_read_entries_or_write_pin_bookkeeping() {
+    let measured = Arc::new(CountedPinBackend { backend: memory(), calls: Default::default() });
+    let store = CacheStore::backend_only(measured.clone());
+    let result = ThumbResult {
+        status: ResultStatus::Success,
+        source: Some(ResultSource::Placeholder),
+        media: Some(ThumbMedia { kind: FileKind::Image, placeholder: "image".into(), ..Default::default() }),
+        ..Default::default()
+    };
+    let pin = store.pin_result("source", &result, 60).await.unwrap().unwrap();
+    // Only candidate derivation is called; every backend lookup/write is counted.
+    assert_eq!(measured.calls.load(Ordering::Relaxed), 1);
+    let expected = measured.backend.pin_candidate(FileKind::Image, "source", 0).unwrap();
+    assert_eq!(pin, format!("pin/{expected}.jpeg"));
 }
 
 #[tokio::test]

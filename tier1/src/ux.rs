@@ -434,9 +434,9 @@ impl Ux {
         let _ = io::stdout().write_all(header.as_bytes());
     }
 
-    /// Log a request that is not a thumbnail render - `/`, `/health`, and the
-    /// error exits.  One line per request, sharing the status colouring of the
-    /// thumbnail results but without a duration or media description.
+    /// Log a request that is not a thumbnail render - `/`, `/health`, pins,
+    /// placeholders, and error exits. One line per request, sharing the status
+    /// colouring of thumbnail results but without a duration or media description.
     pub fn log_request(
         &self,
         method: &str,
@@ -450,6 +450,8 @@ impl Ux {
             None => String::new(),
         };
         let msg_str = match message {
+            Some(m) if (300..400).contains(&status) && m.starts_with("redirect to ") =>
+                Colour::dim(&format!("  {m}")),
             Some(m) if !m.is_empty() => Colour::yellow(&format!("  {m}")),
             _ => String::new(),
         };

@@ -7,6 +7,41 @@
 
 use crate::media::FileKind;
 
+pub const PLACEHOLDER_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
+
+pub struct PlaceholderAsset {
+    pub bytes: &'static [u8],
+    pub etag: &'static str,
+}
+
+include!(concat!(env!("OUT_DIR"), "/placeholder_assets.rs"));
+
+impl PlaceholderAsset {
+    /// GET/HEAD use weak comparison, including lists and repeated header fields.
+    pub fn matches_if_none_match<'a>(&self, values: impl IntoIterator<Item = &'a str>) -> bool {
+        crate::http_cache::etag_matches(self.etag, values)
+    }
+}
+
+/// Embedded bytes and content validators generated at build time.
+/// Unknown slugs intentionally share the generic unknown asset and validator.
+pub fn placeholder_asset(slug: &str) -> &'static PlaceholderAsset {
+    let index = match slug {
+        "image" => 0,
+        "video" => 1,
+        "audio" => 2,
+        "vector" => 3,
+        "document" => 4,
+        "geometry" => 5,
+        "archive" => 6,
+        "text" => 7,
+        "binary" => 8,
+        "failed" => 10,
+        _ => 9,
+    };
+    &PLACEHOLDER_ASSETS[index]
+}
+
 /// Background image used for thumbnail compositing (PNG).
 pub static BACKGROUND_PNG: &[u8] = include_bytes!("../assets/background.png");
 
@@ -47,5 +82,49 @@ pub fn placeholder_for_kind(kind: FileKind) -> &'static [u8] {
         FileKind::Text => placeholders::TEXT,
         FileKind::Binary => placeholders::BINARY,
         FileKind::Unknown => placeholders::UNKNOWN,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn placeholder_validators_are_content_based_and_reused() {
+        let asset = placeholder_asset("image");
+        assert!(std::ptr::eq(asset, placeholder_asset("image")));
+        assert_eq!(asset.bytes, placeholders::IMAGE);
+        for asset in &PLACEHOLDER_ASSETS {
+            assert_eq!(asset.etag, format!("\"{:x}\"", Sha256::digest(asset.bytes)));
+        }
+        assert!(std::ptr::eq(placeholder_asset("future-kind"), placeholder_asset("unknown")));
+        assert_ne!(asset.etag, placeholder_asset("video").etag);
+    }
+
+    #[test]
+    fn conditional_get_matches_strong_weak_lists_and_wildcards() {
+        let asset = placeholder_asset("image");
+        for value in [
+            asset.etag.to_string(),
+            format!("W/{}", asset.etag),
+            format!("\"other\", W/{}", asset.etag),
+            " * ".into(),
+            format!("\"other,tag\", {}", asset.etag),
+        ] {
+            assert!(asset.matches_if_none_match([value.as_str()]), "{value}");
+        }
+        assert!(asset.matches_if_none_match(["\"other\"", asset.etag]));
+        for value in [
+            "",
+            "\"other\"",
+            "W/\"other\"",
+            "invalid",
+            "\"unterminated",
+            "\"other, W/\"",
+            "*, \"other\"",
+        ] {
+            assert!(!asset.matches_if_none_match([value]), "{value}");
+        }
     }
 }

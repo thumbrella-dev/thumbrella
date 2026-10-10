@@ -249,6 +249,12 @@ impl CacheBackend for ChainCacheBackend {
         self.tiers.last().ok_or("pin cache chain is empty")?.pin_candidate(kind, key, attempt)
     }
 
+    fn untracked_pin<'a>(&'a self, kind: crate::media::FileKind, key: &'a str) -> PinFuture<'a, String> {
+        Box::pin(async move {
+            self.tiers.last().ok_or("pin cache chain is empty")?.untracked_pin(kind, key).await
+        })
+    }
+
     fn issue_pin<'a>(&'a self, kind: crate::media::FileKind, key: &'a str, ttl: u64) -> PinFuture<'a, Option<String>> {
         Box::pin(async move {
             let tier = self.tiers.last().ok_or("pin cache chain is empty")?;
@@ -271,10 +277,10 @@ impl CacheBackend for ChainCacheBackend {
         })
     }
 
-    fn pin_thumbnail<'a>(&'a self, id: &'a str) -> PinFuture<'a, Option<Vec<u8>>> {
+    fn pin_data<'a>(&'a self, id: &'a str) -> PinFuture<'a, Option<crate::http_cache::PinnedThumbnail>> {
         Box::pin(async move {
             let tier = self.tiers.last().ok_or("pin cache chain is empty")?;
-            tier.pin_thumbnail(id).await
+            tier.pin_data(id).await
         })
     }
 

@@ -143,7 +143,8 @@ pub struct Runtime {
     pub handoff_tier2: crate::connect::ConnectTarget,
     /// Tier-3 handoff connect target (URL + optional headers).
     pub handoff_tier3: crate::connect::ConnectTarget,
-    /// Shared secret required on all endpoints when set.
+    /// Shared secret required on service endpoints when set; pins and
+    /// placeholder images remain public.
     /// If `None`, the server is publicly accessible.
     pub handshake: Option<String>,
     /// Allow `file://` URLs and bare absolute paths in HTTP endpoint requests.
@@ -400,6 +401,10 @@ pub struct ThumbCook<S: HttpStream> {
     /// how an entry is namespaced is the key owner's business, not the
     /// pipeline's.
     pub ctx_cache_key: Option<String>,
+    /// Optional request-specific debounce namespace, independent of durable media.
+    pub ctx_debounce_key: Option<String>,
+    /// Let an embedder publish the final debounce result after adding its pin.
+    pub ctx_defer_debounce: bool,
     /// Maximum cache lifetime for this request, in seconds.
     /// Defaults to the shared runtime maximum; cloud callers may lower it
     /// for free accounts without changing the isolate-wide runtime.
@@ -487,6 +492,8 @@ impl<S: HttpStream> ThumbCook<S> {
             tel_version_override: None,
             ctx_session_id: None,
             ctx_cache_key: None,
+            ctx_debounce_key: None,
+            ctx_defer_debounce: false,
             cache_max_ttl_secs,
             default_cache_ttl: cache_max_ttl_secs,
             default_pin_ttl,
@@ -941,7 +948,8 @@ impl<S: HttpStream> ThumbCook<S> {
         let cache_key = self.ctx_cache_key.clone().unwrap_or(identity);
         if !self.ctx_handoff {
             self.src.cache_key = Some(cache_key.clone());
-            let (result, leader) = self.runtime.cache.debounce_lookup(&cache_key, self.input.cache.as_ref()).await;
+            let debounce_key = self.ctx_debounce_key.as_deref().unwrap_or(&cache_key);
+            let (result, leader) = self.runtime.cache.debounce_lookup(debounce_key, self.input.cache.as_ref()).await;
             self.debounce_leader = leader;
             if let Some(mut result) = result {
                 if result.source != Some(ResultSource::NotModified) {
@@ -1426,19 +1434,20 @@ impl<S: HttpStream> ThumbCook<S> {
         #[cfg(feature = "native")]
         if self.debounce_result.is_none() && !self.ctx_handoff && self.default_pin_ttl > 0
             && result.status == ResultStatus::Success
-            && result.media.as_ref().is_some_and(|media| media.placeholder.is_empty())
             && let Some(key) = self.src.cache_key.as_deref()
         {
-            // Publish the entry before advertising a resolvable pin URL.
-            for task in after.drain() {
-                task.await;
+            if result.media.as_ref().is_some_and(|media| media.placeholder.is_empty()) {
+                // Publish real thumbnails before advertising their pin URL.
+                for task in after.drain() {
+                    task.await;
+                }
             }
             match self.runtime.cache.pin_result(key, &result, self.default_pin_ttl).await {
                 Ok(pin) => result.pin = pin,
                 Err(error) => tracing::warn!("pin creation failed: {error}"),
             }
         }
-        if self.debounce_result.is_none()
+        if self.debounce_result.is_none() && !self.ctx_defer_debounce
             && let Some(ref key) = self.src.cache_key
         {
             if self.ctx_handoff {
@@ -1446,7 +1455,7 @@ impl<S: HttpStream> ThumbCook<S> {
             } else if let Some(leader) = self.debounce_leader.take() {
                 leader.complete(&result);
             } else {
-                self.runtime.cache.debounce_store(key, &result);
+                self.runtime.cache.debounce_store(self.ctx_debounce_key.as_deref().unwrap_or(key), &result);
             }
         }
         let trace = self.to_trace();

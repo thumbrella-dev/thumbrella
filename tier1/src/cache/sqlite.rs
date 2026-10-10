@@ -281,19 +281,23 @@ impl CacheBackend for SqliteCacheBackend {
         })
     }
 
-    fn pin_thumbnail<'a>(&'a self, id: &'a str) -> PinFuture<'a, Option<Vec<u8>>> {
+    fn pin_data<'a>(&'a self, id: &'a str) -> PinFuture<'a, Option<crate::http_cache::PinnedThumbnail>> {
         let conn = self.conn.clone();
         let id = format_scoped_key(id);
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, String> {
+            tokio::task::spawn_blocking(move || -> Result<Option<crate::http_cache::PinnedThumbnail>, String> {
                 use rusqlite::OptionalExtension;
                 let conn = conn.lock().expect("SQLite cache mutex poisoned");
-                let value: Option<String> = conn.query_row(
-                    "SELECT value FROM thumbrella JOIN thumbrella_pins USING(cache_key)
-                     WHERE pin_id = ?1 AND pin_until > unixepoch()", [&id], |row| row.get(0),
+                let value: Option<(String, i64)> = conn.query_row(
+                    "SELECT value, pin_until FROM thumbrella JOIN thumbrella_pins USING(cache_key)
+                     WHERE pin_id = ?1 AND pin_until > unixepoch()", [&id], |row| Ok((row.get(0)?, row.get(1)?)),
                 ).optional().map_err(|e| format!("sqlite pin lookup: {e}"))?;
-                value.map(|value| serde_json::from_str::<crate::ThumbMedia>(&value)
-                    .map(|media| media.thumbnail).map_err(|e| format!("sqlite pin payload: {e}"))).transpose()
+                value.map(|(value, until)| {
+                    let until = u64::try_from(until).map_err(|e| format!("sqlite pin deadline: {e}"))?;
+                    let media = serde_json::from_str::<crate::ThumbMedia>(&value)
+                        .map_err(|e| format!("sqlite pin payload: {e}"))?;
+                    Ok(crate::http_cache::PinnedThumbnail { bytes: media.thumbnail, cache: media.cache, until })
+                }).transpose()
             }).await.map_err(|e| format!("sqlite pin lookup task: {e}"))?
         })
     }
@@ -600,7 +604,7 @@ mod tests {
     use crate::source::CacheHints;
 
     fn temporary_database(label: &str) -> std::path::PathBuf {
-        let suffix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let suffix = web_time::SystemTime::now().duration_since(web_time::SystemTime::UNIX_EPOCH).unwrap().as_nanos();
         std::env::temp_dir().join(format!("thumbrella-{label}-{}-{suffix}.db", std::process::id()))
     }
 

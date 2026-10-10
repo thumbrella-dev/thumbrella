@@ -14,8 +14,8 @@
 //!
 //! Handoff cooks receive [`CacheStore::none()`] - no reads, no writes.
 //! The originating tier-1 node owns cache population for that request.
-//! Missing-handler placeholders are never stored in the backend, including
-//! pins. Client freshness tokens and the short debounce window are unchanged.
+//! Missing-handler placeholders are never stored in the backend. Their pin
+//! URLs are untracked candidates; client freshness and debounce are unchanged.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -191,6 +191,12 @@ pub trait CacheBackend: Send + Sync {
         Err("cache backend does not support local pin derivation".into())
     }
 
+    /// Derive the attempt-zero pin without claiming it or touching retention.
+    /// Used for successful placeholder results so a later render can activate it.
+    fn untracked_pin<'a>(&'a self, kind: crate::media::FileKind, key: &'a str) -> PinFuture<'a, String> {
+        Box::pin(async move { self.pin_candidate(kind, key, 0) })
+    }
+
     /// Issue or refresh a raw pin identifier. Missing entries and disabled
     /// pinning return `None`; identifier collisions are retried by the owner.
     fn issue_pin<'a>(&'a self, kind: crate::media::FileKind, key: &'a str, ttl: u64) -> PinFuture<'a, Option<String>> {
@@ -217,10 +223,13 @@ pub trait CacheBackend: Send + Sync {
     }
 
     /// Resolve an alias to JPEG bytes, without extending the pin deadline.
-    fn pin_thumbnail<'a>(&'a self, _id: &'a str) -> PinFuture<'a, Option<Vec<u8>>> {
+    fn pin_data<'a>(&'a self, _id: &'a str) -> PinFuture<'a, Option<crate::http_cache::PinnedThumbnail>> {
         Box::pin(async { Err("cache backend does not support pin aliases".into()) })
     }
 
+    fn pin_thumbnail<'a>(&'a self, id: &'a str) -> PinFuture<'a, Option<Vec<u8>>> {
+        Box::pin(async move { Ok(self.pin_data(id).await?.map(|pin| pin.bytes)) })
+    }
     /// Async lookup.  Returns the deserialized [`ThumbMedia`] on hit, `None` on miss.
     fn get<'a>(&'a self, key: &'a str, pin_ttl: u64) -> Pin<Box<dyn Future<Output = Option<ThumbMedia>> + Send + 'a>> {
         Box::pin(async move { self.get_entry(key, pin_ttl).await.map(|entry| entry.media) })

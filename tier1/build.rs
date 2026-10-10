@@ -1,6 +1,6 @@
-// build.rs - placeholder icon generation + wasm32 time-type guard
+// build.rs - placeholder icon/ETag generation + wasm32 time-type guard
 //
-// Reruns only when tier1/build_placeholders.py is edited.  If Python or the
+// Regenerates icons when tier1/build_placeholders.py is edited. If Python or the
 // required pip packages are absent the build continues using the committed
 // JPEG files and emits a cargo warning instead of failing.
 //
@@ -9,6 +9,7 @@
 // in its public API - mixing them with std::time types causes confusing
 // "mismatched types" errors.
 
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::process::Command;
 
@@ -23,21 +24,49 @@ fn main() {
 
     let script = Path::new(&manifest).join("build_placeholders.py");
     let out_dir = Path::new(&manifest).join("assets/placeholders");
+    let generated = std::env::var("OUT_DIR").unwrap();
 
-    // Rerun only if the generator script itself is edited.
     println!("cargo:rerun-if-changed={}", script.display());
 
-    match Command::new("python3").arg(&script).arg("--out").arg(&out_dir).status() {
-        Ok(s) if s.success() => {}
-        Ok(s) => println!(
-            "cargo:warning=build_placeholders.py exited with {s}; \
-             using committed placeholder files"
-        ),
-        Err(e) => println!(
-            "cargo:warning=build_placeholders.py could not run ({e}); \
-             using committed placeholder files"
-        ),
+    // Asset changes must refresh ETags without rerunning Python and overwriting
+    // those assets, or continually invalidating Cargo's watched JPEG files.
+    let stamp = Path::new(&generated).join("placeholder_generator");
+    let script_bytes = std::fs::read(&script).expect("read placeholder generator");
+    if !stamp.exists() || std::fs::read(&stamp).expect("read generator stamp") != script_bytes {
+        match Command::new("python3").arg(&script).arg("--out").arg(&out_dir).status() {
+            Ok(s) if s.success() => {
+                std::fs::write(&stamp, script_bytes).expect("write generator stamp");
+            }
+            Ok(s) => println!(
+                "cargo:warning=build_placeholders.py exited with {s}; \
+                 using committed placeholder files"
+            ),
+            Err(e) => println!(
+                "cargo:warning=build_placeholders.py could not run ({e}); \
+                 using committed placeholder files"
+            ),
+        }
     }
+
+    let kinds = [
+        "image", "video", "audio", "vector", "document", "geometry", "archive", "text", "binary", "unknown",
+        "failed",
+    ];
+    let mut source = String::from("static PLACEHOLDER_ASSETS: [PlaceholderAsset; 11] = [\n");
+    for kind in kinds {
+        let path = out_dir.join(format!("{kind}.jpeg"));
+        println!("cargo:rerun-if-changed={}", path.display());
+        let bytes =
+            std::fs::read(&path).unwrap_or_else(|e| panic!("read placeholder {}: {e}", path.display()));
+        let etag = format!("\"{:x}\"", Sha256::digest(&bytes));
+        source.push_str(&format!(
+            "    PlaceholderAsset {{ bytes: placeholders::{}, etag: {etag:?} }},\n",
+            kind.to_ascii_uppercase(),
+        ));
+    }
+    source.push_str("];\n");
+    std::fs::write(Path::new(&generated).join("placeholder_assets.rs"), source)
+        .expect("write generated placeholder metadata");
 }
 
 /// Scan tier1/src/ for std::time::Instant and std::time::SystemTime.
@@ -58,7 +87,9 @@ fn check_time_types(manifest: &str) {
             eprintln!("  {e}");
         }
         eprintln!();
-        panic!("wasm32 target forbids std::time::Instant and std::time::SystemTime in tier1.  See errors above.");
+        panic!(
+            "wasm32 target forbids std::time::Instant and std::time::SystemTime in tier1.  See errors above."
+        );
     }
 }
 
@@ -93,9 +124,7 @@ fn check_file(path: &Path, errors: &mut Vec<String>) {
         if line.contains("std::time::Instant") || line.contains("std::time::SystemTime") {
             errors.push(format!(
                 "{}:{}: {}",
-                path.strip_prefix(std::env::current_dir().unwrap())
-                    .unwrap_or(path)
-                    .display(),
+                path.strip_prefix(std::env::current_dir().unwrap()).unwrap_or(path).display(),
                 line_no + 1,
                 trimmed,
             ));

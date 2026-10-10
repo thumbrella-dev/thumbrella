@@ -13,7 +13,7 @@
 //! | `TBR_SCRATCH`              | $TMPDIR/thumbrella | Scratch root for tier3 CLI tool staging   |
 //! | `TBR_TIER2`                | -       | Tier-2 connect string (URL + optional headers)   |
 //! | `TBR_TIER3`                | -       | Tier-3 connect string (URL + optional headers)   |
-//! | `TBR_HANDSHAKE`            | -       | Shared secret required on all endpoints          |
+//! | `TBR_HANDSHAKE`            | -       | Shared secret for service endpoints; pins and placeholders are public |
 //! | `TBR_CACHE`                | mem:     | Cache spec - chained links with `+` (`none`, `mem[:size]`, `sqlite:path[,size]`, `cloud:connect`) |
 //! | `TBR_PIN`                  | 604800  | Sliding pin TTL in seconds; 0 disables pin URLs |
 //! | `TBR_TRACE`                | -       | Trace sink DSN - `ndjson:<path>`, …              |
@@ -68,7 +68,8 @@ pub struct AppConfig {
     pub tier2: ConnectTarget,
     /// Tier-3 connect target parsed from `TBR_TIER3`.
     pub tier3: ConnectTarget,
-    /// Shared secret required on all endpoints when set.
+    /// Shared secret required on service endpoints when set; pins and
+    /// placeholder images remain public.
     /// If `None`, the server is publicly accessible.
     pub handshake: Option<String>,
 

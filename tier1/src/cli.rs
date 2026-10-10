@@ -35,7 +35,7 @@ enum Command {
     ///
     /// Port and other options come from environment variables (defaults).
     /// TBR_PORT (3114) serve port
-    /// TBR_HANDSHAKE shared secret required on all endpoints (when set)
+    /// TBR_HANDSHAKE shared secret for service endpoints (pins and placeholders are public)
     /// TBR_TIER2 downstream tier2 connect string (URL + optional comma-separated headers)
     /// TBR_TIER3 downstream tier3 connect string (URL + optional comma-separated headers)
     /// TBR_PIN pin TTL in seconds (0 disables; defaults to the maximum cache TTL)
@@ -206,10 +206,37 @@ where
 
 //  serve
 
+const HTTP_CONCURRENCY_LIMIT: usize = 30;
+const HTTP_BUFFER_CAPACITY: usize = 300;
+
+fn buffered_requests(app: axum::Router) -> impl tower::Service<
+    axum::extract::Request,
+    Response = axum::response::Response,
+    Error = axum::BoxError,
+    Future: Send,
+> + Clone + Send + 'static {
+    // Wrap the complete router once; clones share one buffer and concurrency
+    // limiter rather than creating independent limits per route or connection.
+    tower::ServiceBuilder::new()
+        .buffer(HTTP_BUFFER_CAPACITY)
+        .concurrency_limit(HTTP_CONCURRENCY_LIMIT)
+        .service(app)
+}
+
+async fn request_buffer_error(error: axum::BoxError) -> axum::response::Response {
+    use axum::{http::{StatusCode, header}, response::IntoResponse, Json};
+    tracing::error!("HTTP request buffer failed: {error}");
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::CACHE_CONTROL, "no-store"), (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+        Json(serde_json::json!({ "error": "server request queue unavailable" })),
+    ).into_response()
+}
+
 async fn run_server(runtime: Arc<Runtime>) {
     use crate::{config::AppConfig, routes};
     use axum::{
-        Router,
+        Router, ServiceExt,
         extract::DefaultBodyLimit,
         routing::{get, post},
     };
@@ -220,11 +247,10 @@ async fn run_server(runtime: Arc<Runtime>) {
 
     let app = Router::new()
         .route("/", get(routes::landing))
+        .merge(routes::public_thumbnail_routes())
         .merge(
             Router::new()
                 .route("/health", get(routes::health))
-                .route("/placeholder/{kind}", get(routes::placeholder))
-                .route("/pin/{filename}", get(routes::pin))
                 .route("/thumb.jpeg", get(routes::thumb))
                 .route("/thumb", get(routes::thumb))
                 .route("/handoff", post(routes::handoff))
@@ -331,10 +357,125 @@ async fn run_server(runtime: Arc<Runtime>) {
         tracing::info!(%addr, "listening");
     }
 
+    let app = axum::error_handling::HandleError::new(buffered_requests(app), request_buffer_error);
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(shutdown_signal())
         .await
         .unwrap();
+}
+
+#[cfg(test)]
+mod http_limit_tests {
+    use super::*;
+    use axum::{body::Body, extract::State, http::{Request, StatusCode}, routing::get, Router};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::{mpsc, Semaphore};
+    use tower::{Service, ServiceExt};
+
+    #[derive(Clone)]
+    struct TestState {
+        active: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+        started: mpsc::UnboundedSender<()>,
+        finish: Arc<Semaphore>,
+    }
+
+    struct ActiveGuard(Arc<AtomicUsize>);
+
+    impl Drop for ActiveGuard {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    async fn blocked(State(state): State<TestState>) -> StatusCode {
+        let active = state.active.fetch_add(1, Ordering::SeqCst) + 1;
+        let _active = ActiveGuard(state.active.clone());
+        state.peak.fetch_max(active, Ordering::SeqCst);
+        state.started.send(()).unwrap();
+        state.finish.acquire().await.unwrap().forget();
+        StatusCode::OK
+    }
+
+    #[tokio::test]
+    async fn global_limit_is_shared_across_routes_and_clones_and_buffer_applies_backpressure() {
+        let (started, mut observed) = mpsc::unbounded_channel();
+        let state = TestState {
+            active: Arc::new(AtomicUsize::new(0)), peak: Arc::new(AtomicUsize::new(0)),
+            started, finish: Arc::new(Semaphore::new(0)),
+        };
+        let app = Router::new().route("/first", get(blocked)).route("/second", get(blocked))
+            .with_state(state.clone());
+        let mut service = buffered_requests(app);
+        let mut requests = Vec::new();
+        for index in 0..HTTP_CONCURRENCY_LIMIT {
+            let uri = if index % 2 == 0 { "/first" } else { "/second" };
+            requests.push(tokio::spawn(service.clone().oneshot(
+                Request::builder().uri(uri).body(Body::empty()).unwrap(),
+            )));
+            tokio::time::timeout(std::time::Duration::from_secs(2), observed.recv()).await.unwrap().unwrap();
+        }
+        assert_eq!(state.active.load(Ordering::SeqCst), 30);
+
+        // Tower's worker can hold one waiting request outside its channel.
+        let request = || Request::builder().uri("/second").body(Body::empty()).unwrap();
+        requests.push(tokio::spawn(service.ready().await.unwrap().call(request())));
+        tokio::task::yield_now().await;
+        for _ in 0..HTTP_BUFFER_CAPACITY {
+            let ready = tokio::time::timeout(std::time::Duration::from_secs(2), service.ready())
+                .await.unwrap().unwrap();
+            requests.push(tokio::spawn(ready.call(request())));
+        }
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(30), service.ready()).await.is_err());
+        assert!(observed.try_recv().is_err());
+        assert_eq!(state.active.load(Ordering::SeqCst), 30);
+
+        state.finish.add_permits(requests.len());
+        for request in requests {
+            let response = tokio::time::timeout(std::time::Duration::from_secs(5), request)
+                .await.unwrap().unwrap().unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        assert_eq!(state.peak.load(Ordering::SeqCst), 30);
+        assert_eq!(state.active.load(Ordering::SeqCst), 0);
+        assert!(service.ready().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn cancelling_active_and_queued_requests_does_not_leak_capacity() {
+        let (started, mut observed) = mpsc::unbounded_channel();
+        let state = TestState {
+            active: Arc::new(AtomicUsize::new(0)), peak: Arc::new(AtomicUsize::new(0)),
+            started, finish: Arc::new(Semaphore::new(0)),
+        };
+        let service = buffered_requests(Router::new().route("/", get(blocked)).with_state(state.clone()));
+        let request = || Request::new(Body::empty());
+        let mut active = Vec::new();
+        for _ in 0..HTTP_CONCURRENCY_LIMIT {
+            active.push(tokio::spawn(service.clone().oneshot(request())));
+            tokio::time::timeout(std::time::Duration::from_secs(2), observed.recv()).await.unwrap().unwrap();
+        }
+        let queued = tokio::spawn(service.clone().oneshot(request()));
+        tokio::task::yield_now().await;
+        assert!(observed.try_recv().is_err());
+        queued.abort();
+        assert!(queued.await.unwrap_err().is_cancelled());
+        let cancelled = active.pop().unwrap();
+        cancelled.abort();
+        assert!(cancelled.await.unwrap_err().is_cancelled());
+
+        active.push(tokio::spawn(service.clone().oneshot(request())));
+        tokio::time::timeout(std::time::Duration::from_secs(2), observed.recv()).await.unwrap().unwrap();
+        assert_eq!(state.active.load(Ordering::SeqCst), HTTP_CONCURRENCY_LIMIT);
+        state.finish.add_permits(HTTP_CONCURRENCY_LIMIT);
+        for request in active {
+            let response = tokio::time::timeout(std::time::Duration::from_secs(2), request)
+                .await.unwrap().unwrap().unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        assert_eq!(state.active.load(Ordering::SeqCst), 0);
+        assert_eq!(state.peak.load(Ordering::SeqCst), HTTP_CONCURRENCY_LIMIT);
+    }
 }
 
 /// Wait for a shutdown signal (SIGTERM or SIGINT).

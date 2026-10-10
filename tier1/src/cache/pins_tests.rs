@@ -142,6 +142,13 @@ async fn collisions_are_retried_and_never_replace_the_existing_thumbnail() {
         assert_eq!(backend.claim_pin(&collision, "first", 60).await.unwrap(), PinClaim::Claimed);
         assert_eq!(backend.claim_pin(&collision, "second", 60).await.unwrap(), PinClaim::Conflict);
         let store = CacheStore::backend_only(backend.clone());
+        let mut placeholder = second.clone();
+        placeholder.media.as_mut().unwrap().placeholder = "image".into();
+        assert_eq!(
+            store.pin_result("second", &placeholder, 60).await.unwrap(),
+            Some(format!("pin/{collision}.jpeg"))
+        );
+        assert_eq!(store.pin_thumbnail(&collision).await.unwrap(), Some(vec![1]));
         let pin = store.pin_result("second", &second, 60).await.unwrap().unwrap();
         let expected = backend.pin_candidate(FileKind::Image, "second", 1).unwrap();
         assert_eq!(pin, format!("pin/{expected}.jpeg"));
@@ -194,7 +201,7 @@ async fn expired_pins_are_misses_even_while_the_cache_entry_is_live() {
 }
 
 #[tokio::test]
-async fn absent_entries_disabled_pins_and_placeholders_do_not_get_pins() {
+async fn absent_entries_and_disabled_pins_return_none_while_placeholders_get_untracked_pins() {
     for backend in backends() {
         let store = CacheStore::backend_only(backend.clone());
         let mut result = result(vec![1]);
@@ -216,7 +223,62 @@ async fn absent_entries_disabled_pins_and_placeholders_do_not_get_pins() {
             .await;
         assert!(store.pin_result("source", &result, 0).await.unwrap().is_none());
         result.media.as_mut().unwrap().placeholder = "image".into();
-        assert!(store.pin_result("source", &result, 60).await.unwrap().is_none());
+        let before = backend.get_entry("source", 0).await.unwrap();
+        let id = backend.pin_candidate(FileKind::Image, "source", 0).unwrap();
+        assert_eq!(
+            store.pin_result("source", &result, 60).await.unwrap(),
+            Some(format!("pin/{id}.jpeg"))
+        );
+        assert!(store.pin_thumbnail(&id).await.unwrap().is_none());
+        let after = backend.get_entry("source", 0).await.unwrap();
+        assert_eq!(after.pin_until, before.pin_until);
+        assert_eq!(after.cache_until, before.cache_until);
+    }
+}
+
+#[tokio::test]
+async fn placeholder_pins_match_future_rendered_pins_without_storing_placeholder_entries() {
+    for backend in backends() {
+        let store = CacheStore::backend_only(backend.clone());
+        for kind in [
+            FileKind::Image,
+            FileKind::Video,
+            FileKind::Audio,
+            FileKind::Vector,
+            FileKind::Document,
+            FileKind::Geometry,
+            FileKind::Archive,
+            FileKind::Text,
+            FileKind::Binary,
+            FileKind::Unknown,
+        ] {
+            let mut result = result(vec![1]);
+            let media = result.media.as_mut().unwrap();
+            media.kind = kind;
+            media.placeholder = "placeholder".into();
+            let url = store.pin_result("source", &result, 60).await.unwrap().unwrap();
+            let id = url.strip_prefix("pin/").unwrap().strip_suffix(".jpeg").unwrap();
+            assert!(valid_pin(id));
+            assert_eq!(pin_kind(id), kind);
+            assert!(store.pin_thumbnail(id).await.unwrap().is_none());
+            assert!(backend.get_entry("source", 0).await.is_none());
+            assert!(backend.get_pin_entry("source").await.is_none());
+            assert_eq!(id, backend.pin_candidate(kind, "source", 0).unwrap());
+            assert!(store.pin_result("source", &result, 0).await.unwrap().is_none());
+            let mut failed = result.clone();
+            failed.status = ResultStatus::Failed;
+            assert!(store.pin_result("source", &failed, 60).await.unwrap().is_none());
+        }
+        let mut placeholder = result(vec![1]);
+        placeholder.media.as_mut().unwrap().placeholder = "image".into();
+        let first = store.pin_result("source", &placeholder, 60).await.unwrap().unwrap();
+        let rendered = result(vec![2]);
+        backend
+            .put("source".into(), rendered.media.clone().unwrap(), 0, unix_now_secs() + 60, 0)
+            .await;
+        assert_eq!(store.pin_result("source", &rendered, 60).await.unwrap(), Some(first.clone()));
+        let id = first.strip_prefix("pin/").unwrap().strip_suffix(".jpeg").unwrap();
+        assert_eq!(store.pin_thumbnail(id).await.unwrap(), Some(vec![2]));
     }
 }
 

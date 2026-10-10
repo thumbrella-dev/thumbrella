@@ -155,8 +155,9 @@ pub struct ThumbResult {
     /// How the thumbnail was produced (render, shortcut, cache, …).
     #[serde(default)]
     pub source: Option<ResultSource>,
-    /// Relative JPEG pin URL. Null when pinning is disabled or no server
-    /// thumbnail could be pinned. Pin reads do not extend its lifetime.
+    /// Relative JPEG pin URL, including untracked placeholder candidates.
+    /// Null when pinning is disabled or neither a thumbnail nor a successful
+    /// placeholder is available to pin. Pin reads do not extend its lifetime.
     #[serde(default)]
     pub pin: Option<String>,
     /// Wall-clock seconds to produce this result.

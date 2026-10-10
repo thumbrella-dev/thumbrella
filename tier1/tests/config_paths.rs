@@ -1,7 +1,7 @@
 #![cfg(feature = "native")]
 
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
 use tier1::check::{CheckReport, ValidationStatus};
 
 struct TestDirectory(PathBuf);
@@ -43,6 +43,135 @@ impl Drop for TestDirectory {
 
 fn assert_success(output: &Output) {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+}
+
+struct TestServer(Child);
+
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        if self.0.try_wait().unwrap().is_none() {
+            self.0.kill().unwrap();
+        }
+        self.0.wait().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn pin_and_placeholder_requests_are_logged_with_best_effort_redirect_deduplication() {
+    use tier1::cache::CacheBackend;
+
+    let directory = TestDirectory::new();
+    let database = directory.0.join("cache.db");
+    let backend = tier1::cache::sqlite::SqliteCacheBackend::open(database.to_str().unwrap()).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    backend
+        .put(
+            "source".into(),
+            tier1::ThumbMedia {
+                kind: tier1::FileKind::Image,
+                thumbnail: vec![0xff, 0xd8, 0xff, 0xd9],
+                ..Default::default()
+            },
+            0,
+            now + 60,
+            60,
+        )
+        .await;
+    let id = backend.issue_pin(tier1::FileKind::Image, "source", 60).await.unwrap().unwrap();
+    drop(backend);
+    let listener = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let log_path = directory.0.join("server.log");
+    let error_path = directory.0.join("server.err");
+    let mut server = TestServer(
+        directory
+            .command()
+            .env("TBR_CACHE", format!("sqlite:{}", database.display()))
+            .env("TBR_PORT", port.to_string())
+            .env("TBR_HANDSHAKE", "logging-test-secret")
+            .env("TBR_LOG", "standard")
+            .stdout(Stdio::from(std::fs::File::create(&log_path).unwrap()))
+            .stderr(Stdio::from(std::fs::File::create(&error_path).unwrap()))
+            .arg("serve")
+            .spawn()
+            .unwrap(),
+    );
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let mut ready = false;
+    for _ in 0..100 {
+        if let Some(status) = server.0.try_wait().unwrap() {
+            panic!("server exited {status}: {}", std::fs::read_to_string(&error_path).unwrap());
+        }
+        if let Ok(response) = client
+            .get(format!("{base}/health"))
+            .header("x-tbr-handshake", "logging-test-secret")
+            .send()
+            .await
+        {
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        ready,
+        "server did not respond: {}",
+        std::fs::read_to_string(&error_path).unwrap()
+    );
+    let hit = client.get(format!("{base}/pin/{id}.jpeg")).send().await.unwrap();
+    assert_eq!(hit.status(), reqwest::StatusCode::OK);
+    let miss = client.get(format!("{base}/pin/v000000000000.jpeg")).send().await.unwrap();
+    assert_eq!(miss.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(miss.headers()["location"], "/placeholder/video.jpeg");
+    let malformed = client.get(format!("{base}/pin/bad")).send().await.unwrap();
+    assert_eq!(malformed.status(), reqwest::StatusCode::NOT_FOUND);
+    assert!(!malformed.headers().contains_key("location"));
+    for referrer in [
+        None,
+        Some(format!("{base}/pin/v000000000000.jpeg")),
+        Some("http://elsewhere.example/pin/v000000000000.jpeg".into()),
+        Some(format!("{base}/health")),
+    ] {
+        let mut request = client.get(format!("{base}/placeholder/video.jpeg"));
+        if let Some(referrer) = referrer {
+            request = request.header("referer", referrer);
+        }
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(response.bytes().await.unwrap().as_ref(), tier1::assets::placeholders::VIDEO);
+    }
+    let invalid = client
+        .get(format!("{base}/placeholder/no-suffix"))
+        .header("referer", format!("{base}/pin/bad"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), reqwest::StatusCode::NOT_FOUND);
+    drop(server);
+    let logs = std::fs::read_to_string(&log_path).unwrap();
+    let line = |prefix: &str| logs.lines().find(|line| line.starts_with(prefix)).unwrap().to_string();
+    assert!(line(&format!("GET /pin/{id}.jpeg ")).contains("  200"));
+    assert!(line("GET /pin/v000000000000.jpeg ").contains("  307  redirect to /placeholder/video.jpeg"));
+    assert!(line("GET /pin/bad ").contains("  404"));
+    assert!(!line("GET /pin/bad ").contains("redirect"));
+    assert_eq!(
+        logs.lines()
+            .filter(|line| line.starts_with("GET /placeholder/video.jpeg "))
+            .count(),
+        3,
+        "{logs}"
+    );
+    assert!(line("GET /placeholder/no-suffix ").contains("  404"));
 }
 
 #[test]
@@ -189,6 +318,39 @@ fn pin_identity_survives_sqlite_process_restarts_but_not_memory_restarts() {
     let persistent = format!("mem:10+sqlite:{}", directory.0.join("cache.db").display());
     assert_eq!(request(&persistent), request(&persistent));
     assert_ne!(request("mem:10"), request("mem:10"));
+}
+
+#[test]
+fn result_returns_a_real_candidate_pin_for_a_missing_handler_without_storing_the_placeholder() {
+    let directory = TestDirectory::new();
+    let source = directory.0.join("unsupported.svg");
+    std::fs::write(&source, r#"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32"/></svg>"#).unwrap();
+    let source_url = url::Url::from_file_path(&source).unwrap();
+    let database = directory.0.join("cache.db");
+    let dsn = format!("sqlite:{}", database.display());
+    let output = directory
+        .command()
+        .env("TBR_CACHE", dsn)
+        .env("TBR_PIN", "60")
+        .args(["result", "--raw", source_url.as_str()])
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let result: tier1::ThumbResult = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result.source, Some(tier1::result::ResultSource::Placeholder));
+    let media = result.media.as_ref().unwrap();
+    assert!(!media.placeholder.is_empty());
+    let backend = tier1::cache::sqlite::SqliteCacheBackend::open(database.to_str().unwrap()).unwrap();
+    use tier1::cache::CacheBackend;
+    let id = backend.pin_candidate(media.kind, source_url.as_str(), 0).unwrap();
+    assert_eq!(result.pin.as_deref(), Some(format!("pin/{id}.jpeg").as_str()));
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    for table in ["thumbrella", "thumbrella_pins"] {
+        let count: i64 = conn
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "{table} should not store this placeholder or its pin");
+    }
 }
 
 #[test]

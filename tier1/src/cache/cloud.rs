@@ -57,10 +57,18 @@
 //!   Derive with the cloud's secret and account namespace, atomically claim
 //!   the alias, retry collisions, and refresh pin retention. Never return a secret.
 //!
+//! POST /cache/pin/candidate
+//!   request: { "kind": "<media kind>", "url": "<source identity>", "cache_format": <u32> }
+//!   response: 200 { "pin": "<kind><12-character hash>" }
+//!   Derive the same attempt-zero identifier as issue, without storing an alias,
+//!   looking up media, or refreshing retention.
+//!
 //! POST /cache/pin/resolve
 //!   request: { "pin": "<kind><12-character hash>", "cache_format": <u32> }
+//!   response: JPEG bytes with `x-tbr-cache` and `x-tbr-pin-until` headers;
+//!   these preserve HTTP validators/freshness without exposing media JSON.
 //!   response: 200 image/jpeg bytes, or 404 for a missing/expired pin.
-//!   Must not refresh pin retention. These two endpoints are wired here for
+//!   Must not refresh pin retention. These endpoints are wired here for
 //!   the cloud worker's subsequent pin implementation.
 //! ```
 //!
@@ -368,6 +376,21 @@ mod tests {
         Json(serde_json::json!({"status": "claimed", "pin": pin}))
     }
 
+    async fn candidate(
+        State(service): State<TestService>,
+        headers: axum::http::HeaderMap,
+        Json(body): Json<serde_json::Value>,
+    ) -> Json<serde_json::Value> {
+        assert!(headers.contains_key(axum::http::header::AUTHORIZATION));
+        let pin = match body["url"].as_str().unwrap() {
+            "https://example.com/malformed" => "not-a-pin",
+            "https://example.com/wrong-kind" => "v123456789012",
+            _ => "i123456789012",
+        };
+        service.requests.lock().push(body);
+        Json(serde_json::json!({"pin": pin}))
+    }
+
     async fn resolve(State(service): State<TestService>, Json(body): Json<serde_json::Value>) -> axum::response::Response {
         use axum::response::IntoResponse;
         let missing = body["pin"] == "i000000000000";
@@ -375,7 +398,10 @@ mod tests {
         if missing {
             return axum::http::StatusCode::NOT_FOUND.into_response();
         }
-        ([(axum::http::header::CONTENT_TYPE, "image/jpeg")], service.entry.media.thumbnail).into_response()
+        let mut response = ([(axum::http::header::CONTENT_TYPE, "image/jpeg")], service.entry.media.thumbnail).into_response();
+        response.headers_mut().insert("x-tbr-cache", service.entry.media.cache.parse().unwrap());
+        response.headers_mut().insert("x-tbr-pin-until", service.entry.pin_until.into());
+        response
     }
 
     #[tokio::test]
@@ -389,6 +415,7 @@ mod tests {
         };
         let app = Router::new()
             .route("/cache/pin/issue", post(issue))
+            .route("/cache/pin/candidate", post(candidate))
             .route("/cache/pin/resolve", post(resolve))
             .with_state(service);
         let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
@@ -413,6 +440,11 @@ mod tests {
         for url in ["https://example.com/malformed", "https://example.com/wrong-kind"] {
             assert!(backend.issue_pin(crate::FileKind::Image, url, 600).await.unwrap_err().contains("invalid identifier"));
         }
+        assert_eq!(backend.untracked_pin(crate::FileKind::Image, "https://example.com/a.jpg").await.unwrap(),
+            "i123456789012");
+        for url in ["https://example.com/malformed", "https://example.com/wrong-kind"] {
+            assert!(backend.untracked_pin(crate::FileKind::Image, url).await.unwrap_err().contains("invalid identifier"));
+        }
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());
         let requests = requests.lock();
@@ -423,7 +455,13 @@ mod tests {
         assert_eq!(requests[0]["cache_format"], crate::TBR_CACHE_VERSION);
         assert!(requests[1].get("pin_ttl_secs").is_none());
         assert!(requests[1].get("url").is_none());
-        assert_eq!(requests.len(), 7);
+        assert_eq!(requests.len(), 10);
+        let candidate = &requests[7];
+        assert_eq!(candidate["url"], "https://example.com/a.jpg");
+        assert_eq!(candidate["kind"], "image");
+        assert_eq!(candidate["cache_format"], crate::TBR_CACHE_VERSION);
+        assert!(candidate.get("pin").is_none());
+        assert!(candidate.get("pin_ttl_secs").is_none());
     }
 
     #[tokio::test]
@@ -439,6 +477,7 @@ mod tests {
         let service = TestService { entry: entry.clone(), requests: requests.clone() };
         let app = Router::new()
             .route("/cache/pin/issue", post(issue))
+            .route("/cache/pin/candidate", post(candidate))
             .route("/cache/pin", post(lookup))
             .route("/cache/pin/resolve", post(resolve))
             .with_state(service);
@@ -454,14 +493,17 @@ mod tests {
         memory.put(source.into(), entry.media.clone(), 0, now + 60, 0).await;
         let chain = super::super::chain::ChainCacheBackend::new(vec![memory.clone(), cloud]);
         assert!(chain.pin_candidate(crate::FileKind::Image, source, 0).is_err());
+        let untracked = chain.untracked_pin(crate::FileKind::Image, source).await.unwrap();
+        assert_eq!(untracked, "i123456789012");
+        assert_eq!(memory.get_entry(source, 0).await.unwrap().pin_until, 0);
         let id = chain.issue_pin(crate::FileKind::Image, source, 600).await.unwrap().unwrap();
-        assert_eq!(id, "i123456789012");
+        assert_eq!(id, untracked);
         assert_eq!(memory.get_pin_entry(source).await.unwrap().pin_until, entry.pin_until);
         assert_eq!(chain.pin_thumbnail(&id).await.unwrap(), Some(entry.media.thumbnail));
         assert!(chain.issue_pin(crate::FileKind::Image, source, 0).await.unwrap().is_none());
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());
-        assert_eq!(requests.lock().len(), 3);
+        assert_eq!(requests.lock().len(), 4);
     }
 
     #[tokio::test]
@@ -515,6 +557,23 @@ mod tests {
 impl CacheBackend for CloudCacheBackend {
     fn name(&self) -> &'static str { "cloud" }
 
+    fn untracked_pin<'a>(&'a self, kind: crate::media::FileKind, key: &'a str) -> PinFuture<'a, String> {
+        debug_assert!(is_source_identity(key), "cloud pins require a source identity");
+        Box::pin(async move {
+            let response = self.pin_request("candidate", serde_json::json!({
+                "kind": kind, "url": key, "cache_format": crate::TBR_CACHE_VERSION,
+            })).await?;
+            let response = response.error_for_status().map_err(|e| format!("cloud pin candidate: {e}"))?;
+            #[derive(serde::Deserialize)]
+            struct Reply { pin: String }
+            let reply = response.json::<Reply>().await.map_err(|e| format!("cloud pin candidate response: {e}"))?;
+            if !valid_pin(&reply.pin) || pin_kind(&reply.pin) != kind {
+                return Err("cloud pin candidate returned an invalid identifier or media kind".into());
+            }
+            Ok(reply.pin)
+        })
+    }
+
     fn issue_pin<'a>(&'a self, kind: crate::media::FileKind, key: &'a str, ttl: u64) -> PinFuture<'a, Option<String>> {
         debug_assert!(is_source_identity(key), "cloud pins require a source identity");
         Box::pin(async move {
@@ -540,7 +599,7 @@ impl CacheBackend for CloudCacheBackend {
         })
     }
 
-    fn pin_thumbnail<'a>(&'a self, id: &'a str) -> PinFuture<'a, Option<Vec<u8>>> {
+    fn pin_data<'a>(&'a self, id: &'a str) -> PinFuture<'a, Option<crate::http_cache::PinnedThumbnail>> {
         Box::pin(async move {
             let response = self.pin_request("resolve", serde_json::json!({
                 "pin": id, "cache_format": crate::TBR_CACHE_VERSION,
@@ -554,7 +613,14 @@ impl CacheBackend for CloudCacheBackend {
             if content_type != Some("image/jpeg") {
                 return Err("cloud pin resolve returned a non-JPEG content type".into());
             }
-            response.bytes().await.map(|bytes| Some(bytes.to_vec()))
+            let cache = response.headers().get("x-tbr-cache")
+                .ok_or("cloud pin resolve missing cache metadata")?
+                .to_str().map_err(|e| format!("cloud pin cache header: {e}"))?.to_owned();
+            let until = response.headers().get("x-tbr-pin-until")
+                .ok_or("cloud pin resolve missing pin deadline")?
+                .to_str().map_err(|e| format!("cloud pin deadline header: {e}"))?
+                .parse::<u64>().map_err(|e| format!("cloud pin deadline: {e}"))?;
+            response.bytes().await.map(|bytes| Some(crate::http_cache::PinnedThumbnail { bytes: bytes.to_vec(), cache, until }))
                 .map_err(|e| format!("cloud pin resolve body: {e}"))
         })
     }

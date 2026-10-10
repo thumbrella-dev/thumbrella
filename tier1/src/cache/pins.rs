@@ -93,22 +93,24 @@ impl PinSecret {
 }
 
 impl CacheStore {
-    /// Issue or refresh a pin after cache writes have completed. Client-only
-    /// freshness responses can advertise a pin only if a server entry exists.
+    /// Issue or refresh a pin after real-thumbnail cache writes have completed.
+    /// Successful placeholders derive an untracked candidate without accessing
+    /// cache entries. Client-only freshness requires an existing server entry.
     pub async fn pin_result(
         &self,
         key: &str,
         result: &ThumbResult,
         ttl: u64,
     ) -> Result<Option<String>, String> {
+        if ttl == 0 || result.status != ResultStatus::Success || result.media.is_none() {
+            return Ok(None);
+        }
         let Some(backend) = self.backend.as_ref() else {
             return Ok(None);
         };
-        if ttl == 0
-            || result.status != ResultStatus::Success
-            || result.media.as_ref().is_none_or(|media| !media.placeholder.is_empty())
-        {
-            return Ok(None);
+        if let Some(media) = result.media.as_ref().filter(|media| !media.placeholder.is_empty()) {
+            let id = backend.untracked_pin(media.kind, key).await?;
+            return Ok(Some(format!("pin/{id}.jpeg")));
         }
         let entry = match backend.get_entry(key, 0).await {
             Some(entry) => Some(entry),
@@ -143,5 +145,10 @@ impl CacheStore {
             return Ok(None);
         };
         backend.pin_thumbnail(id).await
+    }
+
+    pub async fn pin_data(&self, id: &str) -> Result<Option<crate::http_cache::PinnedThumbnail>, String> {
+        let Some(backend) = self.backend.as_ref() else { return Ok(None) };
+        backend.pin_data(id).await
     }
 }

@@ -27,12 +27,12 @@ native = [
     "dep:tokio",
     "dep:axum",
     "dep:tower-http",
+    "dep:tower",
     "dep:reqwest",
     "dep:tracing-subscriber",
     "dep:time",
     "dep:clap",
     "dep:libc",
-    "dep:sha2",
     "dep:hmac",
     "dep:getrandom",
 ]
@@ -74,18 +74,23 @@ bytes = "1"
 url = "2"
 web-time = "1"
 parking_lot = "0.12"
+sha2 = "0.10"
+httpdate = "1"
 
 #  Native-only
 rusqlite        = { version = "0.40", features = ["bundled"],                optional = true }
 tokio           = { version = "1", features = ["full"],                      optional = true }
 axum            = { version = "0.8",                                         optional = true }
 tower-http      = { version = "0.7", features = ["trace", "cors"],           optional = true }
+tower           = { version = "0.5", features = ["buffer", "limit"],        optional = true }
 reqwest         = { version = "0.13", default-features = false, features = ["rustls", "stream", "http2", "json"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"],          optional = true }
 time            = { version = "0.3", features = ["formatting"],              optional = true }
 clap            = { version = "4", features = ["derive"],                    optional = true }
 libc            = { version = "0.2",                                         optional = true }
-sha2            = { version = "0.10",                                        optional = true }
 hmac            = { version = "0.12",                                        optional = true }
 getrandom       = { version = "0.4",                                         optional = true }
 moka            = { version = "0.12", features = ["sync", "future"],          optional = true }
+
+[build-dependencies]
+sha2 = "0.10"

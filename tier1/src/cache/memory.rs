@@ -100,13 +100,15 @@ impl CacheBackend for MemoryCacheBackend {
         })
     }
 
-    fn pin_thumbnail<'a>(&'a self, id: &'a str) -> PinFuture<'a, Option<Vec<u8>>> {
+    fn pin_data<'a>(&'a self, id: &'a str) -> PinFuture<'a, Option<crate::http_cache::PinnedThumbnail>> {
         Box::pin(async move {
             let cache = self.cache.lock();
             let pins = self.pins.lock();
             Ok(pins.get(id).and_then(|key| cache.get(key))
                 .filter(|entry| entry.pin_until > unix_now_secs())
-                .map(|entry| entry.media.thumbnail))
+                .map(|entry| crate::http_cache::PinnedThumbnail {
+                    bytes: entry.media.thumbnail, cache: entry.media.cache, until: entry.pin_until,
+                }))
         })
     }
 
