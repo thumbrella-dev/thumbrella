@@ -258,6 +258,7 @@ async fn run_server(runtime: Arc<Runtime>) {
 
     let app = Router::new()
         .route("/", get(routes::landing))
+        .route("/favicon.ico", get(routes::favicon))
         .merge(routes::public_thumbnail_routes())
         .merge(
             Router::new()

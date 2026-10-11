@@ -19,9 +19,31 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }.tar.gz"
+bin-dir = "{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+disabled-strategies = ["quick-install", "compile"]
+
+[package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-linux-x86_64.tar.gz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-windows-x86_64.zip"
+pkg-fmt = "zip"
+
 # Distinct lib name avoids a doc-output collision with tier3's `thumbrella` bin.
 [lib]
 name = "thumbrella_doc"
+
+[[bin]]
+name = "thumbrella"
+path = "tier3/src/bin/tier3.rs"
+
+[dependencies]
+tier1 = { path = "tier1" }
+tier3 = { path = "tier3" }
+tokio = { version = "1", features = ["full"] }
 
 [workspace]
 resolver = "2"

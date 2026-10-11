@@ -6,9 +6,11 @@
 - Add `pin` to results with url path for sharable image link
 - Use $TBR_PIN to control pinning lifetime, or disable
 - Config envvar paths support envvar and tilde expansion
+- Simple favicon
 - Placeholder images served as cachable static media
 - Rename $TBR_ALLOW_LOCAL to $TBR_LOCAL
-- Enable tower concurrency limits
+- Enable Tower server concurrency limits
+- Packaging information for `cargo binstall`
 
 ## Summary of 1.x Changes  2026/07/22 - 2026/10/06
 

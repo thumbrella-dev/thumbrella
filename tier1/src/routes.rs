@@ -1,6 +1,7 @@
 //! Axum HTTP route handlers for the native server.
 //!
 //! Routes:
+//! - `GET  /favicon.ico`                  - public browser icon (PNG)
 //! - `GET  /health`                       - liveness probe
 //! - `GET  /placeholder/:kind.jpeg`       - static placeholder thumbnail for a file kind
 //! - `GET  /thumb.jpeg?url=<url>`         - single thumbnail; returns raw JPEG bytes (canonical)
@@ -12,7 +13,8 @@
 //! # Server token
 //!
 //! When `TBR_HANDSHAKE` is set, generation and service endpoints require the
-//! `x-tbr-handshake` header. Pins and their placeholder redirects are public.
+//! `x-tbr-handshake` header. The landing page, favicon, pins, and their
+//! placeholder redirects are public.
 
 use std::{convert::Infallible, sync::Arc};
 
@@ -158,6 +160,23 @@ pub async fn health(headers: HeaderMap, connect_info: ConnectInfo<SocketAddr>) -
 
     let major: u32 = env!("CARGO_PKG_VERSION_MAJOR").parse().unwrap_or(0);
     Json(json!({ "status": "ok", "thumbrella": major }))
+}
+
+/// Returns the embedded web favicon, including for browsers viewing API results.
+pub async fn favicon(
+    method: Method,
+    headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
+) -> impl IntoResponse {
+    let ip = client_ip(&headers, Some(&connect_info.0));
+    ux::get().log_request(method.as_str(), "/favicon.ico", 200, ip.as_deref(), None);
+    (
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        crate::assets::FAVICON_PNG,
+    )
 }
 
 //  Landing page
@@ -499,11 +518,16 @@ mod pin_tests {
         let app = axum::Router::new()
             .route("/private", axum::routing::get(|| async { StatusCode::OK }))
             .layer(axum::middleware::from_fn_with_state(runtime.clone(), require_handshake))
+            .route("/favicon.ico", axum::routing::get(favicon))
             .merge(public_thumbnail_routes())
             .with_state(runtime);
         let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+                .await
+                .unwrap()
+        });
         (format!("http://127.0.0.1:{port}"), server)
     }
 
@@ -512,6 +536,37 @@ mod pin_tests {
         let response = client.get(format!("{base}{path}")).send().await.unwrap();
         assert!(start.elapsed() >= PIN_MINIMUM_RUNTIME, "{path} returned before the pin minimum");
         response
+    }
+
+    #[tokio::test]
+    async fn favicon_is_public_and_supports_get_and_head() {
+        let backend = Arc::new(MemoryCacheBackend::with_max_entries(100).unwrap());
+        let (base, server) = start_server(runtime(CacheStore::backend_only(backend), 600)).await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let private = client.get(format!("{base}/private")).send().await.unwrap();
+        assert_eq!(private.status(), StatusCode::UNAUTHORIZED);
+
+        for method in [reqwest::Method::GET, reqwest::Method::HEAD] {
+            let response =
+                client.request(method.clone(), format!("{base}/favicon.ico")).send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[header::CONTENT_TYPE], "image/png");
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "public, max-age=86400");
+            assert_eq!(
+                response.headers()[header::CONTENT_LENGTH].to_str().unwrap(),
+                crate::assets::FAVICON_PNG.len().to_string()
+            );
+            let body = response.bytes().await.unwrap();
+            if method == reqwest::Method::HEAD {
+                assert!(body.is_empty());
+            } else {
+                assert_eq!(body.as_ref(), crate::assets::FAVICON_PNG);
+                let image = image::load_from_memory(&body).unwrap();
+                assert_eq!((image.width(), image.height()), (112, 112));
+            }
+        }
+        server.abort();
     }
 
     #[tokio::test]
