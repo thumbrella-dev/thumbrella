@@ -13,25 +13,19 @@
 use std::fs;
 use thumbrella_client::Client;
 
-
 #[tokio::main]
 async fn main() {
-
     // Client uses `$TBR_CONNECT` to define the server url or Cloud token
     let tbr = Client::new(None);
-
 
     // Generate a single specific thumbnail from url
     let url = "https://demo.thumbrella.dev/media/golden-gate.exr";
     let result = tbr.thumb(url).await?;
     let media = &result.media;
-    println!("{} {} bytes -> {} bytes", 
-        media.kind, media.file_size, media.thumbnail.len());
-
+    println!("{} {} bytes -> {} bytes", media.kind, media.file_size, media.thumbnail.len());
 
     // Write thumbnail to disk
     fs::write("/tmp/thumbnail.jpeg", media.thumbnail.bytes())?;
 
     ()
 }
-

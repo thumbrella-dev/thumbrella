@@ -122,19 +122,18 @@ fn validate() -> String {
 #[cfg(windows)]
 fn check_msvc() {
     // Try vswhere first (ships with VS, finds any edition).
-    if let Ok(output) = Command::new(
-        r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe",
-    )
-    .args([
-        "-latest",
-        "-products",
-        "*",
-        "-requires",
-        "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-        "-property",
-        "installationPath",
-    ])
-    .output()
+    if let Ok(output) =
+        Command::new(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe")
+            .args([
+                "-latest",
+                "-products",
+                "*",
+                "-requires",
+                "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                "-property",
+                "installationPath",
+            ])
+            .output()
     {
         if output.status.success() {
             let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -181,12 +180,7 @@ fn check_git() {
 #[cfg(windows)]
 fn check_ffmpeg_libs(dir: &std::path::Path, env_var: &str, env_value: &std::path::Path) {
     let required = [
-        "avcodec.lib",
-        "avdevice.lib",
-        "avfilter.lib",
-        "avformat.lib",
-        "avutil.lib",
-        "swresample.lib",
+        "avcodec.lib", "avdevice.lib", "avfilter.lib", "avformat.lib", "avutil.lib", "swresample.lib",
         "swscale.lib",
     ];
     let lib_dir = dir.join("lib");
@@ -222,13 +216,8 @@ fn check_ffmpeg_libs(dir: &std::path::Path, env_var: &str, env_value: &std::path
 #[cfg(not(windows))]
 fn check_ffmpeg_libs_unix(dir: &std::path::Path, env_var: &str, env_value: &std::path::Path) {
     let required = [
-        "libavcodec.a",
-        "libavdevice.a",
-        "libavfilter.a",
-        "libavformat.a",
-        "libavutil.a",
-        "libswresample.a",
-        "libswscale.a",
+        "libavcodec.a", "libavdevice.a", "libavfilter.a", "libavformat.a", "libavutil.a",
+        "libswresample.a", "libswscale.a",
     ];
     let lib_dir = dir.join("lib");
     if !lib_dir.exists() {

@@ -234,7 +234,10 @@ fn log_early_exit(method: &str, path: &str, reason: &str, ip: &Option<String>) {
 ///
 /// These images are embedded at compile time and never change, so the
 /// response includes aggressive cache headers.
-pub async fn placeholder(axum::extract::Path(kind): axum::extract::Path<String>, headers: HeaderMap) -> Response {
+pub async fn placeholder(
+    axum::extract::Path(kind): axum::extract::Path<String>,
+    headers: HeaderMap,
+) -> Response {
     let Some(kind_name) = kind.strip_suffix(".jpeg") else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -248,8 +251,12 @@ pub async fn placeholder(axum::extract::Path(kind): axum::extract::Path<String>,
     } else {
         Bytes::from_static(asset.bytes).into_response()
     };
-    response.headers_mut().insert(header::ETAG, asset.etag.parse().expect("hex ETag is a valid header"));
-    response.headers_mut().insert(header::CACHE_CONTROL, crate::assets::PLACEHOLDER_CACHE_CONTROL.parse().unwrap());
+    response
+        .headers_mut()
+        .insert(header::ETAG, asset.etag.parse().expect("hex ETag is a valid header"));
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, crate::assets::PLACEHOLDER_CACHE_CONTROL.parse().unwrap());
     response.headers_mut().insert(header::CONTENT_TYPE, "image/jpeg".parse().unwrap());
     if !not_modified {
         response.headers_mut().insert(header::CONTENT_LENGTH, asset.bytes.len().into());
@@ -270,7 +277,9 @@ pub fn public_thumbnail_routes() -> axum::Router<Arc<Runtime>> {
 }
 
 fn has_pin_referrer(headers: &HeaderMap, uri: &axum::http::Uri) -> bool {
-    let Some(referrer) = headers.get(header::REFERER).and_then(|value| value.to_str().ok())
+    let Some(referrer) = headers
+        .get(header::REFERER)
+        .and_then(|value| value.to_str().ok())
         .and_then(|value| url::Url::parse(value).ok())
         .filter(|url| matches!(url.scheme(), "http" | "https"))
     else {
@@ -279,11 +288,13 @@ fn has_pin_referrer(headers: &HeaderMap, uri: &axum::http::Uri) -> bool {
     if referrer.path() != "/pin" && !referrer.path().starts_with("/pin/") {
         return false;
     }
-    let authority = uri.authority().map(|authority| authority.as_str())
+    let authority = uri
+        .authority()
+        .map(|authority| authority.as_str())
         .or_else(|| headers.get(header::HOST).and_then(|value| value.to_str().ok()));
-    let Some(origin) = authority.and_then(|authority| {
-        url::Url::parse(&format!("{}://{authority}", referrer.scheme())).ok()
-    }) else {
+    let Some(origin) = authority
+        .and_then(|authority| url::Url::parse(&format!("{}://{authority}", referrer.scheme())).ok())
+    else {
         return false;
     };
     origin.host_str() == referrer.host_str()
@@ -293,18 +304,29 @@ fn has_pin_referrer(headers: &HeaderMap, uri: &axum::http::Uri) -> bool {
 async fn log_public_thumbnail_request(request: Request, next: Next) -> Response {
     let method = request.method().clone();
     let uri = request.uri().clone();
-    let ip = client_ip(request.headers(), request.extensions()
-        .get::<ConnectInfo<SocketAddr>>().map(|info| &info.0));
-    let followed_pin = uri.path().starts_with("/placeholder/")
-        && has_pin_referrer(request.headers(), &uri);
+    let ip = client_ip(
+        request.headers(),
+        request.extensions().get::<ConnectInfo<SocketAddr>>().map(|info| &info.0),
+    );
+    let followed_pin =
+        uri.path().starts_with("/placeholder/") && has_pin_referrer(request.headers(), &uri);
     let response = next.run(request).await;
     // Referer is only a best-effort log hint; it never affects the response.
-    if !followed_pin || (!response.status().is_success() && response.status() != StatusCode::NOT_MODIFIED) {
-        let redirect = response.headers().get(header::LOCATION)
+    if !followed_pin
+        || (!response.status().is_success() && response.status() != StatusCode::NOT_MODIFIED)
+    {
+        let redirect = response
+            .headers()
+            .get(header::LOCATION)
             .and_then(|value| value.to_str().ok())
             .map(|target| format!("redirect to {target}"));
-        ux::get().log_request(method.as_str(), uri.path(), response.status().as_u16(),
-            ip.as_deref(), redirect.as_deref());
+        ux::get().log_request(
+            method.as_str(),
+            uri.path(),
+            response.status().as_u16(),
+            ip.as_deref(),
+            redirect.as_deref(),
+        );
     }
     response
 }
@@ -326,50 +348,72 @@ pub async fn pin(
     headers: HeaderMap,
 ) -> Response {
     use crate::cache::pins::{pin_kind, valid_pin};
-    let Some(id) = filename.as_ref().ok()
+    let Some(id) = filename
+        .as_ref()
+        .ok()
         .and_then(|filename| filename.0.strip_suffix(".jpeg"))
-        .filter(|id| valid_pin(id)) else {
+        .filter(|id| valid_pin(id))
+    else {
         return (
             StatusCode::NOT_FOUND,
             [(header::CACHE_CONTROL, "no-store")],
             Json(json!({ "error": "not found" })),
-        ).into_response();
+        )
+            .into_response();
     };
     if runtime.pin_ttl_secs > 0 {
         match runtime.cache.pin_data(id).await {
             Ok(Some(pin)) if !pin.bytes.is_empty() => {
                 let conditional = headers.contains_key(header::IF_NONE_MATCH).then(|| {
-                    headers.get_all(header::IF_NONE_MATCH).iter()
-                        .filter_map(|value| value.to_str().ok()).collect::<Vec<_>>().join(", ")
+                    headers
+                        .get_all(header::IF_NONE_MATCH)
+                        .iter()
+                        .filter_map(|value| value.to_str().ok())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 });
-                let since = headers.get(header::IF_MODIFIED_SINCE).and_then(|value| value.to_str().ok());
+                let since =
+                    headers.get(header::IF_MODIFIED_SINCE).and_then(|value| value.to_str().ok());
                 let response = (|| -> Result<Response, String> {
-                    let metadata = pin.headers(crate::cache::unix_now_secs(), conditional.as_deref(), since)?;
+                    let metadata =
+                        pin.headers(crate::cache::unix_now_secs(), conditional.as_deref(), since)?;
                     let length = pin.bytes.len();
                     let mut response = if metadata.not_modified {
                         StatusCode::NOT_MODIFIED.into_response()
                     } else {
                         Bytes::from(pin.bytes).into_response()
                     };
-                    for (name, value) in [(header::ETAG, Some(metadata.etag)),
+                    for (name, value) in [
+                        (header::ETAG, Some(metadata.etag)),
                         (header::LAST_MODIFIED, metadata.last_modified),
-                        (header::CACHE_CONTROL, Some(metadata.cache_control))]
-                    {
+                        (header::CACHE_CONTROL, Some(metadata.cache_control)),
+                    ] {
                         if let Some(value) = value {
-                            response.headers_mut().insert(name, value.parse()
-                                .map_err(|e| format!("invalid cached pin header: {e}"))?);
+                            response.headers_mut().insert(
+                                name,
+                                value.parse().map_err(|e| format!("invalid cached pin header: {e}"))?,
+                            );
                         }
                     }
-                    response.headers_mut().insert(header::CONTENT_TYPE, axum::http::HeaderValue::from_static("image/jpeg"));
-                    if !metadata.not_modified { response.headers_mut().insert(header::CONTENT_LENGTH, length.into()); }
+                    response.headers_mut().insert(
+                        header::CONTENT_TYPE,
+                        axum::http::HeaderValue::from_static("image/jpeg"),
+                    );
+                    if !metadata.not_modified {
+                        response.headers_mut().insert(header::CONTENT_LENGTH, length.into());
+                    }
                     Ok(response)
                 })();
                 return match response {
                     Ok(response) => response,
                     Err(error) => {
                         tracing::warn!("pin HTTP metadata failed: {error}");
-                        (StatusCode::INTERNAL_SERVER_ERROR, [(header::CACHE_CONTROL, "no-store")],
-                            Json(json!({ "error": "pin metadata failed" }))).into_response()
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            [(header::CACHE_CONTROL, "no-store")],
+                            Json(json!({ "error": "pin metadata failed" })),
+                        )
+                            .into_response()
                     }
                 };
             }
@@ -380,14 +424,17 @@ pub async fn pin(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     [(header::CACHE_CONTROL, "no-store")],
                     Json(json!({ "error": "pin lookup failed" })),
-                ).into_response();
+                )
+                    .into_response();
             }
         }
     }
     let kind = kind_str(pin_kind(id));
     let mut response = Redirect::temporary(&format!("/placeholder/{kind}.jpeg")).into_response();
-    response.headers_mut().insert(header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_static(crate::http_cache::PIN_REDIRECT_CACHE_CONTROL));
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static(crate::http_cache::PIN_REDIRECT_CACHE_CONTROL),
+    );
     response
 }
 
@@ -422,14 +469,27 @@ mod pin_tests {
         headers.insert(header::REFERER, "http://example.com:3114/pin/invalid".parse().unwrap());
         headers.remove(header::HOST);
         assert!(!has_pin_referrer(&headers, &uri));
-        let absolute: axum::http::Uri = "http://example.com:3114/placeholder/image.jpeg".parse().unwrap();
+        let absolute: axum::http::Uri =
+            "http://example.com:3114/placeholder/image.jpeg".parse().unwrap();
         assert!(has_pin_referrer(&headers, &absolute));
     }
 
     fn runtime(cache: CacheStore, ttl: u64) -> Arc<Runtime> {
-        let mut runtime = Runtime::new(cache, Default::default(), None, None,
-            Default::default(), Default::default(), Some("pin-test-handshake".into()),
-            false, 5, 60, 60, 1000, 60);
+        let mut runtime = Runtime::new(
+            cache,
+            Default::default(),
+            None,
+            None,
+            Default::default(),
+            Default::default(),
+            Some("pin-test-handshake".into()),
+            false,
+            5,
+            60,
+            60,
+            1000,
+            60,
+        );
         Arc::make_mut(&mut runtime).pin_ttl_secs = ttl;
         runtime
     }
@@ -468,18 +528,35 @@ mod pin_tests {
         for backend in backends {
             let now = unix_now_secs();
             let cache = crate::CacheHints {
-                expires_at: Some(now + 3600), etag: Some("\"source-v1\"".into()),
-                last_modified: Some("Wed, 21 Oct 2015 07:28:00 GMT".into()), ..Default::default()
-            }.encode(60);
-            backend.put("source".into(), ThumbMedia {
-                thumbnail: vec![1, 2, 3], cache: cache.clone(), ..Default::default()
-            }, 0, now + 10, 600).await;
+                expires_at: Some(now + 3600),
+                etag: Some("\"source-v1\"".into()),
+                last_modified: Some("Wed, 21 Oct 2015 07:28:00 GMT".into()),
+                ..Default::default()
+            }
+            .encode(60);
+            backend
+                .put(
+                    "source".into(),
+                    ThumbMedia {
+                        thumbnail: vec![1, 2, 3],
+                        cache: cache.clone(),
+                        ..Default::default()
+                    },
+                    0,
+                    now + 10,
+                    600,
+                )
+                .await;
             backend.claim_pin("i123456789012", "source", 600).await.unwrap();
             let original = backend.pin_data("i123456789012").await.unwrap().unwrap();
             assert_eq!(original.cache, cache);
-            let (base, server) = start_server(runtime(CacheStore::backend_only(backend.clone()), 600)).await;
-            let client = reqwest::Client::builder().no_proxy()
-                .redirect(reqwest::redirect::Policy::none()).build().unwrap();
+            let (base, server) =
+                start_server(runtime(CacheStore::backend_only(backend.clone()), 600)).await;
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap();
             let path = "/pin/i123456789012.jpeg";
             let response = timed_get(&client, &base, path).await;
             assert_eq!(response.status(), StatusCode::OK);
@@ -501,8 +578,12 @@ mod pin_tests {
             ] {
                 for method in [reqwest::Method::GET, reqwest::Method::HEAD] {
                     let mut request = client.request(method.clone(), format!("{base}{path}"));
-                    if let Some(etag) = etag { request = request.header(header::IF_NONE_MATCH, etag); }
-                    if let Some(since) = since { request = request.header(header::IF_MODIFIED_SINCE, since); }
+                    if let Some(etag) = etag {
+                        request = request.header(header::IF_NONE_MATCH, etag);
+                    }
+                    if let Some(since) = since {
+                        request = request.header(header::IF_MODIFIED_SINCE, since);
+                    }
                     let start = web_time::Instant::now();
                     let response = request.send().await.unwrap();
                     assert!(start.elapsed() >= PIN_MINIMUM_RUNTIME);
@@ -514,8 +595,12 @@ mod pin_tests {
                     }
                 }
             }
-            let redirect = client.get(format!("{base}/pin/i000000000000.jpeg"))
-                .header(header::IF_NONE_MATCH, "*").send().await.unwrap();
+            let redirect = client
+                .get(format!("{base}/pin/i000000000000.jpeg"))
+                .header(header::IF_NONE_MATCH, "*")
+                .send()
+                .await
+                .unwrap();
             assert_eq!(redirect.status(), StatusCode::TEMPORARY_REDIRECT);
             assert!(!redirect.headers().contains_key(header::ETAG));
             assert_eq!(redirect.headers()[header::CACHE_CONTROL], "public, max-age=5");
@@ -528,30 +613,44 @@ mod pin_tests {
     async fn placeholders_support_validators_conditional_get_and_head() {
         let (base, server) = start_server(runtime(CacheStore::none(), 0)).await;
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
-        for slug in ["image", "video", "audio", "vector", "document", "geometry",
-            "archive", "text", "binary", "unknown", "failed", "future-kind"]
-        {
+        for slug in [
+            "image", "video", "audio", "vector", "document", "geometry", "archive", "text", "binary",
+            "unknown", "failed", "future-kind",
+        ] {
             let url = format!("{base}/placeholder/{slug}.jpeg");
             let asset = crate::assets::placeholder_asset(slug);
             let response = client.get(&url).send().await.unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(response.headers()[header::ETAG], asset.etag);
             assert_eq!(response.headers()[header::CONTENT_LENGTH], asset.bytes.len().to_string());
-            assert_eq!(response.headers()[header::CACHE_CONTROL], crate::assets::PLACEHOLDER_CACHE_CONTROL);
+            assert_eq!(
+                response.headers()[header::CACHE_CONTROL],
+                crate::assets::PLACEHOLDER_CACHE_CONTROL
+            );
             if let Some(length) = response.headers().get(header::CONTENT_LENGTH) {
                 assert_eq!(length.to_str().unwrap(), asset.bytes.len().to_string());
             }
             assert!(!response.headers().contains_key(header::LAST_MODIFIED));
             assert_eq!(response.bytes().await.unwrap().as_ref(), asset.bytes);
-            for validator in [asset.etag.to_string(), format!("W/{}", asset.etag),
-                format!("\"stale\", {}", asset.etag), "*".into()]
-            {
+            for validator in [
+                asset.etag.to_string(),
+                format!("W/{}", asset.etag),
+                format!("\"stale\", {}", asset.etag),
+                "*".into(),
+            ] {
                 for method in [reqwest::Method::GET, reqwest::Method::HEAD] {
-                    let response = client.request(method, &url)
-                        .header(header::IF_NONE_MATCH, &validator).send().await.unwrap();
+                    let response = client
+                        .request(method, &url)
+                        .header(header::IF_NONE_MATCH, &validator)
+                        .send()
+                        .await
+                        .unwrap();
                     assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
                     assert_eq!(response.headers()[header::ETAG], asset.etag);
-                    assert_eq!(response.headers()[header::CACHE_CONTROL], crate::assets::PLACEHOLDER_CACHE_CONTROL);
+                    assert_eq!(
+                        response.headers()[header::CACHE_CONTROL],
+                        crate::assets::PLACEHOLDER_CACHE_CONTROL
+                    );
                     assert!(response.bytes().await.unwrap().is_empty());
                 }
             }
@@ -559,38 +658,79 @@ mod pin_tests {
             assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(response.headers()[header::CONTENT_LENGTH], asset.bytes.len().to_string());
             assert!(response.bytes().await.unwrap().is_empty());
-            let response = client.get(&url).header(header::IF_NONE_MATCH, "\"stale\"")
-                .header(header::IF_MODIFIED_SINCE, "Wed, 31 Dec 2099 00:00:00 GMT").send().await.unwrap();
+            let response = client
+                .get(&url)
+                .header(header::IF_NONE_MATCH, "\"stale\"")
+                .header(header::IF_MODIFIED_SINCE, "Wed, 31 Dec 2099 00:00:00 GMT")
+                .send()
+                .await
+                .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(response.bytes().await.unwrap().as_ref(), asset.bytes);
         }
-        assert_eq!(client.get(format!("{base}/placeholder/image"))
-            .header(header::IF_NONE_MATCH, "*").send().await.unwrap().status(), StatusCode::NOT_FOUND);
-        let no_redirect = reqwest::Client::builder().no_proxy()
-            .redirect(reqwest::redirect::Policy::none()).build().unwrap();
-        let response = no_redirect.get(format!("{base}/pin/i000000000000.jpeg"))
-            .header(header::IF_NONE_MATCH, "*").send().await.unwrap();
+        assert_eq!(
+            client
+                .get(format!("{base}/placeholder/image"))
+                .header(header::IF_NONE_MATCH, "*")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        let no_redirect = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let response = no_redirect
+            .get(format!("{base}/pin/i000000000000.jpeg"))
+            .header(header::IF_NONE_MATCH, "*")
+            .send()
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
         server.abort();
     }
 
     #[tokio::test]
-    async fn public_pin_routes_delay_hits_misses_and_malformed_paths_and_allow_redirects_without_handshake() {
+    async fn public_pin_routes_delay_hits_misses_and_malformed_paths_and_allow_redirects_without_handshake()
+     {
         let backend = Arc::new(MemoryCacheBackend::with_max_entries(100).unwrap());
-        backend.put("source".into(), ThumbMedia {
-            thumbnail: vec![0xff, 0xd8, 0xff, 0xd9], ..Default::default()
-        }, 0, unix_now_secs() + 60, 60).await;
+        backend
+            .put(
+                "source".into(),
+                ThumbMedia {
+                    thumbnail: vec![0xff, 0xd8, 0xff, 0xd9],
+                    ..Default::default()
+                },
+                0,
+                unix_now_secs() + 60,
+                60,
+            )
+            .await;
         backend.claim_pin("i123456789012", "source", 60).await.unwrap();
         let (base, server) = start_server(runtime(CacheStore::backend_only(backend.clone()), 60)).await;
-        let client = reqwest::Client::builder().no_proxy()
-            .redirect(reqwest::redirect::Policy::none()).build().unwrap();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
         let response = timed_get(&client, &base, "/pin/i123456789012.jpeg").await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
         assert_eq!(response.bytes().await.unwrap().as_ref(), &[0xff, 0xd8, 0xff, 0xd9]);
         // Even an incorrect handshake must not block a bearer pin.
-        assert_eq!(client.get(format!("{base}/pin/i123456789012.jpeg"))
-            .header(HANDSHAKE_HEADER, "incorrect").send().await.unwrap().status(), StatusCode::OK);
+        assert_eq!(
+            client
+                .get(format!("{base}/pin/i123456789012.jpeg"))
+                .header(HANDSHAKE_HEADER, "incorrect")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
         for (path, target) in [("/pin/v000000000000.jpeg", "/placeholder/video.jpeg")] {
             let response = timed_get(&client, &base, path).await;
             assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT, "{path}");
@@ -601,18 +741,36 @@ mod pin_tests {
             assert_eq!(placeholder.status(), StatusCode::OK);
             assert_eq!(placeholder.headers()[header::CONTENT_TYPE], "image/jpeg");
         }
-        for path in ["/pin", "/pin/", "/pin/g-invalid.jpeg", "/pin/x123456789012.jpeg",
-            "/pin/i123456789012.png", "/pin/i123456789012.jpeg/extra", "/pin/%FF.jpeg", "/pin/%2F.jpeg"]
-        {
+        for path in [
+            "/pin",
+            "/pin/",
+            "/pin/g-invalid.jpeg",
+            "/pin/x123456789012.jpeg",
+            "/pin/i123456789012.png",
+            "/pin/i123456789012.jpeg/extra",
+            "/pin/%FF.jpeg",
+            "/pin/%2F.jpeg",
+        ] {
             let response = timed_get(&client, &base, path).await;
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
             assert!(!response.headers().contains_key(header::LOCATION), "{path}");
             assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
             assert_eq!(response.json::<Value>().await.unwrap()["error"], "not found");
         }
-        assert_eq!(client.get(format!("{base}/private")).send().await.unwrap().status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(client.get(format!("{base}/private")).header(HANDSHAKE_HEADER, "pin-test-handshake")
-            .send().await.unwrap().status(), StatusCode::OK);
+        assert_eq!(
+            client.get(format!("{base}/private")).send().await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            client
+                .get(format!("{base}/private"))
+                .header(HANDSHAKE_HEADER, "pin-test-handshake")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());
 
@@ -630,20 +788,41 @@ mod pin_tests {
     struct FailingPinBackend;
 
     impl CacheBackend for FailingPinBackend {
-        fn name(&self) -> &'static str { "failing-pin-test" }
-        fn get_entry<'a>(&'a self, _: &'a str, _: u64) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<crate::cache::CacheEntry>> + Send + 'a>> {
+        fn name(&self) -> &'static str {
+            "failing-pin-test"
+        }
+        fn get_entry<'a>(
+            &'a self,
+            _: &'a str,
+            _: u64,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Option<crate::cache::CacheEntry>> + Send + 'a>,
+        > {
             panic!("pin lookup must not use ordinary entry lookup")
         }
-        fn get_pin_entry<'a>(&'a self, _: &'a str) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<crate::cache::CacheEntry>> + Send + 'a>> {
+        fn get_pin_entry<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Option<crate::cache::CacheEntry>> + Send + 'a>,
+        > {
             panic!("pin route must only fetch thumbnail bytes")
         }
-        fn pin_data<'a>(&'a self, _: &'a str) -> crate::cache::PinFuture<'a, Option<crate::http_cache::PinnedThumbnail>> {
+        fn pin_data<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> crate::cache::PinFuture<'a, Option<crate::http_cache::PinnedThumbnail>> {
             Box::pin(async { Err("test backend lookup failed".into()) })
         }
         fn promote(&self, _: String, _: crate::cache::CacheEntry) -> crate::after::DeferredFuture {
             panic!("pin lookup must not write")
         }
-        fn revalidate(&self, _: String, _: crate::cache::CacheEntry, _: String) -> crate::after::DeferredFuture {
+        fn revalidate(
+            &self,
+            _: String,
+            _: crate::cache::CacheEntry,
+            _: String,
+        ) -> crate::after::DeferredFuture {
             panic!("pin lookup must not revalidate")
         }
         fn put(&self, _: String, _: ThumbMedia, _: u8, _: u64, _: u64) -> crate::after::DeferredFuture {
@@ -658,13 +837,20 @@ mod pin_tests {
         let mut result = ThumbResult {
             status: ResultStatus::Success,
             source: Some(ResultSource::Placeholder),
-            media: Some(ThumbMedia { kind: FileKind::Image, placeholder: "image".into(), ..Default::default() }),
+            media: Some(ThumbMedia {
+                kind: FileKind::Image,
+                placeholder: "image".into(),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let url = store.pin_result("source", &result, 60).await.unwrap().unwrap();
         let (base, server) = start_server(runtime(store.clone(), 60)).await;
-        let client = reqwest::Client::builder().no_proxy()
-            .redirect(reqwest::redirect::Policy::none()).build().unwrap();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
         let response = timed_get(&client, &base, &format!("/{url}")).await;
         assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
         assert_eq!(response.headers()[header::LOCATION], "/placeholder/image.jpeg");
@@ -675,7 +861,10 @@ mod pin_tests {
         media.thumbnail = vec![0xff, 0xd8, 0xff, 0xd9];
         backend.put("source".into(), media.clone(), 0, unix_now_secs() + 60, 0).await;
         result.source = Some(ResultSource::Render);
-        assert_eq!(store.pin_result("source", &result, 60).await.unwrap().as_deref(), Some(url.as_str()));
+        assert_eq!(
+            store.pin_result("source", &result, 60).await.unwrap().as_deref(),
+            Some(url.as_str())
+        );
         let response = timed_get(&client, &base, &format!("/{url}")).await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.bytes().await.unwrap().as_ref(), &[0xff, 0xd8, 0xff, 0xd9]);
@@ -685,7 +874,8 @@ mod pin_tests {
 
     #[tokio::test]
     async fn pin_backend_errors_are_delayed_and_stay_explicit_errors() {
-        let (base, server) = start_server(runtime(CacheStore::backend_only(Arc::new(FailingPinBackend)), 60)).await;
+        let (base, server) =
+            start_server(runtime(CacheStore::backend_only(Arc::new(FailingPinBackend)), 60)).await;
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let response = timed_get(&client, &base, "/pin/i123456789012.jpeg").await;
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -705,33 +895,63 @@ mod pin_tests {
             ..Default::default()
         };
         backend.put("source".into(), media.clone(), 0, unix_now_secs() + 60, 60).await;
-        let result = ThumbResult { status: ResultStatus::Success, media: Some(media.clone()), ..Default::default() };
+        let result = ThumbResult {
+            status: ResultStatus::Success,
+            media: Some(media.clone()),
+            ..Default::default()
+        };
         let url = cache.pin_result("source", &result, 60).await.unwrap().unwrap();
         let id = url.strip_prefix("pin/").unwrap().strip_suffix(".jpeg").unwrap();
-        let mut runtime = Runtime::new(cache, Default::default(), None, None,
-            Default::default(), Default::default(), None, false, 5, 60, 60, 1000, 60);
+        let mut runtime = Runtime::new(
+            cache,
+            Default::default(),
+            None,
+            None,
+            Default::default(),
+            Default::default(),
+            None,
+            false,
+            5,
+            60,
+            60,
+            1000,
+            60,
+        );
         Arc::make_mut(&mut runtime).pin_ttl_secs = 60;
         let before = backend.get_pin_entry("source").await.unwrap().pin_until;
-        let response = pin(State(runtime.clone()), Ok(axum::extract::Path(format!("{id}.jpeg"))), HeaderMap::new()).await;
+        let response = pin(
+            State(runtime.clone()),
+            Ok(axum::extract::Path(format!("{id}.jpeg"))),
+            HeaderMap::new(),
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()[header::CONTENT_TYPE], "image/jpeg");
         assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-        assert_eq!(axum::body::to_bytes(response.into_body(), 100).await.unwrap().as_ref(), media.thumbnail);
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 100).await.unwrap().as_ref(),
+            media.thumbnail
+        );
         assert_eq!(backend.get_pin_entry("source").await.unwrap().pin_until, before);
         for (invalid, kind) in [("v123456789012.jpeg", "video")] {
-            let response = pin(State(runtime.clone()), Ok(axum::extract::Path(invalid.into())), HeaderMap::new()).await;
+            let response =
+                pin(State(runtime.clone()), Ok(axum::extract::Path(invalid.into())), HeaderMap::new())
+                    .await;
             assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
             assert_eq!(response.headers()[header::LOCATION], format!("/placeholder/{kind}.jpeg"));
             assert_eq!(response.headers()[header::CACHE_CONTROL], "public, max-age=5");
             assert!(!response.headers().contains_key(header::ETAG));
         }
         for invalid in ["g-invalid.jpeg", "invalid", "x"] {
-            let response = pin(State(runtime.clone()), Ok(axum::extract::Path(invalid.into())), HeaderMap::new()).await;
+            let response =
+                pin(State(runtime.clone()), Ok(axum::extract::Path(invalid.into())), HeaderMap::new())
+                    .await;
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
             assert!(!response.headers().contains_key(header::LOCATION));
         }
         Arc::make_mut(&mut runtime).pin_ttl_secs = 0;
-        let response = pin(State(runtime), Ok(axum::extract::Path(format!("{id}.jpeg"))), HeaderMap::new()).await;
+        let response =
+            pin(State(runtime), Ok(axum::extract::Path(format!("{id}.jpeg"))), HeaderMap::new()).await;
         assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
         assert_eq!(response.headers()[header::LOCATION], "/placeholder/image.jpeg");
     }
@@ -790,12 +1010,7 @@ pub async fn thumb(
     let url = match normalize_url(url_raw.clone(), runtime.allow_local) {
         Ok(u) => u,
         Err(msg) => {
-            log_early_exit(
-                method.as_str(),
-                "/thumb.jpeg",
-                &format!("{msg} ({url_raw})"),
-                &ip,
-            );
+            log_early_exit(method.as_str(), "/thumb.jpeg", &format!("{msg} ({url_raw})"), &ip);
             return (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response();
         }
     };
@@ -805,7 +1020,8 @@ pub async fn thumb(
         cache: None,
         allow_local: runtime.allow_local,
     };
-    let (result, _trace, mut after) = ThumbCook::<PlatformStream>::from_input(input, runtime).run().await;
+    let (result, _trace, mut after) =
+        ThumbCook::<PlatformStream>::from_input(input, runtime).run().await;
     after.drain_spawn();
     let duration_ms = t0.elapsed().as_millis() as u64;
 
@@ -905,9 +1121,7 @@ pub async fn batch(
         let batch_runtime = Arc::clone(&runtime);
         // Emit overflow batchlimit results immediately.
         for result in &overflow {
-            let _ = tx.send(as_ndjson_line(
-                serde_json::to_value(result).unwrap_or_default(),
-            ));
+            let _ = tx.send(as_ndjson_line(serde_json::to_value(result).unwrap_or_default()));
         }
         tokio::spawn(async move {
             let mut pending = JoinSet::new();
@@ -918,9 +1132,8 @@ pub async fn batch(
                     let t_item = Instant::now();
                     let progress_tx = item_tx.clone();
                     let progress = Box::new(move |result| {
-                        let _ = progress_tx.send(as_ndjson_line(
-                            serde_json::to_value(&result).unwrap_or_default(),
-                        ));
+                        let _ = progress_tx
+                            .send(as_ndjson_line(serde_json::to_value(&result).unwrap_or_default()));
                     });
                     let (result, _trace, mut after) =
                         ThumbCook::<PlatformStream>::from_input(spec, item_runtime)
@@ -929,9 +1142,8 @@ pub async fn batch(
                     after.drain_spawn();
                     let dur = t_item.elapsed().as_millis() as u64;
                     log_result(&result, dur);
-                    let _ = item_tx.send(as_ndjson_line(
-                        serde_json::to_value(&result).unwrap_or_default(),
-                    ));
+                    let _ =
+                        item_tx.send(as_ndjson_line(serde_json::to_value(&result).unwrap_or_default()));
                 });
             }
             while pending.join_next().await.is_some() {}

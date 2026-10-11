@@ -58,7 +58,10 @@ impl Default for Tier2Renderer {
 }
 
 impl InProcessRenderer for Tier2Renderer {
-    fn render<'a>(&'a self, cook: &'a mut dyn RenderCook) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+    fn render<'a>(
+        &'a self,
+        cook: &'a mut dyn RenderCook,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         Box::pin(async move {
             let kind = cook.media_kind();
             let ext = cook.media_extension().unwrap_or("?").to_string();
@@ -141,7 +144,19 @@ fn tier2_handles_image(ext: &str) -> bool {
 fn is_raw_format(ext: &str) -> bool {
     matches!(
         ext,
-        "dng" | "cr2" | "nef" | "arw" | "orf" | "rw2" | "pef" | "srw" | "raf" | "3fr" | "fff" | "iiq" | "raw"
+        "dng"
+            | "cr2"
+            | "nef"
+            | "arw"
+            | "orf"
+            | "rw2"
+            | "pef"
+            | "srw"
+            | "raf"
+            | "3fr"
+            | "fff"
+            | "iiq"
+            | "raw"
     )
 }
 
@@ -350,7 +365,9 @@ fn render_svg(reader: &mut dyn ReadSeek) -> Option<RenderOutput> {
 /// Takes the already-taken streaming reader from `render_image`.  Returns
 /// `Some(RenderOutput)` on success or `None` (with the reader passed back)
 /// so callers can fall through to libav.
-fn extract_raw_preview(reader: Box<dyn ReadSeek + Send>) -> Result<RenderOutput, Box<dyn ReadSeek + Send>> {
+fn extract_raw_preview(
+    reader: Box<dyn ReadSeek + Send>,
+) -> Result<RenderOutput, Box<dyn ReadSeek + Send>> {
     #[allow(unused_mut)]
     let mut reader = reader;
     use image::GenericImageView;
@@ -628,7 +645,13 @@ async fn render_image(cook: &mut dyn RenderCook, ext: &str, content_length: Opti
                 return (None, 0u64);
             }
             let rotation_hint = container_rotation_hint(&mut *reader);
-            crate::avdecode::decode_with_libav(reader, content_length, Some(ext_owned), rotation_hint, None)
+            crate::avdecode::decode_with_libav(
+                reader,
+                content_length,
+                Some(ext_owned),
+                rotation_hint,
+                None,
+            )
         })
         .await
         .ok()
@@ -638,7 +661,13 @@ async fn render_image(cook: &mut dyn RenderCook, ext: &str, content_length: Opti
         tokio::task::spawn_blocking(move || {
             let mut reader = reader;
             let rotation_hint = container_rotation_hint(&mut *reader);
-            crate::avdecode::decode_with_libav(reader, content_length, Some(ext_owned), rotation_hint, None)
+            crate::avdecode::decode_with_libav(
+                reader,
+                content_length,
+                Some(ext_owned),
+                rotation_hint,
+                None,
+            )
         })
         .await
         .ok()
@@ -662,7 +691,11 @@ async fn render_image(cook: &mut dyn RenderCook, ext: &str, content_length: Opti
 }
 
 /// Fallback: re-fetch the URL when no live connection is available.
-async fn render_image_fallback(cook: &mut dyn RenderCook, ext: &str, _content_length: Option<u64>) -> bool {
+async fn render_image_fallback(
+    cook: &mut dyn RenderCook,
+    ext: &str,
+    _content_length: Option<u64>,
+) -> bool {
     let url = cook.input_url().to_string();
     let ext_owned = ext.to_string();
     let Some(bytes) = fetch_url(&url).await else {
@@ -749,7 +782,13 @@ async fn render_video(cook: &mut dyn RenderCook, ext: &str, content_length: Opti
             let cl = Some(bytes.len() as u64);
             let (result, avio_bytes) = tokio::task::spawn_blocking(move || {
                 let reader: Box<dyn ReadSeek + Send> = Box::new(Cursor::new(bytes));
-                crate::avdecode::decode_with_libav(reader, cl, Some(ext_owned), 0, Some(VIDEO_SEEK_SECS))
+                crate::avdecode::decode_with_libav(
+                    reader,
+                    cl,
+                    Some(ext_owned),
+                    0,
+                    Some(VIDEO_SEEK_SECS),
+                )
             })
             .await
             .ok()
@@ -765,7 +804,13 @@ async fn render_video(cook: &mut dyn RenderCook, ext: &str, content_length: Opti
     tbr_debug!("[tier2] render_video: streaming reader  ext={ext}  seek={VIDEO_SEEK_SECS}s");
 
     let (result, avio_bytes) = tokio::task::spawn_blocking(move || {
-        crate::avdecode::decode_with_libav(reader, content_length, Some(ext_owned), 0, Some(VIDEO_SEEK_SECS))
+        crate::avdecode::decode_with_libav(
+            reader,
+            content_length,
+            Some(ext_owned),
+            0,
+            Some(VIDEO_SEEK_SECS),
+        )
     })
     .await
     .ok()
@@ -1136,7 +1181,8 @@ fn container_rotation_hint(reader: &mut dyn tier1::ReadSeek) -> i32 {
 fn isobmff_irot_rotation(data: &[u8]) -> i32 {
     let mut pos = 0usize;
     while pos + 8 <= data.len() {
-        let size = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        let size =
+            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         let fcc = &data[pos + 4..pos + 8];
         if fcc == b"irot" && pos + 9 <= data.len() {
             return match data[pos + 8] & 0x03 {
@@ -1152,7 +1198,16 @@ fn isobmff_irot_rotation(data: &[u8]) -> i32 {
         let hdr = if is_full_box { 12 } else { 8 };
         if matches!(
             fcc,
-            b"moov" | b"trak" | b"mdia" | b"minf" | b"stbl" | b"meta" | b"iinf" | b"ipco" | b"iprp" | b"dinf"
+            b"moov"
+                | b"trak"
+                | b"mdia"
+                | b"minf"
+                | b"stbl"
+                | b"meta"
+                | b"iinf"
+                | b"ipco"
+                | b"iprp"
+                | b"dinf"
         ) {
             let inner_start = pos + hdr;
             let inner_end = if size >= hdr { (pos + size).min(data.len()) } else { data.len() };

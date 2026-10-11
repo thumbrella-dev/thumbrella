@@ -150,18 +150,10 @@ pub fn probe_environment() -> EnvReport {
     probe_runtime_services(&mut report);
 
     //  Build summary
-    let available: Vec<&str> = report
-        .backends
-        .values()
-        .filter(|b| b.available)
-        .map(|b| b.name.as_str())
-        .collect();
-    let unavailable: Vec<&str> = report
-        .backends
-        .values()
-        .filter(|b| !b.available)
-        .map(|b| b.name.as_str())
-        .collect();
+    let available: Vec<&str> =
+        report.backends.values().filter(|b| b.available).map(|b| b.name.as_str()).collect();
+    let unavailable: Vec<&str> =
+        report.backends.values().filter(|b| !b.available).map(|b| b.name.as_str()).collect();
 
     report.summary = format!(
         "{} backends available ({}), {} unavailable ({})",
@@ -244,13 +236,7 @@ fn probe_executables(report: &mut EnvReport) {
     // These are external command-line tools invoked as subprocesses.
     // Tier 3 runs them with input on stdin and captures stdout.
     let candidates: &[(&str, &str, &str, &str, &str)] = &[
-        (
-            "ffmpeg_cli",
-            "image",
-            "ffmpeg",
-            "-version",
-            "FFmpeg CLI (JPEG fallback / transcoding)",
-        ),
+        ("ffmpeg_cli", "image", "ffmpeg", "-version", "FFmpeg CLI (JPEG fallback / transcoding)"),
         ("magick", "image", "gm", "version", "GraphicsMagick (arithmetic JPEG, resize)"),
         (
             "oiiotool",
@@ -359,10 +345,8 @@ fn probe_f3d(report: &mut EnvReport) {
         }
     };
 
-    let has_display = std::env::var("DISPLAY")
-        .ok()
-        .or_else(|| std::env::var("WAYLAND_DISPLAY").ok())
-        .is_some();
+    let has_display =
+        std::env::var("DISPLAY").ok().or_else(|| std::env::var("WAYLAND_DISPLAY").ok()).is_some();
 
     let (details, reason) = if has_display {
         match std::process::Command::new(&path)
@@ -379,10 +363,9 @@ fn probe_f3d(report: &mut EnvReport) {
                     .to_string();
                 (Some(format!("{}: {}", path.display(), first_line)), None)
             }
-            Err(e) => (
-                Some(format!("found at {}", path.display())),
-                Some(format!("f3d --version: {e}")),
-            ),
+            Err(e) => {
+                (Some(format!("found at {}", path.display())), Some(format!("f3d --version: {e}")))
+            }
         }
     } else {
         // F3D --version crashes without a display; just note it was found.
@@ -506,7 +489,11 @@ fn try_dlopen(soname: &str, _desc: &str) -> (bool, Option<String>, Option<String
 /// Try to locate an executable on `$PATH` and run it with a benign check arg.
 ///
 /// Returns `(available, details, reason)`.
-fn try_executable(binary: &str, check_arg: &str, _desc: &str) -> (bool, Option<String>, Option<String>) {
+fn try_executable(
+    binary: &str,
+    check_arg: &str,
+    _desc: &str,
+) -> (bool, Option<String>, Option<String>) {
     let path = match which::which(binary) {
         Ok(p) => p,
         Err(e) => return (false, None, Some(format!("which({binary}): {e}"))),
@@ -568,11 +555,7 @@ fn check_file_executable(
     if mode & 0o111 != 0 {
         (true, Some(format!("executable at {}", resolved.display())), None)
     } else {
-        (
-            false,
-            None,
-            Some(format!("{}: not executable (mode {mode:o})", resolved.display())),
-        )
+        (false, None, Some(format!("{}: not executable (mode {mode:o})", resolved.display())))
     }
 }
 

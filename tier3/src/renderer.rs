@@ -112,7 +112,10 @@ impl Default for Tier3Renderer {
 }
 
 impl InProcessRenderer for Tier3Renderer {
-    fn render<'a>(&'a self, cook: &'a mut dyn RenderCook) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+    fn render<'a>(
+        &'a self,
+        cook: &'a mut dyn RenderCook,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         Box::pin(async move {
             let kind = cook.media_kind();
             let ext = cook.media_extension().unwrap_or("?").to_string();
@@ -503,11 +506,7 @@ fn run_ffmpeg_decode(bytes: &[u8], ext: &str, is_video: bool) -> Result<RenderOu
         codec: None,
         video_seek_secs: if is_video { Some(1.0) } else { None },
         properties: Some(build_video_properties(
-            src_w,
-            src_h,
-            bits_per_pixel,
-            duration_secs,
-            channel_count,
+            src_w, src_h, bits_per_pixel, duration_secs, channel_count,
         )),
     })
 }
@@ -679,7 +678,9 @@ async fn render_image_ffmpeg_fallback(cook: &mut dyn RenderCook, ext: &str) -> b
         let bytes = match tier2::renderer::fetch_url(cook.input_url()).await {
             Some(b) => b,
             None => {
-                cook.fail_cook(&format!("{tool_name}: failed to re-fetch (reader consumed by prior tier)"));
+                cook.fail_cook(&format!(
+                    "{tool_name}: failed to re-fetch (reader consumed by prior tier)"
+                ));
                 return true;
             }
         };
@@ -920,15 +921,12 @@ async fn render_document_tier3(cook: &mut dyn RenderCook, ext: &str) -> bool {
 fn run_pdftoppm_handler(reader: &mut dyn tier1::ReadSeek) -> Result<RenderOutput, String> {
     use std::process::Command;
 
-    reader
-        .seek(std::io::SeekFrom::Start(0))
-        .map_err(|e| format!("rewind input: {e}"))?;
+    reader.seek(std::io::SeekFrom::Start(0)).map_err(|e| format!("rewind input: {e}"))?;
 
     let arena = ScratchArena::new(100 * 1024 * 1024).map_err(|e| format!("scratch arena: {e}"))?;
 
-    let input_path = arena
-        .stage_reader(reader, "input.pdf")
-        .map_err(|e| format!("stage input: {e}"))?;
+    let input_path =
+        arena.stage_reader(reader, "input.pdf").map_err(|e| format!("stage input: {e}"))?;
 
     // Page count is optional - report it when pdfinfo can provide one.
     let pages = pdfinfo_page_count(&input_path);
@@ -1017,7 +1015,8 @@ async fn render_geometry_tier3(cook: &mut dyn RenderCook, ext: &str) -> bool {
     // tone mapping, camera orbit, and delivery identical to STL/OBJ).
     if matches!(ext, "usdz" | "usdc" | "usda") {
         if let Some(mut reader) = cook.take_reader() {
-            let result = tokio::task::spawn_blocking(move || run_usdz_via_obj_handler(&mut *reader)).await;
+            let result =
+                tokio::task::spawn_blocking(move || run_usdz_via_obj_handler(&mut *reader)).await;
 
             match result {
                 Ok(Ok(out)) => {
@@ -1062,7 +1061,8 @@ async fn render_geometry_tier3(cook: &mut dyn RenderCook, ext: &str) -> bool {
         if let Some(mut reader) = cook.take_reader() {
             let ext_owned = ext.to_string();
             let result =
-                tokio::task::spawn_blocking(move || run_f3d_geometry_handler(&mut *reader, &ext_owned)).await;
+                tokio::task::spawn_blocking(move || run_f3d_geometry_handler(&mut *reader, &ext_owned))
+                    .await;
 
             match result {
                 Ok(Ok(out)) => {
@@ -1090,7 +1090,8 @@ async fn render_geometry_tier3(cook: &mut dyn RenderCook, ext: &str) -> bool {
         let name = handler.name.to_string();
         let ext_owned = ext.to_string();
         let result =
-            tokio::task::spawn_blocking(move || run_subprocess_handler(&mut *reader, &ext_owned, &cmd)).await;
+            tokio::task::spawn_blocking(move || run_subprocess_handler(&mut *reader, &ext_owned, &cmd))
+                .await;
 
         match result {
             Ok(Ok(out)) => {
@@ -1131,9 +1132,7 @@ fn run_subprocess_handler(
     use std::process::Command;
 
     // Ensure subprocess handlers receive the full source file.
-    reader
-        .seek(std::io::SeekFrom::Start(0))
-        .map_err(|e| format!("rewind input: {e}"))?;
+    reader.seek(std::io::SeekFrom::Start(0)).map_err(|e| format!("rewind input: {e}"))?;
 
     // Create a scratch arena for this invocation.
     let arena = ScratchArena::new(100 * 1024 * 1024) // 100 MiB limit
@@ -1192,18 +1191,15 @@ fn run_usdz_via_obj_handler(reader: &mut dyn tier1::ReadSeek) -> Result<RenderOu
     use std::process::Command;
 
     // Read the full USDZ data.
-    reader
-        .seek(std::io::SeekFrom::Start(0))
-        .map_err(|e| format!("rewind usdz: {e}"))?;
+    reader.seek(std::io::SeekFrom::Start(0)).map_err(|e| format!("rewind usdz: {e}"))?;
     let mut usdz_bytes = Vec::new();
     reader.read_to_end(&mut usdz_bytes).map_err(|e| format!("read usdz: {e}"))?;
 
     let arena = ScratchArena::new(100 * 1024 * 1024).map_err(|e| format!("scratch arena: {e}"))?;
 
     // Stage the USDZ to a temp file so the Python script can open it.
-    let usdz_path = arena
-        .stage_bytes(&usdz_bytes, "input.usdz")
-        .map_err(|e| format!("stage usdz: {e}"))?;
+    let usdz_path =
+        arena.stage_bytes(&usdz_bytes, "input.usdz").map_err(|e| format!("stage usdz: {e}"))?;
 
     let obj_path = arena.output_path("obj");
 
@@ -1240,13 +1236,14 @@ fn run_usdz_via_obj_handler(reader: &mut dyn tier1::ReadSeek) -> Result<RenderOu
 
 /// Run F3D directly to render STL/OBJ/glTF/GLB geometry to a PNG, then
 /// load the resulting image into a RenderOutput.
-fn run_f3d_geometry_handler(reader: &mut dyn tier1::ReadSeek, ext: &str) -> Result<RenderOutput, String> {
+fn run_f3d_geometry_handler(
+    reader: &mut dyn tier1::ReadSeek,
+    ext: &str,
+) -> Result<RenderOutput, String> {
     use std::process::{Command, Stdio};
 
     // Read the full source so we can sanitise GLB files before staging.
-    reader
-        .seek(std::io::SeekFrom::Start(0))
-        .map_err(|e| format!("rewind input: {e}"))?;
+    reader.seek(std::io::SeekFrom::Start(0)).map_err(|e| format!("rewind input: {e}"))?;
 
     let mut source_bytes = Vec::new();
     reader.read_to_end(&mut source_bytes).map_err(|e| format!("read input: {e}"))?;
@@ -1449,7 +1446,8 @@ fn stylize_f3d_image(img: image::DynamicImage) -> image::DynamicImage {
 
         let nr = ((wr * (1.0 - shadow_mix) + shadow_purple[0] * shadow_mix - cool_red) * lift * shade)
             .clamp(0.0, 255.0);
-        let ng = ((wg * (1.0 - shadow_mix) + shadow_purple[1] * shadow_mix) * lift * shade).clamp(0.0, 255.0);
+        let ng = ((wg * (1.0 - shadow_mix) + shadow_purple[1] * shadow_mix) * lift * shade)
+            .clamp(0.0, 255.0);
         let nb = ((wb * (1.0 - shadow_mix) + shadow_purple[2] * shadow_mix + cool_blue) * lift * shade)
             .clamp(0.0, 255.0);
 
@@ -1537,10 +1535,7 @@ fn autocrop_transparent(img: image::DynamicImage) -> image::DynamicImage {
     let left = (0..w).find(|&x| (0..h).any(|y| rgba.get_pixel(x, y)[3] != 0)).unwrap_or(0);
 
     // First non-transparent column from the right.
-    let right = (0..w)
-        .rev()
-        .find(|&x| (0..h).any(|y| rgba.get_pixel(x, y)[3] != 0))
-        .unwrap_or(w - 1);
+    let right = (0..w).rev().find(|&x| (0..h).any(|y| rgba.get_pixel(x, y)[3] != 0)).unwrap_or(w - 1);
 
     if top >= bottom || left >= right {
         return img; // fully transparent - passthrough

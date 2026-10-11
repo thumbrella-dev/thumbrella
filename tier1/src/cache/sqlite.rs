@@ -60,7 +60,10 @@ use rusqlite::{Connection, params};
 
 use crate::after::DeferredFuture;
 use crate::cache::{CacheBackend, CacheEntry, unix_now_secs};
-use crate::cache::{PinFuture, pins::{PinClaim, PinSecret}};
+use crate::cache::{
+    PinFuture,
+    pins::{PinClaim, PinSecret},
+};
 
 //  Backend
 
@@ -106,18 +109,24 @@ impl SqliteCacheBackend {
         fc
     }
 
-    fn lookup<'a>(&'a self, key: &'a str, pin: bool, pin_ttl: u64) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + Send + 'a>> {
+    fn lookup<'a>(
+        &'a self,
+        key: &'a str,
+        pin: bool,
+        pin_ttl: u64,
+    ) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + Send + 'a>> {
         let conn = Arc::clone(&self.conn);
         let key = format_scoped_key(key);
         Box::pin(async move {
-            let result = tokio::task::spawn_blocking(move || -> rusqlite::Result<Option<CacheEntry>> {
-                let conn = conn.lock().expect("SQLite cache mutex poisoned");
-                let now = unix_now_secs();
-                let pin_deadline = if pin_ttl == 0 { 0 } else { now.saturating_add(pin_ttl) };
-                let pin_deadline = i64::try_from(pin_deadline).unwrap_or(i64::MAX);
-                use rusqlite::OptionalExtension;
-                conn.query_row(
-                    "UPDATE thumbrella
+            let result =
+                tokio::task::spawn_blocking(move || -> rusqlite::Result<Option<CacheEntry>> {
+                    let conn = conn.lock().expect("SQLite cache mutex poisoned");
+                    let now = unix_now_secs();
+                    let pin_deadline = if pin_ttl == 0 { 0 } else { now.saturating_add(pin_ttl) };
+                    let pin_deadline = i64::try_from(pin_deadline).unwrap_or(i64::MAX);
+                    use rusqlite::OptionalExtension;
+                    conn.query_row(
+                        "UPDATE thumbrella
                         SET last_accessed_at = unixepoch(),
                             access_count = access_count + 1,
                             pin_until = max(pin_until, ?2),
@@ -125,23 +134,31 @@ impl SqliteCacheBackend {
                       WHERE cache_key = ?1
                         AND CASE WHEN ?3 THEN pin_until ELSE cache_until END > unixepoch()
                   RETURNING value, cache_until, pin_until, last_accessed_at, render_cost, fresh_until",
-                    params![key, pin_deadline, pin],
-                    |row| {
-                        let json: String = row.get(0)?;
-                        let media = serde_json::from_str(&json).map_err(|e|
-                            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?;
-                        let cost: i64 = row.get(4)?;
-                        Ok(CacheEntry {
-                            media,
-                            fresh_until: read_deadline(row, 5)?,
-                            cache_until: read_deadline(row, 1)?,
-                            pin_until: read_deadline(row, 2)?,
-                            last_accessed_at: read_deadline(row, 3)?,
-                            render_cost: u8::try_from(cost).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(4, cost))?,
-                        })
-                    },
-                ).optional()
-            }).await;
+                        params![key, pin_deadline, pin],
+                        |row| {
+                            let json: String = row.get(0)?;
+                            let media = serde_json::from_str(&json).map_err(|e| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    0,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(e),
+                                )
+                            })?;
+                            let cost: i64 = row.get(4)?;
+                            Ok(CacheEntry {
+                                media,
+                                fresh_until: read_deadline(row, 5)?,
+                                cache_until: read_deadline(row, 1)?,
+                                pin_until: read_deadline(row, 2)?,
+                                last_accessed_at: read_deadline(row, 3)?,
+                                render_cost: u8::try_from(cost)
+                                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(4, cost))?,
+                            })
+                        },
+                    )
+                    .optional()
+                })
+                .await;
             match result {
                 Ok(Ok(entry)) => entry,
                 Ok(Err(e)) => {
@@ -156,7 +173,13 @@ impl SqliteCacheBackend {
         })
     }
 
-    fn write_entry(&self, key: String, mut entry: CacheEntry, only_if_absent: bool, expected_cache: Option<String>) -> DeferredFuture {
+    fn write_entry(
+        &self,
+        key: String,
+        mut entry: CacheEntry,
+        only_if_absent: bool,
+        expected_cache: Option<String>,
+    ) -> DeferredFuture {
         let conn = Arc::clone(&self.conn);
         let max_bytes = self.max_bytes;
         let key = format_scoped_key(&key);
@@ -240,7 +263,12 @@ impl CacheBackend for SqliteCacheBackend {
         "sqlite"
     }
 
-    fn pin_candidate(&self, kind: crate::media::FileKind, key: &str, attempt: u32) -> Result<String, String> {
+    fn pin_candidate(
+        &self,
+        kind: crate::media::FileKind,
+        key: &str,
+        attempt: u32,
+    ) -> Result<String, String> {
         Ok(self.pin_secret.candidate(kind, key, attempt))
     }
 
@@ -253,12 +281,19 @@ impl CacheBackend for SqliteCacheBackend {
                 use rusqlite::OptionalExtension;
                 let mut conn = conn.lock().expect("SQLite cache mutex poisoned");
                 let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-                tx.execute("DELETE FROM thumbrella_pins WHERE NOT EXISTS (
+                tx.execute(
+                    "DELETE FROM thumbrella_pins WHERE NOT EXISTS (
                     SELECT 1 FROM thumbrella WHERE thumbrella.cache_key = thumbrella_pins.cache_key
-                    AND pin_until > unixepoch())", [])?;
-                let owner: Option<String> = tx.query_row(
-                    "SELECT cache_key FROM thumbrella_pins WHERE pin_id = ?1", [&id], |row| row.get(0),
-                ).optional()?;
+                    AND pin_until > unixepoch())",
+                    [],
+                )?;
+                let owner: Option<String> = tx
+                    .query_row(
+                        "SELECT cache_key FROM thumbrella_pins WHERE pin_id = ?1",
+                        [&id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
                 if owner.is_some_and(|owner| owner != key) {
                     return Ok(PinClaim::Conflict);
                 }
@@ -272,41 +307,72 @@ impl CacheBackend for SqliteCacheBackend {
                 if updated == 0 {
                     return Ok(PinClaim::Missing);
                 }
-                tx.execute("INSERT INTO thumbrella_pins(pin_id, cache_key) VALUES (?1, ?2)
-                    ON CONFLICT(pin_id) DO NOTHING", params![id, key])?;
+                tx.execute(
+                    "INSERT INTO thumbrella_pins(pin_id, cache_key) VALUES (?1, ?2)
+                    ON CONFLICT(pin_id) DO NOTHING",
+                    params![id, key],
+                )?;
                 tx.commit()?;
                 Ok(PinClaim::Claimed)
-            }).await.map_err(|e| format!("sqlite pin claim task: {e}"))?
-                .map_err(|e| format!("sqlite pin claim: {e}"))
+            })
+            .await
+            .map_err(|e| format!("sqlite pin claim task: {e}"))?
+            .map_err(|e| format!("sqlite pin claim: {e}"))
         })
     }
 
-    fn pin_data<'a>(&'a self, id: &'a str) -> PinFuture<'a, Option<crate::http_cache::PinnedThumbnail>> {
+    fn pin_data<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> PinFuture<'a, Option<crate::http_cache::PinnedThumbnail>> {
         let conn = self.conn.clone();
         let id = format_scoped_key(id);
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || -> Result<Option<crate::http_cache::PinnedThumbnail>, String> {
-                use rusqlite::OptionalExtension;
-                let conn = conn.lock().expect("SQLite cache mutex poisoned");
-                let value: Option<(String, i64)> = conn.query_row(
-                    "SELECT value, pin_until FROM thumbrella JOIN thumbrella_pins USING(cache_key)
-                     WHERE pin_id = ?1 AND pin_until > unixepoch()", [&id], |row| Ok((row.get(0)?, row.get(1)?)),
-                ).optional().map_err(|e| format!("sqlite pin lookup: {e}"))?;
-                value.map(|(value, until)| {
-                    let until = u64::try_from(until).map_err(|e| format!("sqlite pin deadline: {e}"))?;
-                    let media = serde_json::from_str::<crate::ThumbMedia>(&value)
-                        .map_err(|e| format!("sqlite pin payload: {e}"))?;
-                    Ok(crate::http_cache::PinnedThumbnail { bytes: media.thumbnail, cache: media.cache, until })
-                }).transpose()
-            }).await.map_err(|e| format!("sqlite pin lookup task: {e}"))?
+            tokio::task::spawn_blocking(
+                move || -> Result<Option<crate::http_cache::PinnedThumbnail>, String> {
+                    use rusqlite::OptionalExtension;
+                    let conn = conn.lock().expect("SQLite cache mutex poisoned");
+                    let value: Option<(String, i64)> = conn
+                        .query_row(
+                            "SELECT value, pin_until FROM thumbrella JOIN thumbrella_pins USING(cache_key)
+                     WHERE pin_id = ?1 AND pin_until > unixepoch()",
+                            [&id],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .optional()
+                        .map_err(|e| format!("sqlite pin lookup: {e}"))?;
+                    value
+                        .map(|(value, until)| {
+                            let until =
+                                u64::try_from(until).map_err(|e| format!("sqlite pin deadline: {e}"))?;
+                            let media = serde_json::from_str::<crate::ThumbMedia>(&value)
+                                .map_err(|e| format!("sqlite pin payload: {e}"))?;
+                            Ok(crate::http_cache::PinnedThumbnail {
+                                bytes: media.thumbnail,
+                                cache: media.cache,
+                                until,
+                            })
+                        })
+                        .transpose()
+                },
+            )
+            .await
+            .map_err(|e| format!("sqlite pin lookup task: {e}"))?
         })
     }
 
-    fn get_entry<'a>(&'a self, key: &'a str, pin_ttl: u64) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + Send + 'a>> {
+    fn get_entry<'a>(
+        &'a self,
+        key: &'a str,
+        pin_ttl: u64,
+    ) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + Send + 'a>> {
         self.lookup(key, false, pin_ttl)
     }
 
-    fn get_pin_entry<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + Send + 'a>> {
+    fn get_pin_entry<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + Send + 'a>> {
         self.lookup(key, true, 0)
     }
 
@@ -318,13 +384,31 @@ impl CacheBackend for SqliteCacheBackend {
         self.write_entry(key, entry, false, Some(expected_cache))
     }
 
-    fn put(&self, key: String, media: crate::result::ThumbMedia, cost: u8, cache_until: u64, pin_ttl: u64) -> DeferredFuture {
+    fn put(
+        &self,
+        key: String,
+        media: crate::result::ThumbMedia,
+        cost: u8,
+        cache_until: u64,
+        pin_ttl: u64,
+    ) -> DeferredFuture {
         let conn = Arc::clone(&self.conn);
         let max_bytes = self.max_bytes;
         let pin_secret = self.pin_secret.clone();
         Box::pin(async move {
-            let backend = Self { conn, max_bytes, pin_secret };
-            backend.write_entry(key, CacheEntry::new(media, cost, cache_until, pin_ttl, unix_now_secs()), false, None).await;
+            let backend = Self {
+                conn,
+                max_bytes,
+                pin_secret,
+            };
+            backend
+                .write_entry(
+                    key,
+                    CacheEntry::new(media, cost, cache_until, pin_ttl, unix_now_secs()),
+                    false,
+                    None,
+                )
+                .await;
         })
     }
 }
@@ -404,22 +488,17 @@ fn check_schema(path: &str) -> crate::check::Validation {
     };
 
     if cols.is_empty() {
-        return crate::check::Validation::error("table 'thumbrella' not found - may be a different database");
+        return crate::check::Validation::error(
+            "table 'thumbrella' not found - may be a different database",
+        );
     }
 
     let required = [
-        "cache_key",
-        "value",
-        "size_bytes",
-        "last_accessed_at",
-        "access_count",
-        "render_cost",
-        "expires_at",
-        "cache_until",
-        "pin_until",
-        "fresh_until",
+        "cache_key", "value", "size_bytes", "last_accessed_at", "access_count", "render_cost",
+        "expires_at", "cache_until", "pin_until", "fresh_until",
     ];
-    let missing: Vec<&str> = required.iter().copied().filter(|c| !cols.iter().any(|col| col == c)).collect();
+    let missing: Vec<&str> =
+        required.iter().copied().filter(|c| !cols.iter().any(|col| col == c)).collect();
 
     if !missing.is_empty() {
         return crate::check::Validation::error(format!(
@@ -430,7 +509,8 @@ fn check_schema(path: &str) -> crate::check::Validation {
 
     let metadata: bool = match conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'thumbrella_metadata')",
-        [], |row| row.get(0),
+        [],
+        |row| row.get(0),
     ) {
         Ok(exists) => exists,
         Err(error) => return crate::check::Validation::error(format!("checking pin metadata: {error}")),
@@ -439,15 +519,22 @@ fn check_schema(path: &str) -> crate::check::Validation {
         return crate::check::Validation::warn("pin secret will be initialized when the cache opens");
     }
     use rusqlite::OptionalExtension;
-    match conn.query_row(
-        "SELECT value FROM thumbrella_metadata WHERE name = 'pin_secret'", [], |row| row.get::<_, Vec<u8>>(0),
-    ).optional() {
+    match conn
+        .query_row("SELECT value FROM thumbrella_metadata WHERE name = 'pin_secret'", [], |row| {
+            row.get::<_, Vec<u8>>(0)
+        })
+        .optional()
+    {
         Ok(Some(bytes)) => {
             if let Err(error) = PinSecret::from_bytes(bytes) {
                 return crate::check::Validation::error(error);
             }
         }
-        Ok(None) => return crate::check::Validation::warn("pin secret will be initialized when the cache opens"),
+        Ok(None) => {
+            return crate::check::Validation::warn(
+                "pin secret will be initialized when the cache opens",
+            );
+        }
         Err(error) => return crate::check::Validation::error(format!("reading pin secret: {error}")),
     }
 
@@ -463,17 +550,25 @@ fn apply_pragmas(conn: &Connection) -> rusqlite::Result<()> {
 fn load_pin_secret(conn: &mut Connection) -> Result<PinSecret, String> {
     use rusqlite::OptionalExtension;
 
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| format!("pin secret transaction: {e}"))?;
-    let bytes: Option<Vec<u8>> = tx.query_row(
-        "SELECT value FROM thumbrella_metadata WHERE name = 'pin_secret'", [], |row| row.get(0),
-    ).optional().map_err(|e| format!("read pin secret: {e}"))?;
+    let bytes: Option<Vec<u8>> = tx
+        .query_row("SELECT value FROM thumbrella_metadata WHERE name = 'pin_secret'", [], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(|e| format!("read pin secret: {e}"))?;
     let secret = match bytes {
         Some(bytes) => PinSecret::from_bytes(bytes)?,
         None => {
-            let secret = PinSecret::generate().map_err(|e| format!("cannot generate pin secret: {e}"))?;
-            tx.execute("INSERT INTO thumbrella_metadata(name, value) VALUES ('pin_secret', ?1)", [secret.as_bytes()])
-                .map_err(|e| format!("store pin secret: {e}"))?;
+            let secret =
+                PinSecret::generate().map_err(|e| format!("cannot generate pin secret: {e}"))?;
+            tx.execute(
+                "INSERT INTO thumbrella_metadata(name, value) VALUES ('pin_secret', ?1)",
+                [secret.as_bytes()],
+            )
+            .map_err(|e| format!("store pin secret: {e}"))?;
             secret
         }
     };
@@ -531,21 +626,25 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
 
     let transaction = conn.unchecked_transaction()?;
     let mut stmt = transaction.prepare("PRAGMA table_info(thumbrella)")?;
-    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let columns =
+        stmt.query_map([], |row| row.get::<_, String>(1))?.collect::<rusqlite::Result<Vec<_>>>()?;
     if !columns.iter().any(|column| column == "cache_until") {
         transaction.execute_batch(
             "ALTER TABLE thumbrella ADD COLUMN cache_until INTEGER NOT NULL DEFAULT 0;
-             UPDATE thumbrella SET cache_until = expires_at;"
+             UPDATE thumbrella SET cache_until = expires_at;",
         )?;
     }
     if !columns.iter().any(|column| column == "pin_until") {
-        transaction.execute_batch("ALTER TABLE thumbrella ADD COLUMN pin_until INTEGER NOT NULL DEFAULT 0;")?;
+        transaction
+            .execute_batch("ALTER TABLE thumbrella ADD COLUMN pin_until INTEGER NOT NULL DEFAULT 0;")?;
     }
     if !columns.iter().any(|column| column == "fresh_until") {
-        transaction.execute_batch("ALTER TABLE thumbrella ADD COLUMN fresh_until INTEGER NOT NULL DEFAULT 0;")?;
+        transaction.execute_batch(
+            "ALTER TABLE thumbrella ADD COLUMN fresh_until INTEGER NOT NULL DEFAULT 0;",
+        )?;
         let mut entries = transaction.prepare("SELECT cache_key, value FROM thumbrella")?;
-        let rows = entries.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+        let rows =
+            entries.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
         for row in rows {
             let (key, json) = row?;
             let media = match serde_json::from_str::<crate::result::ThumbMedia>(&json) {
@@ -555,8 +654,12 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
                     continue;
                 }
             };
-            let fresh_until = i64::try_from(CacheEntry::freshness_deadline(&media.cache)).unwrap_or(i64::MAX);
-            transaction.execute("UPDATE thumbrella SET fresh_until = ?2 WHERE cache_key = ?1", params![key, fresh_until])?;
+            let fresh_until =
+                i64::try_from(CacheEntry::freshness_deadline(&media.cache)).unwrap_or(i64::MAX);
+            transaction.execute(
+                "UPDATE thumbrella SET fresh_until = ?2 WHERE cache_key = ?1",
+                params![key, fresh_until],
+            )?;
         }
     }
     drop(stmt);
@@ -604,7 +707,10 @@ mod tests {
     use crate::source::CacheHints;
 
     fn temporary_database(label: &str) -> std::path::PathBuf {
-        let suffix = web_time::SystemTime::now().duration_since(web_time::SystemTime::UNIX_EPOCH).unwrap().as_nanos();
+        let suffix = web_time::SystemTime::now()
+            .duration_since(web_time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         std::env::temp_dir().join(format!("thumbrella-{label}-{}-{suffix}.db", std::process::id()))
     }
 
@@ -615,8 +721,19 @@ mod tests {
         let id;
         {
             let backend = SqliteCacheBackend::open(filename).unwrap();
-            backend.put("source".into(), ThumbMedia { thumbnail: vec![1, 2], kind: crate::FileKind::Image, ..Default::default() },
-                0, unix_now_secs() + 60, 60).await;
+            backend
+                .put(
+                    "source".into(),
+                    ThumbMedia {
+                        thumbnail: vec![1, 2],
+                        kind: crate::FileKind::Image,
+                        ..Default::default()
+                    },
+                    0,
+                    unix_now_secs() + 60,
+                    60,
+                )
+                .await;
             id = backend.issue_pin(crate::FileKind::Image, "source", 60).await.unwrap().unwrap();
         }
         {
@@ -625,11 +742,16 @@ mod tests {
             assert_eq!(backend.pin_thumbnail(&id).await.unwrap(), Some(vec![1, 2]));
             let conn = backend.conn.lock().unwrap();
             conn.execute("DELETE FROM thumbrella", []).unwrap();
-            let count: i64 = conn.query_row("SELECT count(*) FROM thumbrella_pins", [], |row| row.get(0)).unwrap();
+            let count: i64 =
+                conn.query_row("SELECT count(*) FROM thumbrella_pins", [], |row| row.get(0)).unwrap();
             assert_eq!(count, 0);
-            let length: i64 = conn.query_row(
-                "SELECT length(value) FROM thumbrella_metadata WHERE name = 'pin_secret'", [], |row| row.get(0),
-            ).unwrap();
+            let length: i64 = conn
+                .query_row(
+                    "SELECT length(value) FROM thumbrella_metadata WHERE name = 'pin_secret'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
             assert_eq!(length, 32);
         }
         std::fs::remove_file(path).unwrap();
@@ -644,24 +766,29 @@ mod tests {
             migrate(&conn).unwrap();
         }
         let barrier = Arc::new(std::sync::Barrier::new(8));
-        let threads: Vec<_> = (0..8).map(|_| {
-            let path = path.clone();
-            let barrier = barrier.clone();
-            std::thread::spawn(move || {
-                barrier.wait();
-                let backend = SqliteCacheBackend::open(path.to_str().unwrap()).unwrap();
-                backend.pin_candidate(crate::FileKind::Image, "source", 0).unwrap()
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let backend = SqliteCacheBackend::open(path.to_str().unwrap()).unwrap();
+                    backend.pin_candidate(crate::FileKind::Image, "source", 0).unwrap()
+                })
             })
-        }).collect();
+            .collect();
         let ids: Vec<_> = threads.into_iter().map(|thread| thread.join().unwrap()).collect();
         assert!(ids.iter().all(|id| id == &ids[0]));
         let other = SqliteCacheBackend::open(":memory:").unwrap();
         assert_ne!(ids[0], other.pin_candidate(crate::FileKind::Image, "source", 0).unwrap());
         let conn = Connection::open(&path).unwrap();
-        let count: i64 = conn.query_row(
-            "SELECT count(*) FROM thumbrella_metadata WHERE name = 'pin_secret' AND length(value) = 32",
-            [], |row| row.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM thumbrella_metadata WHERE name = 'pin_secret' AND length(value) = 32",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 1);
         drop(conn);
         std::fs::remove_file(path).unwrap();
@@ -673,7 +800,8 @@ mod tests {
         {
             let conn = Connection::open(&path).unwrap();
             migrate(&conn).unwrap();
-            conn.execute("INSERT INTO thumbrella_metadata VALUES ('pin_secret', ?1)", [vec![1u8; 31]]).unwrap();
+            conn.execute("INSERT INTO thumbrella_metadata VALUES ('pin_secret', ?1)", [vec![1u8; 31]])
+                .unwrap();
         }
         let error = match SqliteCacheBackend::open(path.to_str().unwrap()) {
             Ok(_) => panic!("invalid secret was accepted"),
@@ -682,9 +810,11 @@ mod tests {
         assert!(error.contains("exactly 32 bytes"), "{error}");
         assert_eq!(check_schema(path.to_str().unwrap()).status, crate::check::ValidationStatus::Error);
         let conn = Connection::open(&path).unwrap();
-        let bytes: Vec<u8> = conn.query_row(
-            "SELECT value FROM thumbrella_metadata WHERE name = 'pin_secret'", [], |row| row.get(0),
-        ).unwrap();
+        let bytes: Vec<u8> = conn
+            .query_row("SELECT value FROM thumbrella_metadata WHERE name = 'pin_secret'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
         assert_eq!(bytes, vec![1u8; 31]);
         drop(conn);
         std::fs::remove_file(path).unwrap();
@@ -694,16 +824,40 @@ mod tests {
     async fn eviction_does_not_remove_or_rotate_the_pin_secret() {
         let backend = SqliteCacheBackend::open_with_limit(":memory:", Some(1)).unwrap();
         let id = backend.pin_candidate(crate::FileKind::Image, "source", 0).unwrap();
-        backend.put("source".into(), ThumbMedia { thumbnail: vec![1, 2], ..Default::default() },
-            0, unix_now_secs() + 60, 60).await;
-        backend.put("other".into(), ThumbMedia { thumbnail: vec![1, 2], ..Default::default() },
-            1, unix_now_secs() + 60, 60).await;
+        backend
+            .put(
+                "source".into(),
+                ThumbMedia {
+                    thumbnail: vec![1, 2],
+                    ..Default::default()
+                },
+                0,
+                unix_now_secs() + 60,
+                60,
+            )
+            .await;
+        backend
+            .put(
+                "other".into(),
+                ThumbMedia {
+                    thumbnail: vec![1, 2],
+                    ..Default::default()
+                },
+                1,
+                unix_now_secs() + 60,
+                60,
+            )
+            .await;
         assert!(backend.get_entry("source", 0).await.is_none());
         assert_eq!(id, backend.pin_candidate(crate::FileKind::Image, "source", 0).unwrap());
         let conn = backend.conn.lock().unwrap();
-        let length: i64 = conn.query_row(
-            "SELECT length(value) FROM thumbrella_metadata WHERE name = 'pin_secret'", [], |row| row.get(0),
-        ).unwrap();
+        let length: i64 = conn
+            .query_row(
+                "SELECT length(value) FROM thumbrella_metadata WHERE name = 'pin_secret'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(length, 32);
     }
 
@@ -719,16 +873,22 @@ mod tests {
                 access_count INTEGER NOT NULL DEFAULT 1,
                 render_cost INTEGER NOT NULL DEFAULT 0,
                 expires_at INTEGER NOT NULL
-             );"
-        ).unwrap();
+             );",
+        )
+        .unwrap();
         let media = ThumbMedia {
-            cache: CacheHints { expires_at: Some(100), ..Default::default() }.encode(60),
+            cache: CacheHints {
+                expires_at: Some(100),
+                ..Default::default()
+            }
+            .encode(60),
             ..Default::default()
         };
         conn.execute(
             "INSERT INTO thumbrella(cache_key, value, expires_at) VALUES ('old', ?1, 12345)",
             params![serde_json::to_string(&media).unwrap()],
-        ).unwrap();
+        )
+        .unwrap();
         migrate(&conn).unwrap();
         migrate(&conn).unwrap();
         let deadlines: (i64, i64, i64, i64) = conn.query_row(
@@ -744,12 +904,23 @@ mod tests {
         let backend = SqliteCacheBackend::open(":memory:").unwrap();
         let now = unix_now_secs();
         for (key, no_cache) in [("fresh", false), ("revalidate", true)] {
-            backend.put(key.into(), ThumbMedia {
-                cache: CacheHints {
-                    expires_at: Some(now + 100), no_cache, ..Default::default()
-                }.encode(60),
-                ..Default::default()
-            }, 73, now + 300, 500).await;
+            backend
+                .put(
+                    key.into(),
+                    ThumbMedia {
+                        cache: CacheHints {
+                            expires_at: Some(now + 100),
+                            no_cache,
+                            ..Default::default()
+                        }
+                        .encode(60),
+                        ..Default::default()
+                    },
+                    73,
+                    now + 300,
+                    500,
+                )
+                .await;
         }
         let conn = backend.conn.lock().unwrap();
         conn.execute_batch("ALTER TABLE thumbrella DROP COLUMN fresh_until").unwrap();

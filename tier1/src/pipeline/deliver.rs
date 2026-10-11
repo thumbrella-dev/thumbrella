@@ -671,7 +671,8 @@ fn composite_rgba_onto(rgba: &image::RgbaImage, dst: &mut image::RgbImage, ox: u
             let di = ((oy + y) * dw + (ox + x)) as usize;
             let a = src[si * 4 + 3] as u32;
             let ia = 255 - a;
-            dst_raw[di * 3] = ((src[si * 4] as u32 * a + dst_raw[di * 3] as u32 * ia + 127) / 255) as u8;
+            dst_raw[di * 3] =
+                ((src[si * 4] as u32 * a + dst_raw[di * 3] as u32 * ia + 127) / 255) as u8;
             dst_raw[di * 3 + 1] =
                 ((src[si * 4 + 1] as u32 * a + dst_raw[di * 3 + 1] as u32 * ia + 127) / 255) as u8;
             dst_raw[di * 3 + 2] =
@@ -774,7 +775,9 @@ mod tests {
         let mut buf = ProcessBuffer::from_dynamic(DynamicImage::ImageRgb8(img));
         buf.fit_to_target(250, 200, 0.6, 0.10, false);
 
-        let BufInner::Rgb(out) = &buf.inner else { panic!("expected an RGB buffer") };
+        let BufInner::Rgb(out) = &buf.inner else {
+            panic!("expected an RGB buffer")
+        };
         assert_eq!(out.dimensions(), (250, 120));
         assert!(
             out.pixels().all(|p| p.0 == [255, 255, 255]),
@@ -794,7 +797,9 @@ mod tests {
         let mut buf = ProcessBuffer::from_dynamic(DynamicImage::ImageRgb8(img));
         buf.fit_to_target(250, 200, 0.6, 0.10, false);
 
-        let BufInner::Rgb(out) = &buf.inner else { panic!("expected an RGB buffer") };
+        let BufInner::Rgb(out) = &buf.inner else {
+            panic!("expected an RGB buffer")
+        };
         assert_eq!(out.dimensions(), (150, 200));
         assert!(
             out.pixels().all(|p| p.0 == [255, 255, 255]),

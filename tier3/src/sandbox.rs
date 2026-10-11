@@ -90,7 +90,9 @@ pub fn output(cmd: &mut Command, config: &SandboxConfig) -> std::io::Result<Outp
     })
 }
 
-fn drain_pipe<R: Read + Send + 'static>(mut pipe: R) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
+fn drain_pipe<R: Read + Send + 'static>(
+    mut pipe: R,
+) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
     std::thread::spawn(move || {
         let mut bytes = Vec::new();
         pipe.read_to_end(&mut bytes)?;
@@ -98,9 +100,13 @@ fn drain_pipe<R: Read + Send + 'static>(mut pipe: R) -> std::thread::JoinHandle<
     })
 }
 
-fn join_pipe(handle: Option<std::thread::JoinHandle<std::io::Result<Vec<u8>>>>) -> std::io::Result<Vec<u8>> {
+fn join_pipe(
+    handle: Option<std::thread::JoinHandle<std::io::Result<Vec<u8>>>>,
+) -> std::io::Result<Vec<u8>> {
     match handle {
-        Some(handle) => handle.join().map_err(|_| std::io::Error::other("subprocess output reader panicked"))?,
+        Some(handle) => {
+            handle.join().map_err(|_| std::io::Error::other("subprocess output reader panicked"))?
+        }
         None => Ok(Vec::new()),
     }
 }

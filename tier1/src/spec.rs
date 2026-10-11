@@ -72,7 +72,7 @@ pub struct ThumbnailConfig {
 /// thickness.  `0` pages maps to 2 px (the minimum border) and is treated by
 /// the caller as "no border" via the separate 0-means-none cook field.
 pub(crate) fn page_edge_thickness(pages: u32) -> u32 {
-    (pages.ilog2() as u32 + 1).clamp(2, 10)
+    (pages.ilog2() + 1).clamp(2, 10)
 }
 
 impl Default for ThumbnailConfig {

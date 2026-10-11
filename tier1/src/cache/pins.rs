@@ -53,9 +53,7 @@ pub fn valid_pin(id: &str) -> bool {
             id.as_bytes()[0],
             b'i' | b'v' | b'a' | b's' | b'd' | b'g' | b'r' | b't' | b'b' | b'u'
         )
-        && id.as_bytes()[1..]
-            .iter()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+        && id.as_bytes()[1..].iter().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
 }
 
 #[derive(Clone)]
@@ -147,7 +145,10 @@ impl CacheStore {
         backend.pin_thumbnail(id).await
     }
 
-    pub async fn pin_data(&self, id: &str) -> Result<Option<crate::http_cache::PinnedThumbnail>, String> {
+    pub async fn pin_data(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::http_cache::PinnedThumbnail>, String> {
         let Some(backend) = self.backend.as_ref() else {
             return Ok(None);
         };

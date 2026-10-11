@@ -130,9 +130,7 @@ unsafe fn tile_grid_dimensions(fmt_ctx: *mut AVFormatContext) -> Option<(i32, i3
         }
 
         let area = width as i64 * height as i64;
-        let keep = best
-            .map(|(best_w, best_h)| area > best_w as i64 * best_h as i64)
-            .unwrap_or(true);
+        let keep = best.map(|(best_w, best_h)| area > best_w as i64 * best_h as i64).unwrap_or(true);
         if keep {
             best = Some((width, height));
         }
@@ -191,22 +189,18 @@ unsafe extern "C" fn avio_seek_cb(opaque: *mut c_void, offset: i64, whence: c_in
     state.last_seek_offset = offset;
     state.last_seek_whence = whence;
     match whence {
-        SEEK_SET => state
-            .reader
-            .seek(SeekFrom::Start(offset as u64))
-            .map(|p| p as i64)
-            .unwrap_or_else(|_| {
+        SEEK_SET => {
+            state.reader.seek(SeekFrom::Start(offset as u64)).map(|p| p as i64).unwrap_or_else(|_| {
                 state.seek_errors += 1;
                 -1
-            }),
-        SEEK_CUR => state
-            .reader
-            .seek(SeekFrom::Current(offset))
-            .map(|p| p as i64)
-            .unwrap_or_else(|_| {
+            })
+        }
+        SEEK_CUR => {
+            state.reader.seek(SeekFrom::Current(offset)).map(|p| p as i64).unwrap_or_else(|_| {
                 state.seek_errors += 1;
                 -1
-            }),
+            })
+        }
         SEEK_END => state.reader.seek(SeekFrom::End(offset)).map(|p| p as i64).unwrap_or_else(|_| {
             state.seek_errors += 1;
             -1
@@ -304,7 +298,9 @@ pub fn decode_with_libav(
         ext_hint
             .as_deref()
             .and_then(ext_to_libav_format)
-            .and_then(|name| CString::new(name).ok().map(|cs| av_find_input_format(cs.as_ptr()) as *mut _))
+            .and_then(|name| {
+                CString::new(name).ok().map(|cs| av_find_input_format(cs.as_ptr()) as *mut _)
+            })
             .unwrap_or(ptr::null_mut())
     };
 
@@ -362,17 +358,8 @@ pub fn decode_with_libav(
 
     let result = unsafe {
         decode_inner(
-            opaque,
-            fmt_hint_ptr,
-            rotation_hint,
-            seek_secs,
-            probe_limit,
-            &mut avio_ctx,
-            &mut fmt_ctx,
-            &mut codec_ctx,
-            &mut packet,
-            &mut frame,
-            &mut sws_ctx,
+            opaque, fmt_hint_ptr, rotation_hint, seek_secs, probe_limit, &mut avio_ctx, &mut fmt_ctx,
+            &mut codec_ctx, &mut packet, &mut frame, &mut sws_ctx,
         )
     };
 
@@ -572,7 +559,9 @@ unsafe fn decode_inner(
             Some(CStr::from_ptr(p).to_string_lossy().into_owned())
         }
     };
-    tbr_debug!("[avdecode] codec={codec_name:?}  src={src_w}x{src_h} reported={reported_w}x{reported_h}");
+    tbr_debug!(
+        "[avdecode] codec={codec_name:?}  src={src_w}x{src_h} reported={reported_w}x{reported_h}"
+    );
 
     // Bits-per-pixel from the pixel-format descriptor.
     let depth = {
@@ -614,7 +603,8 @@ unsafe fn decode_inner(
         let time_base = (*stream).time_base;
         if time_base.num > 0 && time_base.den > 0 {
             let target_ts = ((secs * time_base.den as f64) / time_base.num as f64).round() as i64;
-            let seek_ret = av_seek_frame(*fmt_ctx, stream_idx, target_ts, AVSEEK_FLAG_BACKWARD as c_int);
+            let seek_ret =
+                av_seek_frame(*fmt_ctx, stream_idx, target_ts, AVSEEK_FLAG_BACKWARD as c_int);
             if seek_ret >= 0 {
                 avcodec_flush_buffers(*codec_ctx);
                 applied_seek_secs = Some(secs);
@@ -748,7 +738,12 @@ unsafe fn decode_inner(
 
     let stride = (out_w as usize) * channels;
     let mut buf = vec![0u8; stride * out_h as usize];
-    let dst_data: [*mut u8; 4] = [buf.as_mut_ptr(), ptr::null_mut(), ptr::null_mut(), ptr::null_mut()];
+    let dst_data: [*mut u8; 4] = [
+        buf.as_mut_ptr(),
+        ptr::null_mut(),
+        ptr::null_mut(),
+        ptr::null_mut(),
+    ];
     let dst_linesize: [c_int; 4] = [stride as c_int, 0, 0, 0];
 
     sws_scale(

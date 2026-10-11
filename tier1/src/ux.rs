@@ -17,8 +17,8 @@
 //! Hints are shown in `standard` and `full` modes, suppressed in `minimal`.
 
 use std::io::{self, Write};
-use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 //  Once-only warnings
 
@@ -57,11 +57,7 @@ static STARTUP_TIPS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 
 /// Queue a short line (without the `  # ` prefix) for the startup banner.
 pub fn add_startup_tip(tip: impl Into<String>) {
-    STARTUP_TIPS
-        .get_or_init(|| Mutex::new(Vec::new()))
-        .lock()
-        .unwrap()
-        .push(tip.into());
+    STARTUP_TIPS.get_or_init(|| Mutex::new(Vec::new())).lock().unwrap().push(tip.into());
 }
 
 /// Drain and return queued startup tips.  Printed by the serve banner and
@@ -289,9 +285,7 @@ impl Ux {
             && !tier3_configured
             && !crate::check::has_builtin_renderer()
         {
-            lines.push(format!(
-                "  # tier1 server needs render handoffs, use TBR_TIER2 and TBR_TIER3"
-            ));
+            lines.push(format!("  # tier1 server needs render handoffs, use TBR_TIER2 and TBR_TIER3"));
         }
 
         //  Container hint
@@ -447,8 +441,9 @@ impl Ux {
             None => String::new(),
         };
         let msg_str = match message {
-            Some(m) if (300..400).contains(&status) && m.starts_with("redirect to ") =>
-                Colour::dim(&format!("  {m}")),
+            Some(m) if (300..400).contains(&status) && m.starts_with("redirect to ") => {
+                Colour::dim(&format!("  {m}"))
+            }
             Some(m) if !m.is_empty() => Colour::yellow(&format!("  {m}")),
             _ => String::new(),
         };
@@ -587,7 +582,8 @@ fn colorize_json_str(json: &str) -> String {
 
                 // Peek ahead for ':' (key) vs ',' or '}' or end (value).
                 let mut j = i;
-                while j < len && (chars[j] == ' ' || chars[j] == '\n' || chars[j] == '\r' || chars[j] == '\t')
+                while j < len
+                    && (chars[j] == ' ' || chars[j] == '\n' || chars[j] == '\r' || chars[j] == '\t')
                 {
                     j += 1;
                 }

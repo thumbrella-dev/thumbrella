@@ -167,7 +167,10 @@ pub trait InProcessRenderer: Send + Sync + 'static {
     /// Returns `true` when the format was claimed (regardless of success -
     /// call `cook.fail_cook(msg)` on decode errors).
     /// Returns `false` to signal "not my format".
-    fn render<'a>(&'a self, cook: &'a mut dyn RenderCook) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
+    fn render<'a>(
+        &'a self,
+        cook: &'a mut dyn RenderCook,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
 }
 
 //  Type alias

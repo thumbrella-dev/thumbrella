@@ -89,7 +89,9 @@ pub struct OriginBackoffCache(moka::future::Cache<String, (u16, Instant)>);
 
 #[cfg(not(feature = "native"))]
 #[derive(Clone)]
-pub struct OriginBackoffCache(Arc<parking_lot::RwLock<std::collections::HashMap<String, (u16, Instant)>>>);
+pub struct OriginBackoffCache(
+    Arc<parking_lot::RwLock<std::collections::HashMap<String, (u16, Instant)>>>,
+);
 
 impl OriginBackoffCache {
     #[cfg_attr(not(feature = "native"), allow(unused_variables))]
@@ -117,10 +119,7 @@ impl OriginBackoffCache {
         #[cfg(not(feature = "native"))]
         {
             let now = Instant::now();
-            self.0
-                .read()
-                .get(origin)
-                .and_then(|(s, exp)| if now < *exp { Some(*s) } else { None })
+            self.0.read().get(origin).and_then(|(s, exp)| if now < *exp { Some(*s) } else { None })
         }
     }
 

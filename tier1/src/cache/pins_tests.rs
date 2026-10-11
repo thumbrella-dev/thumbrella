@@ -43,10 +43,7 @@ fn pin_identifiers_have_unique_kind_letters_and_twelve_url_safe_hash_characters(
     ];
     let secret = PinSecret::from_bytes(vec![0x0b; 32]).unwrap();
     let other = PinSecret::from_bytes(vec![0x0c; 32]).unwrap();
-    assert_eq!(
-        secret.candidate(FileKind::Image, "https://example.com/image.jpg", 0),
-        "ilWcYW3cK572k"
-    );
+    assert_eq!(secret.candidate(FileKind::Image, "https://example.com/image.jpg", 0), "ilWcYW3cK572k");
     let mut letters = std::collections::HashSet::new();
     for kind in kinds {
         assert!(letters.insert(kind_letter(kind)));
@@ -58,13 +55,7 @@ fn pin_identifiers_have_unique_kind_letters_and_twelve_url_safe_hash_characters(
         assert_ne!(id, secret.candidate(kind, "https://example.com/image.jpg", 1));
     }
     for invalid in [
-        "",
-        "i",
-        "x123456789012",
-        "i12345678901/",
-        "i12345678901=",
-        "i1234567890123",
-        "i💡💡💡",
+        "", "i", "x123456789012", "i12345678901/", "i12345678901=", "i1234567890123", "i💡💡💡",
     ] {
         assert!(!valid_pin(invalid));
     }
@@ -135,9 +126,7 @@ async fn collisions_are_retried_and_never_replace_the_existing_thumbnail() {
         let second = result(vec![2]);
         let now = unix_now_secs();
         backend.put("first".into(), first.media.clone().unwrap(), 0, now + 60, 60).await;
-        backend
-            .put("second".into(), second.media.clone().unwrap(), 0, now + 60, 60)
-            .await;
+        backend.put("second".into(), second.media.clone().unwrap(), 0, now + 60, 60).await;
         let collision = backend.pin_candidate(FileKind::Image, "second", 0).unwrap();
         assert_eq!(backend.claim_pin(&collision, "first", 60).await.unwrap(), PinClaim::Claimed);
         assert_eq!(backend.claim_pin(&collision, "second", 60).await.unwrap(), PinClaim::Conflict);
@@ -161,12 +150,8 @@ async fn collisions_are_retried_and_never_replace_the_existing_thumbnail() {
 async fn concurrent_claims_have_exactly_one_owner() {
     for backend in backends().into_iter().take(2) {
         let now = unix_now_secs();
-        backend
-            .put("first".into(), result(vec![1]).media.unwrap(), 0, now + 60, 60)
-            .await;
-        backend
-            .put("second".into(), result(vec![2]).media.unwrap(), 0, now + 60, 60)
-            .await;
+        backend.put("first".into(), result(vec![1]).media.unwrap(), 0, now + 60, 60).await;
+        backend.put("second".into(), result(vec![2]).media.unwrap(), 0, now + 60, 60).await;
         let first = {
             let backend = backend.clone();
             tokio::spawn(async move { backend.claim_pin("i123456789012", "first", 60).await.unwrap() })
@@ -188,10 +173,7 @@ async fn expired_pins_are_misses_even_while_the_cache_entry_is_live() {
         backend
             .put("source".into(), result(vec![1]).media.unwrap(), 0, unix_now_secs() + 60, 1)
             .await;
-        assert_eq!(
-            backend.claim_pin("i123456789012", "source", 1).await.unwrap(),
-            PinClaim::Claimed
-        );
+        assert_eq!(backend.claim_pin("i123456789012", "source", 1).await.unwrap(), PinClaim::Claimed);
     }
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     for backend in backends {
@@ -205,10 +187,7 @@ async fn absent_entries_and_disabled_pins_return_none_while_placeholders_get_unt
     for backend in backends() {
         let store = CacheStore::backend_only(backend.clone());
         let mut result = result(vec![1]);
-        assert_eq!(
-            backend.claim_pin("i123456789012", "absent", 60).await.unwrap(),
-            PinClaim::Missing
-        );
+        assert_eq!(backend.claim_pin("i123456789012", "absent", 60).await.unwrap(), PinClaim::Missing);
         let fresh = ThumbResult {
             source: Some(ResultSource::NotModified),
             media: Some(ThumbMedia {
@@ -287,8 +266,7 @@ async fn chain_pins_restore_a_missing_cold_entry_and_survive_a_new_memory_front(
     let hot = Arc::new(memory::MemoryCacheBackend::with_max_entries(100).unwrap());
     let cold = Arc::new(sqlite::SqliteCacheBackend::open(":memory:").unwrap());
     let result = result(vec![1, 2]);
-    hot.put("source".into(), result.media.clone().unwrap(), 0, unix_now_secs() + 60, 0)
-        .await;
+    hot.put("source".into(), result.media.clone().unwrap(), 0, unix_now_secs() + 60, 0).await;
     let chain = Arc::new(chain::ChainCacheBackend::new(vec![hot, cold.clone()]));
     let store = CacheStore::backend_only(chain);
     let pin = store.pin_result("source", &result, 60).await.unwrap().unwrap();

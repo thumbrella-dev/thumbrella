@@ -12,14 +12,17 @@
 //! - `mem:200mb`   - max 200 MB
 //! - `mem:2gb`     - max 2 GB
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::collections::HashMap;
 
 use crate::after::DeferredFuture;
 use crate::cache::{CacheBackend, CacheEntry, unix_now_secs};
-use crate::cache::{PinFuture, pins::{PinClaim, PinSecret}};
+use crate::cache::{
+    PinFuture,
+    pins::{PinClaim, PinSecret},
+};
 use parking_lot::Mutex;
 
 pub struct MemoryCacheBackend {
@@ -30,7 +33,8 @@ pub struct MemoryCacheBackend {
 
 impl MemoryCacheBackend {
     pub fn with_max_bytes(max_bytes: u64) -> Result<Self, String> {
-        let pin_secret = PinSecret::generate().map_err(|e| format!("cannot generate pin secret: {e}"))?;
+        let pin_secret =
+            PinSecret::generate().map_err(|e| format!("cannot generate pin secret: {e}"))?;
         let max_bytes = max_bytes.max(1024 * 1024);
         let cap_hint = (max_bytes / 512).min(100_000);
         let cache = moka::sync::Cache::builder()
@@ -44,14 +48,26 @@ impl MemoryCacheBackend {
                 size.min(u32::MAX as usize) as u32
             })
             .build();
-        Ok(Self { cache: Arc::new(Mutex::new(cache)), pins: Default::default(), pin_secret })
+        Ok(Self {
+            cache: Arc::new(Mutex::new(cache)),
+            pins: Default::default(),
+            pin_secret,
+        })
     }
 
     pub fn with_max_entries(max_entries: u64) -> Result<Self, String> {
-        let pin_secret = PinSecret::generate().map_err(|e| format!("cannot generate pin secret: {e}"))?;
+        let pin_secret =
+            PinSecret::generate().map_err(|e| format!("cannot generate pin secret: {e}"))?;
         let max_entries = max_entries.max(10);
-        let cache = moka::sync::Cache::builder().support_invalidation_closures().max_capacity(max_entries).build();
-        Ok(Self { cache: Arc::new(Mutex::new(cache)), pins: Default::default(), pin_secret })
+        let cache = moka::sync::Cache::builder()
+            .support_invalidation_closures()
+            .max_capacity(max_entries)
+            .build();
+        Ok(Self {
+            cache: Arc::new(Mutex::new(cache)),
+            pins: Default::default(),
+            pin_secret,
+        })
     }
 
     pub fn default_cache() -> Result<Self, String> {
@@ -77,7 +93,12 @@ impl CacheBackend for MemoryCacheBackend {
         "memory"
     }
 
-    fn pin_candidate(&self, kind: crate::media::FileKind, key: &str, attempt: u32) -> Result<String, String> {
+    fn pin_candidate(
+        &self,
+        kind: crate::media::FileKind,
+        key: &str,
+        attempt: u32,
+    ) -> Result<String, String> {
         Ok(self.pin_secret.candidate(kind, key, attempt))
     }
 
@@ -100,23 +121,37 @@ impl CacheBackend for MemoryCacheBackend {
         })
     }
 
-    fn pin_data<'a>(&'a self, id: &'a str) -> PinFuture<'a, Option<crate::http_cache::PinnedThumbnail>> {
+    fn pin_data<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> PinFuture<'a, Option<crate::http_cache::PinnedThumbnail>> {
         Box::pin(async move {
             let cache = self.cache.lock();
             let pins = self.pins.lock();
-            Ok(pins.get(id).and_then(|key| cache.get(key))
+            Ok(pins
+                .get(id)
+                .and_then(|key| cache.get(key))
                 .filter(|entry| entry.pin_until > unix_now_secs())
                 .map(|entry| crate::http_cache::PinnedThumbnail {
-                    bytes: entry.media.thumbnail, cache: entry.media.cache, until: entry.pin_until,
+                    bytes: entry.media.thumbnail,
+                    cache: entry.media.cache,
+                    until: entry.pin_until,
                 }))
         })
     }
 
-    fn get_entry<'a>(&'a self, key: &'a str, pin_ttl: u64) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + Send + 'a>> {
+    fn get_entry<'a>(
+        &'a self,
+        key: &'a str,
+        pin_ttl: u64,
+    ) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + Send + 'a>> {
         Box::pin(async move { self.lookup(key, false, pin_ttl) })
     }
 
-    fn get_pin_entry<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + Send + 'a>> {
+    fn get_pin_entry<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + Send + 'a>> {
         Box::pin(async move { self.lookup(key, true, 0) })
     }
 
@@ -154,7 +189,14 @@ impl CacheBackend for MemoryCacheBackend {
         })
     }
 
-    fn put(&self, key: String, media: crate::result::ThumbMedia, cost: u8, cache_until: u64, pin_ttl: u64) -> DeferredFuture {
+    fn put(
+        &self,
+        key: String,
+        media: crate::result::ThumbMedia,
+        cost: u8,
+        cache_until: u64,
+        pin_ttl: u64,
+    ) -> DeferredFuture {
         let cache = Arc::clone(&self.cache);
         Box::pin(async move {
             let now = unix_now_secs();
@@ -167,7 +209,8 @@ impl CacheBackend for MemoryCacheBackend {
                 cache.invalidate(&key);
                 return;
             }
-            cache.invalidate_entries_if(move |_, entry| entry.retain_until() <= now)
+            cache
+                .invalidate_entries_if(move |_, entry| entry.retain_until() <= now)
                 .expect("memory cache invalidation is enabled");
             cache.insert(key, entry);
         })
@@ -216,10 +259,9 @@ pub fn parse_mem_size(fragment: &str) -> Result<Option<(u64, &str)>, String> {
         return Ok(Some(((kb * 1024.0) as u64, "bytes")));
     }
 
-    let count: u64 = spec
-        .trim()
-        .parse()
-        .map_err(|_| format!("invalid size spec: '{spec}' - expected a number, or number+unit (mb/gb/kb)"))?;
+    let count: u64 = spec.trim().parse().map_err(|_| {
+        format!("invalid size spec: '{spec}' - expected a number, or number+unit (mb/gb/kb)")
+    })?;
     if count < 10 {
         return Err(format!("entry count must be at least 10, got {count}"));
     }

@@ -200,7 +200,10 @@ impl HandoffInflight {
     ///                       then call [`complete`](Self::complete).
     /// Returns `Some(rx)` → caller is a **joiner**; `.await rx` to receive
     ///                       the shared result once the leader finishes.
-    pub fn try_lead(&self, key: &str) -> Option<oneshot::Receiver<Arc<Result<HandoffResponse, String>>>> {
+    pub fn try_lead(
+        &self,
+        key: &str,
+    ) -> Option<oneshot::Receiver<Arc<Result<HandoffResponse, String>>>> {
         let mut map = self.0.lock();
         if map.contains_key(key) {
             let (tx, rx) = oneshot::channel();

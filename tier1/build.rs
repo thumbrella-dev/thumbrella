@@ -49,8 +49,8 @@ fn main() {
     }
 
     let kinds = [
-        "image", "video", "audio", "vector", "document", "geometry", "archive", "text", "binary", "unknown",
-        "failed",
+        "image", "video", "audio", "vector", "document", "geometry", "archive", "text", "binary",
+        "unknown", "failed",
     ];
     let mut source = String::from("static PLACEHOLDER_ASSETS: [PlaceholderAsset; 11] = [\n");
     for kind in kinds {
@@ -58,10 +58,7 @@ fn main() {
         println!("cargo:rerun-if-changed={}", path.display());
         let bytes =
             std::fs::read(&path).unwrap_or_else(|e| panic!("read placeholder {}: {e}", path.display()));
-        let hash = Sha256::digest(&bytes)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
+        let hash = Sha256::digest(&bytes).iter().map(|byte| format!("{byte:02x}")).collect::<String>();
         let etag = format!("\"{hash}\"");
         source.push_str(&format!(
             "    PlaceholderAsset {{ bytes: placeholders::{}, etag: {etag:?} }},\n",

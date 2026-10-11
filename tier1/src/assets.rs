@@ -120,12 +120,7 @@ mod tests {
         }
         assert!(asset.matches_if_none_match(["\"other\"", asset.etag]));
         for value in [
-            "",
-            "\"other\"",
-            "W/\"other\"",
-            "invalid",
-            "\"unterminated",
-            "\"other, W/\"",
+            "", "\"other\"", "W/\"other\"", "invalid", "\"unterminated", "\"other, W/\"",
             "*, \"other\"",
         ] {
             assert!(!asset.matches_if_none_match([value]), "{value}");

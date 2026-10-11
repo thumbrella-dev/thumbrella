@@ -1,10 +1,10 @@
-max_width = 110
+max_width = 104
 use_small_heuristics = "Off"
-
-fn_call_width = 80
-attr_fn_like_width = 80
+fn_call_width = 90
+attr_fn_like_width = 90
 struct_lit_width = 24
 struct_variant_width = 35
-array_width = 80
-chain_width = 80
+array_width = 60
+short_array_element_width_threshold = 20
+chain_width = 90
 single_line_if_else_max_width = 80

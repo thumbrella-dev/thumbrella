@@ -160,11 +160,15 @@ mod tests {
 
     #[test]
     fn invalid_or_unresolved_expansions_are_errors() {
-        for input in ["$MISSING/file", "${MISSING}", "${", "${}", "$EMPTY", "", "\0"] {
+        for input in [
+            "$MISSING/file", "${MISSING}", "${", "${}", "$EMPTY", "", "\0",
+        ] {
             assert!(resolve(input, false).is_err(), "{input:?}");
         }
         assert!(resolve("%MISSING%/file", true).is_err());
-        assert!(expand_with("~/file", false, || Err("missing home".into()), |_| Ok(String::new())).is_err());
+        assert!(
+            expand_with("~/file", false, || Err("missing home".into()), |_| Ok(String::new())).is_err()
+        );
         assert!(expand_with("~/file", false, || Ok(String::new()), |_| Ok(String::new())).is_err());
     }
 }

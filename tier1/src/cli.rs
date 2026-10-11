@@ -167,7 +167,10 @@ where
 
     let cli = Cli::parse();
 
-    let runtime = if !matches!(cli.command, Command::Check { .. } | Command::Formats { .. } | Command::Service { .. }) {
+    let runtime = if !matches!(
+        cli.command,
+        Command::Check { .. } | Command::Formats { .. } | Command::Service { .. }
+    ) {
         let cfg = crate::config::AppConfig::from_env();
 
         // Fail fast on handshake values that look like auth tokens.
@@ -190,12 +193,8 @@ where
 
     match cli.command {
         Command::Serve => run_server(runtime.unwrap()).await,
-        Command::Thumb { input, output } => {
-            run_thumb(input, output, runtime.unwrap()).await
-        }
-        Command::Result { urls, cache, raw } => {
-            run_result(urls, cache, raw, runtime.unwrap()).await
-        }
+        Command::Thumb { input, output } => run_thumb(input, output, runtime.unwrap()).await,
+        Command::Result { urls, cache, raw } => run_result(urls, cache, raw, runtime.unwrap()).await,
         Command::Check { json } => run_check(json, tier).await,
         Command::Formats { json } => run_formats(json),
         Command::Service { alias, write } => run_service(alias, write),
@@ -209,12 +208,16 @@ where
 const HTTP_CONCURRENCY_LIMIT: usize = 30;
 const HTTP_BUFFER_CAPACITY: usize = 300;
 
-fn buffered_requests(app: axum::Router) -> impl tower::Service<
+fn buffered_requests(
+    app: axum::Router,
+) -> impl tower::Service<
     axum::extract::Request,
     Response = axum::response::Response,
     Error = axum::BoxError,
     Future: Send,
-> + Clone + Send + 'static {
+> + Clone
++ Send
++ 'static {
     // Wrap the complete router once; clones share one buffer and concurrency
     // limiter rather than creating independent limits per route or connection.
     tower::ServiceBuilder::new()
@@ -224,13 +227,21 @@ fn buffered_requests(app: axum::Router) -> impl tower::Service<
 }
 
 async fn request_buffer_error(error: axum::BoxError) -> axum::response::Response {
-    use axum::{http::{StatusCode, header}, response::IntoResponse, Json};
+    use axum::{
+        Json,
+        http::{StatusCode, header},
+        response::IntoResponse,
+    };
     tracing::error!("HTTP request buffer failed: {error}");
     (
         StatusCode::SERVICE_UNAVAILABLE,
-        [(header::CACHE_CONTROL, "no-store"), (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+        [
+            (header::CACHE_CONTROL, "no-store"),
+            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+        ],
         Json(serde_json::json!({ "error": "server request queue unavailable" })),
-    ).into_response()
+    )
+        .into_response()
 }
 
 async fn run_server(runtime: Arc<Runtime>) {
@@ -256,11 +267,13 @@ async fn run_server(runtime: Arc<Runtime>) {
                 .route("/handoff", post(routes::handoff))
                 .route(
                     "/batch",
-                    post(routes::batch)
-                        .layer(DefaultBodyLimit::max(routes::BATCH_MAX_BODY_BYTES)),
+                    post(routes::batch).layer(DefaultBodyLimit::max(routes::BATCH_MAX_BODY_BYTES)),
                 )
                 .fallback(routes::not_found)
-                .layer(axum::middleware::from_fn_with_state(runtime.clone(), routes::require_handshake)),
+                .layer(axum::middleware::from_fn_with_state(
+                    runtime.clone(),
+                    routes::require_handshake,
+                )),
         )
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(runtime);
@@ -367,9 +380,15 @@ async fn run_server(runtime: Arc<Runtime>) {
 #[cfg(test)]
 mod http_limit_tests {
     use super::*;
-    use axum::{body::Body, extract::State, http::{Request, StatusCode}, routing::get, Router};
+    use axum::{
+        Router,
+        body::Body,
+        extract::State,
+        http::{Request, StatusCode},
+        routing::get,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::sync::{mpsc, Semaphore};
+    use tokio::sync::{Semaphore, mpsc};
     use tower::{Service, ServiceExt};
 
     #[derive(Clone)]
@@ -401,19 +420,26 @@ mod http_limit_tests {
     async fn global_limit_is_shared_across_routes_and_clones_and_buffer_applies_backpressure() {
         let (started, mut observed) = mpsc::unbounded_channel();
         let state = TestState {
-            active: Arc::new(AtomicUsize::new(0)), peak: Arc::new(AtomicUsize::new(0)),
-            started, finish: Arc::new(Semaphore::new(0)),
+            active: Arc::new(AtomicUsize::new(0)),
+            peak: Arc::new(AtomicUsize::new(0)),
+            started,
+            finish: Arc::new(Semaphore::new(0)),
         };
-        let app = Router::new().route("/first", get(blocked)).route("/second", get(blocked))
+        let app = Router::new()
+            .route("/first", get(blocked))
+            .route("/second", get(blocked))
             .with_state(state.clone());
         let mut service = buffered_requests(app);
         let mut requests = Vec::new();
         for index in 0..HTTP_CONCURRENCY_LIMIT {
             let uri = if index % 2 == 0 { "/first" } else { "/second" };
-            requests.push(tokio::spawn(service.clone().oneshot(
-                Request::builder().uri(uri).body(Body::empty()).unwrap(),
-            )));
-            tokio::time::timeout(std::time::Duration::from_secs(2), observed.recv()).await.unwrap().unwrap();
+            requests.push(tokio::spawn(
+                service.clone().oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap()),
+            ));
+            tokio::time::timeout(std::time::Duration::from_secs(2), observed.recv())
+                .await
+                .unwrap()
+                .unwrap();
         }
         assert_eq!(state.active.load(Ordering::SeqCst), 30);
 
@@ -423,17 +449,24 @@ mod http_limit_tests {
         tokio::task::yield_now().await;
         for _ in 0..HTTP_BUFFER_CAPACITY {
             let ready = tokio::time::timeout(std::time::Duration::from_secs(2), service.ready())
-                .await.unwrap().unwrap();
+                .await
+                .unwrap()
+                .unwrap();
             requests.push(tokio::spawn(ready.call(request())));
         }
-        assert!(tokio::time::timeout(std::time::Duration::from_millis(30), service.ready()).await.is_err());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), service.ready()).await.is_err()
+        );
         assert!(observed.try_recv().is_err());
         assert_eq!(state.active.load(Ordering::SeqCst), 30);
 
         state.finish.add_permits(requests.len());
         for request in requests {
             let response = tokio::time::timeout(std::time::Duration::from_secs(5), request)
-                .await.unwrap().unwrap().unwrap();
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
         }
         assert_eq!(state.peak.load(Ordering::SeqCst), 30);
@@ -445,15 +478,21 @@ mod http_limit_tests {
     async fn cancelling_active_and_queued_requests_does_not_leak_capacity() {
         let (started, mut observed) = mpsc::unbounded_channel();
         let state = TestState {
-            active: Arc::new(AtomicUsize::new(0)), peak: Arc::new(AtomicUsize::new(0)),
-            started, finish: Arc::new(Semaphore::new(0)),
+            active: Arc::new(AtomicUsize::new(0)),
+            peak: Arc::new(AtomicUsize::new(0)),
+            started,
+            finish: Arc::new(Semaphore::new(0)),
         };
-        let service = buffered_requests(Router::new().route("/", get(blocked)).with_state(state.clone()));
+        let service =
+            buffered_requests(Router::new().route("/", get(blocked)).with_state(state.clone()));
         let request = || Request::new(Body::empty());
         let mut active = Vec::new();
         for _ in 0..HTTP_CONCURRENCY_LIMIT {
             active.push(tokio::spawn(service.clone().oneshot(request())));
-            tokio::time::timeout(std::time::Duration::from_secs(2), observed.recv()).await.unwrap().unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(2), observed.recv())
+                .await
+                .unwrap()
+                .unwrap();
         }
         let queued = tokio::spawn(service.clone().oneshot(request()));
         tokio::task::yield_now().await;
@@ -465,12 +504,18 @@ mod http_limit_tests {
         assert!(cancelled.await.unwrap_err().is_cancelled());
 
         active.push(tokio::spawn(service.clone().oneshot(request())));
-        tokio::time::timeout(std::time::Duration::from_secs(2), observed.recv()).await.unwrap().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), observed.recv())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(state.active.load(Ordering::SeqCst), HTTP_CONCURRENCY_LIMIT);
         state.finish.add_permits(HTTP_CONCURRENCY_LIMIT);
         for request in active {
             let response = tokio::time::timeout(std::time::Duration::from_secs(2), request)
-                .await.unwrap().unwrap().unwrap();
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
         }
         assert_eq!(state.active.load(Ordering::SeqCst), 0);
@@ -544,12 +589,7 @@ pub fn promote_url(raw: &str) -> String {
     }
 }
 
-async fn run_result(
-    urls: Vec<String>,
-    cache_str: Option<String>,
-    raw: bool,
-    runtime: Arc<Runtime>,
-) {
+async fn run_result(urls: Vec<String>, cache_str: Option<String>, raw: bool, runtime: Arc<Runtime>) {
     use crate::source::CacheHints;
     use crate::{ThumbCook, cook::InputSpec};
     use futures::stream::{FuturesUnordered, StreamExt};
@@ -706,7 +746,9 @@ async fn run_check(json: bool, tier: u8) {
             && !matches!(report.trace_validation.status, check::ValidationStatus::Error)
             && !matches!(report.handshake_validation.status, check::ValidationStatus::Error)
             && report.port_available
-            && report.cache_file_check.as_ref()
+            && report
+                .cache_file_check
+                .as_ref()
                 .and_then(|fc| fc.sqlite_validation.as_ref())
                 .is_none_or(|validation| validation.status != check::ValidationStatus::Error);
     }
@@ -747,10 +789,8 @@ async fn check_handoff_health(url: &str, auth_header: &str) -> Result<(), String
         return Err(format!("health returned HTTP {}", resp.status().as_u16()));
     }
 
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("health response parse error: {e}"))?;
+    let body: serde_json::Value =
+        resp.json().await.map_err(|e| format!("health response parse error: {e}"))?;
 
     match body.get("token").and_then(|v| v.as_bool()) {
         Some(true) => Ok(()),
@@ -777,14 +817,15 @@ fn run_formats(json: bool) {
     let ux = crate::ux::get();
 
     // Determine tier availability for the availability column.
-    let tier2_available =
-        cfg.tier2.url.is_some() || crate::check::TIER2_BUILTIN.load(std::sync::atomic::Ordering::Acquire);
-    let tier3_available =
-        cfg.tier3.url.is_some() || crate::check::TIER3_BUILTIN.load(std::sync::atomic::Ordering::Acquire);
+    let tier2_available = cfg.tier2.url.is_some()
+        || crate::check::TIER2_BUILTIN.load(std::sync::atomic::Ordering::Acquire);
+    let tier3_available = cfg.tier3.url.is_some()
+        || crate::check::TIER3_BUILTIN.load(std::sync::atomic::Ordering::Acquire);
 
     // Group entries by FileKind, picking the lowest tier for each extension
     // (some extensions appear under multiple tiers).
-    let mut by_kind: BTreeMap<FileKind, BTreeMap<&str, &crate::dispatch::FormatEntry>> = BTreeMap::new();
+    let mut by_kind: BTreeMap<FileKind, BTreeMap<&str, &crate::dispatch::FormatEntry>> =
+        BTreeMap::new();
     for entry in manifest {
         let exts = by_kind.entry(entry.kind).or_default();
         // Keep the lowest-tier entry for each extension.
@@ -1016,10 +1057,8 @@ const SERVICE_FILES: &[ServiceFile] = &[
 fn service_body(sf: &ServiceFile) -> String {
     let body = sf.body.to_string();
     match sf.alias {
-        "compose" => body.replace(
-            "thumbrella/server:latest",
-            &format!("thumbrella/server:{}", crate::TBR_VERSION),
-        ),
+        "compose" => body
+            .replace("thumbrella/server:latest", &format!("thumbrella/server:{}", crate::TBR_VERSION)),
         "systemd" => match std::env::current_exe() {
             Ok(exe) if exe.is_absolute() => {
                 body.replace("/usr/local/bin/thumbrella", &exe.to_string_lossy())
@@ -1035,7 +1074,9 @@ fn run_service(alias: Option<String>, write: Option<String>) {
 
     let Some(alias) = alias else {
         println!("{}", ux.bold("Thumbrella service config files"));
-        println!("Print one of the service files to show or write a service configuration with instructions.");
+        println!(
+            "Print one of the service files to show or write a service configuration with instructions."
+        );
         println!();
         for sf in SERVICE_FILES {
             // Pad manually - format specs count ANSI escape bytes, which
@@ -1044,21 +1085,14 @@ fn run_service(alias: Option<String>, write: Option<String>) {
             println!("  {}{} {}", ux.bold(sf.alias), pad, ux.dim(sf.desc));
         }
         println!();
-        println!(
-            "  {} thumbrella service {}",
-            ux.dim("Print one:"),
-            ux.bold("<alias>")
-        );
+        println!("  {} thumbrella service {}", ux.dim("Print one:"), ux.bold("<alias>"));
         println!(
             "  {} thumbrella service {} {}",
             ux.dim("Write a file:"),
             ux.bold("<alias>"),
             ux.bold("--write [path]")
         );
-        println!(
-            "  {} https://thumbrella.dev/docs/server/",
-            ux.dim("Server Docs:")
-        );
+        println!("  {} https://thumbrella.dev/docs/server/", ux.dim("Server Docs:"));
         return;
     };
 

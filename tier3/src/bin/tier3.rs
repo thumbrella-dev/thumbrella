@@ -35,8 +35,8 @@ async fn main() {
         // USDZ is NOT in this list - it is handled separately via ZIP extraction.
         extensions: &[
             "3ds", "brep", "dae", "dxf", "e", "exo", "ex2", "fbx", "glb", "gltf", "gml", "iges", "igs",
-            "obj", "off", "p21", "ply", "pts", "step", "stl", "stp", "stpnc", "vtk", "vtm", "vti", "vtp",
-            "vtr", "vts", "vtu", "vrml", "wrl", "210",
+            "obj", "off", "p21", "ply", "pts", "step", "stl", "stp", "stpnc", "vtk", "vtm", "vti",
+            "vtp", "vtr", "vts", "vtu", "vrml", "wrl", "210",
         ],
         description: "3D geometry renderer (F3D)",
     });
@@ -165,11 +165,8 @@ async fn main() {
 
 /// Representative headline format per external tool that tier 3 needs.
 /// Used only for the startup cloud nudge.
-const TOOL_FORMAT_EXAMPLES: &[(&str, &str)] = &[
-    ("oiiotool", "exr"),
-    ("f3d", "gltf"),
-    ("pdftoppm", "pdf"),
-];
+const TOOL_FORMAT_EXAMPLES: &[(&str, &str)] =
+    &[("oiiotool", "exr"), ("f3d", "gltf"), ("pdftoppm", "pdf")];
 
 /// Build the one-line cloud nudge: at most three of the missing tools' formats
 /// plus `and more` when there are more.  `None` when every tool is present.
@@ -184,17 +181,11 @@ fn missing_tools_tip(env: &tier3::env_check::EnvReport) -> Option<String> {
     }
 
     let shown = &missing[..missing.len().min(3)];
-    let mut list = shown
-        .iter()
-        .map(|ext| format!(".{ext}"))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let mut list = shown.iter().map(|ext| format!(".{ext}")).collect::<Vec<_>>().join(" ");
     if missing.len() > shown.len() {
         list.push_str(" and more");
     }
-    Some(format!(
-        "install external tools or use TBR_TIER3 to enable {list}"
-    ))
+    Some(format!("install external tools or use TBR_TIER3 to enable {list}"))
 }
 
 /// Build tier-3 diagnostic sections from the format manifest and env report.
@@ -236,7 +227,8 @@ fn register_tier3_check(env: &tier3::env_check::EnvReport) {
                         // Check both before reporting as available.
                         if h.name == "usdz" {
                             let f3d_ok = env.backends.get("f3d").map(|b| b.available).unwrap_or(false);
-                            let py_ok = env.backends.get("python3").map(|b| b.available).unwrap_or(false);
+                            let py_ok =
+                                env.backends.get("python3").map(|b| b.available).unwrap_or(false);
                             let usd_ok = env
                                 .backends
                                 .get("python3")
@@ -258,7 +250,8 @@ fn register_tier3_check(env: &tier3::env_check::EnvReport) {
                                 ("missing".into(), format!("requires: {}", missing.join(", ")))
                             }
                         } else {
-                            let available = env.backends.get(h.name).map(|b| b.available).unwrap_or(false);
+                            let available =
+                                env.backends.get(h.name).map(|b| b.available).unwrap_or(false);
                             if available {
                                 ("available".into(), h.command.to_string())
                             } else {
@@ -288,8 +281,9 @@ fn register_tier3_check(env: &tier3::env_check::EnvReport) {
 
     // General tools section - backends not tied to specific extensions.
     {
-        let general: &[&str] =
-            &["f3d", "python3", "ffmpeg_cli", "magick", "oiiotool", "display_server"];
+        let general: &[&str] = &[
+            "f3d", "python3", "ffmpeg_cli", "magick", "oiiotool", "display_server",
+        ];
         let entries: Vec<tier1::check::CheckEntry> = general
             .iter()
             .filter_map(|name| {

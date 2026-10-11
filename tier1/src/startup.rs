@@ -14,8 +14,10 @@ use image;
 /// axum listener is bound.
 pub async fn startup(cfg: &AppConfig) -> Arc<Runtime> {
     if let Some(error) = &cfg.pin_ttl_error {
-        crate::ux::get().fatal(error,
-            "set TBR_PIN to a whole number of seconds (0 disables pinning), or unset it to use the default");
+        crate::ux::get().fatal(
+            error,
+            "set TBR_PIN to a whole number of seconds (0 disables pinning), or unset it to use the default",
+        );
     }
 
     //  1. HTTP client warmup
@@ -64,9 +66,8 @@ pub async fn startup(cfg: &AppConfig) -> Arc<Runtime> {
     tracing::debug!("startup: complete");
 
     //  5. Background image
-    let background_image = image::load_from_memory(crate::assets::BACKGROUND_PNG)
-        .ok()
-        .map(|img| img.into_rgb8());
+    let background_image =
+        image::load_from_memory(crate::assets::BACKGROUND_PNG).ok().map(|img| img.into_rgb8());
     if background_image.is_some() {
         tracing::debug!("startup: background image loaded");
     } else {

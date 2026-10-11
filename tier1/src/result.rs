@@ -194,9 +194,7 @@ impl ThumbResult {
         Self {
             url,
             status: ResultStatus::BatchLimit,
-            message: Some(format!(
-                "batch limited to {limit} items per request"
-            )),
+            message: Some(format!("batch limited to {limit} items per request")),
             source: None,
             pin: None,
             duration: 0.0,

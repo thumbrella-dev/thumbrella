@@ -211,10 +211,8 @@ impl<S: HttpStream> HttpBuffer<S> {
         let headers = stream.response_headers();
 
         let content_length = headers.get("content-length").and_then(|v| v.parse().ok());
-        let accepts_ranges = headers
-            .get("accept-ranges")
-            .map(|v| v.eq_ignore_ascii_case("bytes"))
-            .unwrap_or(false);
+        let accepts_ranges =
+            headers.get("accept-ranges").map(|v| v.eq_ignore_ascii_case("bytes")).unwrap_or(false);
 
         Ok(Self {
             url: final_url,
@@ -929,9 +927,7 @@ impl<S: HttpStream> SyncHttpReader<S> {
 #[cfg(feature = "native")]
 impl<S: HttpStream> std::io::Read for SyncHttpReader<S> {
     fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
-        self.handle
-            .block_on(self.buf.read(out))
-            .map_err(|e| std::io::Error::other(e.to_string()))
+        self.handle.block_on(self.buf.read(out)).map_err(|e| std::io::Error::other(e.to_string()))
     }
 }
 

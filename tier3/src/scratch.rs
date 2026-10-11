@@ -77,9 +77,7 @@ impl ScratchArena {
         use tempfile::Builder as TmpBuilder;
         let root = scratch_root()?;
         std::fs::create_dir_all(&root)?;
-        let dir = TmpBuilder::new()
-            .prefix("thumbrella-tier3-")
-            .tempdir_in(&root)?;
+        let dir = TmpBuilder::new().prefix("thumbrella-tier3-").tempdir_in(&root)?;
         Ok(Self {
             dir,
             max_bytes,
@@ -93,9 +91,7 @@ impl ScratchArena {
     /// [`scratch_root`].  `max_bytes` of 0 disables the limit.
     pub fn new_in(root: &Path, max_bytes: u64) -> io::Result<Self> {
         use tempfile::Builder as TmpBuilder;
-        let dir = TmpBuilder::new()
-            .prefix("thumbrella-tier3-")
-            .tempdir_in(root)?;
+        let dir = TmpBuilder::new().prefix("thumbrella-tier3-").tempdir_in(root)?;
         Ok(Self {
             dir,
             max_bytes,
@@ -147,13 +143,7 @@ impl ScratchArena {
         }
 
         // Build a collision-free file name.
-        let stem = url
-            .rsplit('/')
-            .next()
-            .unwrap_or("download")
-            .split('?')
-            .next()
-            .unwrap_or("download");
+        let stem = url.rsplit('/').next().unwrap_or("download").split('?').next().unwrap_or("download");
         let suffix: String = std::iter::repeat_with(fast_random_char).take(8).collect();
         let file_name = if stem.is_empty() {
             format!("dl_{suffix}")
@@ -169,9 +159,7 @@ impl ScratchArena {
         use futures::StreamExt;
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(ArenaError::Fetch)?;
-            tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
-                .await
-                .map_err(ArenaError::Io)?;
+            tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await.map_err(ArenaError::Io)?;
             written += chunk.len() as u64;
 
             // Check limit during streaming.

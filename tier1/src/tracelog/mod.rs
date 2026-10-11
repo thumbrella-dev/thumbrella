@@ -88,7 +88,8 @@ impl TraceStore {
 pub fn open_from_dsn(dsn: &str) -> Result<Vec<Arc<dyn TraceBackend>>, String> {
     if let Some(path) = dsn.strip_prefix("ndjson:") {
         let path = crate::config_path::expand(path).map_err(|e| format!("ndjson trace path: {e}"))?;
-        let backend = ndjson::NdjsonTraceBackend::open(&path).map_err(|e| format!("ndjson trace: {e}"))?;
+        let backend =
+            ndjson::NdjsonTraceBackend::open(&path).map_err(|e| format!("ndjson trace: {e}"))?;
         return Ok(vec![Arc::new(backend)]);
     }
     Err(format!("unsupported trace DSN scheme: {dsn}"))
@@ -104,12 +105,11 @@ pub fn validate_dsn(dsn: &str) -> (crate::check::Validation, Option<crate::check
     if let Some(path) = dsn.strip_prefix("ndjson:") {
         let path = match crate::config_path::expand(path) {
             Ok(path) => path,
-            Err(error) => return (crate::check::Validation::error(format!("ndjson trace path: {error}")), None),
+            Err(error) => {
+                return (crate::check::Validation::error(format!("ndjson trace path: {error}")), None);
+            }
         };
-        return (
-            crate::check::Validation::skipped(),
-            Some(ndjson::NdjsonTraceBackend::check(&path)),
-        );
+        return (crate::check::Validation::skipped(), Some(ndjson::NdjsonTraceBackend::check(&path)));
     }
     let scheme = dsn.split(':').next().unwrap_or(dsn);
     (

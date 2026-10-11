@@ -13,7 +13,6 @@
 // python -c "from PIL import Image; Image.open('thumbrella.png').convert('RGBA').resize((256, 256), Image.Resampling.LANCZOS).save('tier3\\thumbrella.ico', sizes=[(s, s) for s in (16, 24, 32, 48, 64, 128, 256)])"
 // ```
 
-
 #[cfg(windows)]
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -35,9 +34,8 @@ fn main() {
     res.set("FileVersion", version);
     res.set("ProductVersion", version);
 
-    let mut parts = version
-        .split(|c: char| c == '.' || c == '-')
-        .map(|p| p.parse::<u64>().unwrap_or(0));
+    let mut parts =
+        version.split(|c: char| c == '.' || c == '-').map(|p| p.parse::<u64>().unwrap_or(0));
     let major = parts.next().unwrap_or(0);
     let minor = parts.next().unwrap_or(0);
     let patch = parts.next().unwrap_or(0);

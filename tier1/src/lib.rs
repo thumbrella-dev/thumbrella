@@ -30,6 +30,7 @@ pub mod dispatch;
 pub mod fetch_guard;
 pub mod handoff;
 pub mod http_buf;
+pub mod http_cache;
 pub mod local_path;
 pub mod media;
 pub mod pipeline;
@@ -39,7 +40,6 @@ pub mod source;
 pub mod spec;
 pub mod tracelog;
 pub mod url_safety;
-pub mod http_cache;
 
 //  Native-only modules
 
@@ -83,7 +83,8 @@ pub use renderer::{
 };
 pub use request::{CallRequest, ThumbInput, ThumbObject};
 pub use result::{
-    CallRecord, CallResponse, RenderHandler, ResultSource, ResultStatus, ThumbMedia, ThumbResult, ThumbTrace,
+    CallRecord, CallResponse, RenderHandler, ResultSource, ResultStatus, ThumbMedia, ThumbResult,
+    ThumbTrace,
 };
 pub use source::{CacheHints, SourceRef, canonical_url};
 pub use spec::ShortcutLimits;

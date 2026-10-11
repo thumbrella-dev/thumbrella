@@ -10,7 +10,9 @@ fn main() {
             .find_package("ffmpeg")
             .expect("ffmpeg not found in vcpkg tree");
 
-        let ffmpeg_libs = ["avcodec", "avdevice", "avfilter", "avformat", "avutil", "swresample", "swscale"];
+        let ffmpeg_libs = [
+            "avcodec", "avdevice", "avfilter", "avformat", "avutil", "swresample", "swscale",
+        ];
         for name in &ffmpeg_libs {
             println!("cargo:rustc-link-lib=static={}", name);
         }

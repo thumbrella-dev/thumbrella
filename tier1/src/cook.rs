@@ -688,10 +688,7 @@ impl<S: HttpStream> ThumbCook<S> {
         if self.media.kind == Some(FileKind::Geometry) {
             return Value::Object(Default::default());
         }
-        self.media
-            .properties
-            .clone()
-            .unwrap_or_else(|| Value::Object(Default::default()))
+        self.media.properties.clone().unwrap_or_else(|| Value::Object(Default::default()))
     }
 
     /// Materialise the client-facing [`ThumbResult`].  Called once at end of `run()`.
@@ -730,7 +727,8 @@ impl<S: HttpStream> ThumbCook<S> {
                 Some(ResultSource::Render)
             },
             media: Some(ThumbMedia {
-                url: crate::source::canonical_url(&self.input.url).unwrap_or_else(|| self.input.url.clone()),
+                url: crate::source::canonical_url(&self.input.url)
+                    .unwrap_or_else(|| self.input.url.clone()),
                 thumbnail: self.out_thumbnail.clone(),
                 mime: self.media.mime.clone().unwrap_or_default(),
                 file_size: self.media.file_size.unwrap_or(0),
@@ -836,10 +834,7 @@ impl<S: HttpStream> ThumbCook<S> {
             job_renderer: self.render_renderer.clone(),
             message: if self.out_message.is_empty() { None } else { Some(self.out_message.clone()) },
             server: self.runtime.server.clone(),
-            version: self
-                .tel_version_override
-                .clone()
-                .unwrap_or_else(|| self.runtime.version.clone()),
+            version: self.tel_version_override.clone().unwrap_or_else(|| self.runtime.version.clone()),
         }
     }
 
@@ -884,9 +879,9 @@ impl<S: HttpStream> ThumbCook<S> {
             .media
             .as_ref()
             .and_then(|m| if m.placeholder.is_empty() { None } else { Some(m.placeholder.clone()) });
-        self.placeholder_source = res.source.filter(|source| {
-            matches!(source, ResultSource::Placeholder | ResultSource::Fallback)
-        });
+        self.placeholder_source = res
+            .source
+            .filter(|source| matches!(source, ResultSource::Placeholder | ResultSource::Fallback));
         self.out_download_bytes = local_bytes.saturating_add(res.download_size);
 
         if let Some(ref media) = res.media {
@@ -944,12 +939,14 @@ impl<S: HttpStream> ThumbCook<S> {
     {
         self.cache_resolved = true;
 
-        let identity = crate::source::canonical_url(&self.input.url).unwrap_or_else(|| self.input.url.clone());
+        let identity =
+            crate::source::canonical_url(&self.input.url).unwrap_or_else(|| self.input.url.clone());
         let cache_key = self.ctx_cache_key.clone().unwrap_or(identity);
         if !self.ctx_handoff {
             self.src.cache_key = Some(cache_key.clone());
             let debounce_key = self.ctx_debounce_key.as_deref().unwrap_or(&cache_key);
-            let (result, leader) = self.runtime.cache.debounce_lookup(debounce_key, self.input.cache.as_ref()).await;
+            let (result, leader) =
+                self.runtime.cache.debounce_lookup(debounce_key, self.input.cache.as_ref()).await;
             self.debounce_leader = leader;
             if let Some(mut result) = result {
                 if result.source != Some(ResultSource::NotModified) {
@@ -1009,8 +1006,13 @@ impl<S: HttpStream> ThumbCook<S> {
                     let expected_cache = entry.media.cache.clone();
                     self.restore_cached_media(&entry.media, backend);
                     if updated.is_some() {
-                        entry.set_cache(self.src.cache_hints.as_ref().unwrap()
-                            .encode(self.runtime.cache_default_ttl_secs));
+                        entry.set_cache(
+                            self.src
+                                .cache_hints
+                                .as_ref()
+                                .unwrap()
+                                .encode(self.runtime.cache_default_ttl_secs),
+                        );
                         entry.cache_until = self.cache_expires_at();
                         entry.last_accessed_at = crate::cache::unix_now_secs();
                         self.runtime.cache.revalidate(cache_key, entry, expected_cache, after);
@@ -1040,7 +1042,9 @@ impl<S: HttpStream> ThumbCook<S> {
     /// Run the full pipeline and optionally emit intermediate progress snapshots.
     pub async fn run_with_progress(
         mut self,
-        #[allow(unused_mut, unused_variables)] mut on_progress: Option<Box<dyn FnMut(ThumbResult) + Send>>,
+        #[allow(unused_mut, unused_variables)] mut on_progress: Option<
+            Box<dyn FnMut(ThumbResult) + Send>,
+        >,
     ) -> (ThumbResult, ThumbTrace, AfterResponse)
     where
         S: Send + 'static,
@@ -1113,7 +1117,9 @@ impl<S: HttpStream> ThumbCook<S> {
                     } else {
                         self.cache_expires_at()
                     };
-                    self.runtime.cache.store(key, &result, cost, expires, self.default_pin_ttl, &mut after);
+                    self.runtime
+                        .cache
+                        .store(key, &result, cost, expires, self.default_pin_ttl, &mut after);
                 }
                 return self.finish(after).await;
             }
@@ -1198,7 +1204,9 @@ impl<S: HttpStream> ThumbCook<S> {
                         let result = self.to_result();
                         let cost = render_cost_from_secs(self.out_duration);
                         let expires = self.cache_expires_at();
-                        self.runtime.cache.store(key, &result, cost, expires, self.default_pin_ttl, &mut after);
+                        self.runtime
+                            .cache
+                            .store(key, &result, cost, expires, self.default_pin_ttl, &mut after);
                     }
                 }
                 return self.finish(after).await;
@@ -1294,7 +1302,8 @@ impl<S: HttpStream> ThumbCook<S> {
                         }
                         None => {
                             // Leader: perform the handoff, wake joiners.
-                            let result = crate::handoff::post_handoff(url, &target.headers, &payload).await;
+                            let result =
+                                crate::handoff::post_handoff(url, &target.headers, &payload).await;
                             let shared = Arc::new(result);
                             self.runtime.handoff_inflight.complete(&hkey, Arc::clone(&shared));
                             match &*shared {
@@ -1322,7 +1331,9 @@ impl<S: HttpStream> ThumbCook<S> {
                                 let result = self.to_result();
                                 let cost = render_cost_from_secs(self.out_duration);
                                 let expires = self.cache_expires_at();
-                                self.runtime.cache.store(key, &result, cost, expires, self.default_pin_ttl, &mut after);
+                                self.runtime.cache.store(
+                                    key, &result, cost, expires, self.default_pin_ttl, &mut after,
+                                );
                             }
                             return self.finish(after).await;
                         }
@@ -1384,7 +1395,10 @@ impl<S: HttpStream> ThumbCook<S> {
         // Always return a thumbnail.  If the pipeline didn't produce one,
         // fill in the appropriate placeholder JPEG - except for NotModified,
         // where an empty thumbnail tells the caller "use your cached copy".
-        if self.debounce_result.is_none() && self.out_thumbnail.is_empty() && self.status != CookStatus::Fresh {
+        if self.debounce_result.is_none()
+            && self.out_thumbnail.is_empty()
+            && self.status != CookStatus::Fresh
+        {
             if let Some(kind) = self.media.kind {
                 // Kind was identified: use the kind-specific placeholder.
                 // If the pipeline failed at the render step (e.g. unsupported
@@ -1432,7 +1446,9 @@ impl<S: HttpStream> ThumbCook<S> {
             result.pin = None;
         }
         #[cfg(feature = "native")]
-        if self.debounce_result.is_none() && !self.ctx_handoff && self.default_pin_ttl > 0
+        if self.debounce_result.is_none()
+            && !self.ctx_handoff
+            && self.default_pin_ttl > 0
             && result.status == ResultStatus::Success
             && let Some(key) = self.src.cache_key.as_deref()
         {
@@ -1447,7 +1463,8 @@ impl<S: HttpStream> ThumbCook<S> {
                 Err(error) => tracing::warn!("pin creation failed: {error}"),
             }
         }
-        if self.debounce_result.is_none() && !self.ctx_defer_debounce
+        if self.debounce_result.is_none()
+            && !self.ctx_defer_debounce
             && let Some(ref key) = self.src.cache_key
         {
             if self.ctx_handoff {
@@ -1455,7 +1472,9 @@ impl<S: HttpStream> ThumbCook<S> {
             } else if let Some(leader) = self.debounce_leader.take() {
                 leader.complete(&result);
             } else {
-                self.runtime.cache.debounce_store(self.ctx_debounce_key.as_deref().unwrap_or(key), &result);
+                self.runtime
+                    .cache
+                    .debounce_store(self.ctx_debounce_key.as_deref().unwrap_or(key), &result);
             }
         }
         let trace = self.to_trace();
@@ -1552,12 +1571,8 @@ impl<S: HttpStream + Send + 'static> crate::renderer::RenderCook for ThumbCook<S
         // and estimates both arrive here as a "pages" property from the render
         // path; the shortcut paths set `page_edge_thickness` directly.
         if self.media.kind == Some(FileKind::Document) {
-            if let Some(pages) = self
-                .media
-                .properties
-                .as_ref()
-                .and_then(|p| p.get("pages"))
-                .and_then(|v| v.as_u64())
+            if let Some(pages) =
+                self.media.properties.as_ref().and_then(|p| p.get("pages")).and_then(|v| v.as_u64())
             {
                 self.page_edge_thickness = crate::spec::page_edge_thickness(pages as u32);
             }

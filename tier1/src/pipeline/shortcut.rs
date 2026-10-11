@@ -28,7 +28,7 @@ use crate::cook::ThumbCook;
 use crate::http_buf::HttpStream;
 use crate::media::FileKind;
 use crate::result::RenderHandler;
-use crate::spec::{page_edge_thickness, ThumbnailConfig};
+use crate::spec::{ThumbnailConfig, page_edge_thickness};
 
 /// Header bytes needed to locate the embedded thumbnail span.
 ///
@@ -99,10 +99,7 @@ const ODT_META_HEAD_BUDGET: u64 = 16 * 1024;
 /// reconstruct a coarse whole-frame image for most camera/web JPEGs.
 /// 10 KiB is the minimum to ensure we have a complete SOF+SOS header.
 fn progressive_partial_read_bytes(w: Option<u32>, h: Option<u32>) -> usize {
-    let estimated = w
-        .zip(h)
-        .map(|(w, h)| ((w as u64 * h as u64) / 42) as usize)
-        .unwrap_or(256 * 1024);
+    let estimated = w.zip(h).map(|(w, h)| ((w as u64 * h as u64) / 42) as usize).unwrap_or(256 * 1024);
     estimated.max(10 * 1024)
 }
 
@@ -1040,7 +1037,8 @@ async fn try_webp_exif_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     while pos + 12 <= tail.len() {
         if &tail[pos..pos + 4] == b"EXIF" {
             let chunk_len =
-                u32::from_le_bytes([tail[pos + 4], tail[pos + 5], tail[pos + 6], tail[pos + 7]]) as usize;
+                u32::from_le_bytes([tail[pos + 4], tail[pos + 5], tail[pos + 6], tail[pos + 7]])
+                    as usize;
             let data_start = pos + 8;
             let data_end = (data_start + chunk_len).min(tail.len());
             let file_offset = tail_offset + data_start as u64;
@@ -1274,28 +1272,20 @@ fn parse_tiff_ifd(
             0x0201 => jpeg_off = Some(v),
             0x0202 => jpeg_len = Some(v),
             0x0111 => {
-                strip_off = tiff_u32_values(bytes, ft, fc, v, little, 1)
-                    .first()
-                    .copied()
-                    .map(|x| x as usize)
+                strip_off =
+                    tiff_u32_values(bytes, ft, fc, v, little, 1).first().copied().map(|x| x as usize)
             }
             0x0117 => {
-                strip_cnt = tiff_u32_values(bytes, ft, fc, v, little, 1)
-                    .first()
-                    .copied()
-                    .map(|x| x as usize)
+                strip_cnt =
+                    tiff_u32_values(bytes, ft, fc, v, little, 1).first().copied().map(|x| x as usize)
             }
             0x0144 => {
-                tile_off = tiff_u32_values(bytes, ft, fc, v, little, 1)
-                    .first()
-                    .copied()
-                    .map(|x| x as usize)
+                tile_off =
+                    tiff_u32_values(bytes, ft, fc, v, little, 1).first().copied().map(|x| x as usize)
             }
             0x0145 => {
-                tile_cnt = tiff_u32_values(bytes, ft, fc, v, little, 1)
-                    .first()
-                    .copied()
-                    .map(|x| x as usize)
+                tile_cnt =
+                    tiff_u32_values(bytes, ft, fc, v, little, 1).first().copied().map(|x| x as usize)
             }
             0x014A => sub_ifds.extend(tiff_subifd_offsets(bytes, ft, fc, v, little)),
             _ => {}
@@ -2012,15 +2002,15 @@ async fn shortcut_inner<S: HttpStream>(cook: &mut ThumbCook<S>) {
     }
 
     //  PDF documents (embedded page thumbnail + page count)
-    let is_pdf = cook.media.kind == Some(FileKind::Document)
-        && cook.media.extension.as_deref() == Some("pdf");
+    let is_pdf =
+        cook.media.kind == Some(FileKind::Document) && cook.media.extension.as_deref() == Some("pdf");
     if is_pdf {
         try_pdf_shortcut(cook).await;
     }
 
     //  Audio: ID3v2 APIC cover art
-    let is_audio =
-        cook.media.kind == Some(FileKind::Audio) && matches!(cook.media.extension.as_deref(), Some("mp3"));
+    let is_audio = cook.media.kind == Some(FileKind::Audio)
+        && matches!(cook.media.extension.as_deref(), Some("mp3"));
     if is_audio {
         try_audio_shortcut(cook).await;
     }
@@ -2143,11 +2133,15 @@ fn pdf_stream_to_image(stream: &lopdf::Stream) -> Option<DynamicImage> {
 
     if is_rgb {
         Some(DynamicImage::ImageRgb8(image::RgbImage::from_raw(
-            width, height, raw[..expected].to_vec(),
+            width,
+            height,
+            raw[..expected].to_vec(),
         )?))
     } else {
         Some(DynamicImage::ImageLuma8(image::GrayImage::from_raw(
-            width, height, raw[..expected].to_vec(),
+            width,
+            height,
+            raw[..expected].to_vec(),
         )?))
     }
 }
@@ -2255,11 +2249,17 @@ fn parse_mp3_frame_header(bytes: &[u8]) -> Option<Mp3FrameInfo> {
 
 // Bitrate tables in kbps, index 0 = free (invalid for estimation).
 
-const MPEG1_LAYER3_BITRATE: [u32; 16] = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0];
+const MPEG1_LAYER3_BITRATE: [u32; 16] = [
+    0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0,
+];
 
-const MPEG2_LAYER3_BITRATE: [u32; 16] = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0];
+const MPEG2_LAYER3_BITRATE: [u32; 16] = [
+    0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0,
+];
 
-const MPEG25_LAYER3_BITRATE: [u32; 16] = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0];
+const MPEG25_LAYER3_BITRATE: [u32; 16] = [
+    0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0,
+];
 
 const MPEG1_SAMPLE_RATE: [u32; 4] = [44100, 48000, 32000, 0];
 const MPEG2_SAMPLE_RATE: [u32; 4] = [22050, 24000, 16000, 0];

@@ -22,8 +22,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::after::{AfterResponse, DeferredFuture};
-use crate::result::{ResultSource, ResultStatus, ThumbResult};
 use crate::result::ThumbMedia;
+use crate::result::{ResultSource, ResultStatus, ThumbResult};
 use crate::source::CacheHints;
 
 /// One payload shared by ordinary cache and pin lookups.
@@ -187,19 +187,33 @@ pub trait CacheBackend: Send + Sync {
 
     /// Derive a local identifier without exposing the backend's secret.
     /// Remote backends issue their identifiers through `issue_pin` instead.
-    fn pin_candidate(&self, _kind: crate::media::FileKind, _key: &str, _attempt: u32) -> Result<String, String> {
+    fn pin_candidate(
+        &self,
+        _kind: crate::media::FileKind,
+        _key: &str,
+        _attempt: u32,
+    ) -> Result<String, String> {
         Err("cache backend does not support local pin derivation".into())
     }
 
     /// Derive the attempt-zero pin without claiming it or touching retention.
     /// Used for successful placeholder results so a later render can activate it.
-    fn untracked_pin<'a>(&'a self, kind: crate::media::FileKind, key: &'a str) -> PinFuture<'a, String> {
+    fn untracked_pin<'a>(
+        &'a self,
+        kind: crate::media::FileKind,
+        key: &'a str,
+    ) -> PinFuture<'a, String> {
         Box::pin(async move { self.pin_candidate(kind, key, 0) })
     }
 
     /// Issue or refresh a raw pin identifier. Missing entries and disabled
     /// pinning return `None`; identifier collisions are retried by the owner.
-    fn issue_pin<'a>(&'a self, kind: crate::media::FileKind, key: &'a str, ttl: u64) -> PinFuture<'a, Option<String>> {
+    fn issue_pin<'a>(
+        &'a self,
+        kind: crate::media::FileKind,
+        key: &'a str,
+        ttl: u64,
+    ) -> PinFuture<'a, Option<String>> {
         Box::pin(async move {
             if ttl == 0 {
                 return Ok(None);
@@ -218,12 +232,20 @@ pub trait CacheBackend: Send + Sync {
 
     /// Atomically reserve an alias for a live entry and refresh its pin
     /// deadline. A collision must never replace another live alias.
-    fn claim_pin<'a>(&'a self, _id: &'a str, _key: &'a str, _ttl: u64) -> PinFuture<'a, pins::PinClaim> {
+    fn claim_pin<'a>(
+        &'a self,
+        _id: &'a str,
+        _key: &'a str,
+        _ttl: u64,
+    ) -> PinFuture<'a, pins::PinClaim> {
         Box::pin(async { Err("cache backend does not support pin aliases".into()) })
     }
 
     /// Resolve an alias to JPEG bytes, without extending the pin deadline.
-    fn pin_data<'a>(&'a self, _id: &'a str) -> PinFuture<'a, Option<crate::http_cache::PinnedThumbnail>> {
+    fn pin_data<'a>(
+        &'a self,
+        _id: &'a str,
+    ) -> PinFuture<'a, Option<crate::http_cache::PinnedThumbnail>> {
         Box::pin(async { Err("cache backend does not support pin aliases".into()) })
     }
 
@@ -231,18 +253,32 @@ pub trait CacheBackend: Send + Sync {
         Box::pin(async move { Ok(self.pin_data(id).await?.map(|pin| pin.bytes)) })
     }
     /// Async lookup.  Returns the deserialized [`ThumbMedia`] on hit, `None` on miss.
-    fn get<'a>(&'a self, key: &'a str, pin_ttl: u64) -> Pin<Box<dyn Future<Output = Option<ThumbMedia>> + Send + 'a>> {
+    fn get<'a>(
+        &'a self,
+        key: &'a str,
+        pin_ttl: u64,
+    ) -> Pin<Box<dyn Future<Output = Option<ThumbMedia>> + Send + 'a>> {
         Box::pin(async move { self.get_entry(key, pin_ttl).await.map(|entry| entry.media) })
     }
 
     /// Read by the pin deadline, without extending it.
-    fn get_pin<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = Option<ThumbMedia>> + Send + 'a>> {
+    fn get_pin<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Option<ThumbMedia>> + Send + 'a>> {
         Box::pin(async move { self.get_pin_entry(key).await.map(|entry| entry.media) })
     }
 
     /// Internal lookup retaining the metadata needed for promotion.
-    fn get_entry<'a>(&'a self, key: &'a str, pin_ttl: u64) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + Send + 'a>>;
-    fn get_pin_entry<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + Send + 'a>>;
+    fn get_entry<'a>(
+        &'a self,
+        key: &'a str,
+        pin_ttl: u64,
+    ) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + Send + 'a>>;
+    fn get_pin_entry<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + Send + 'a>>;
 
     /// Copy absolute deadlines and cost only if the destination has no live
     /// entry. A delayed promotion must not replace a newer render or active pin.
@@ -264,7 +300,14 @@ pub trait CacheBackend: Send + Sync {
     ///
     /// The future is owned and can be handed to [`AfterResponse`] so the
     /// write runs after the HTTP response. Errors are logged by the backend.
-    fn put(&self, key: String, media: ThumbMedia, cost: u8, cache_until: u64, pin_ttl: u64) -> DeferredFuture;
+    fn put(
+        &self,
+        key: String,
+        media: ThumbMedia,
+        cost: u8,
+        cache_until: u64,
+        pin_ttl: u64,
+    ) -> DeferredFuture;
 }
 
 /// A single cache storage backend for single-threaded wasm targets.
@@ -274,17 +317,35 @@ pub trait CacheBackend: Send + Sync {
 #[cfg(not(feature = "native"))]
 pub trait CacheBackend {
     fn name(&self) -> &'static str;
-    fn get<'a>(&'a self, key: &'a str, pin_ttl: u64) -> Pin<Box<dyn Future<Output = Option<ThumbMedia>> + 'a>> {
+    fn get<'a>(
+        &'a self,
+        key: &'a str,
+        pin_ttl: u64,
+    ) -> Pin<Box<dyn Future<Output = Option<ThumbMedia>> + 'a>> {
         Box::pin(async move { self.get_entry(key, pin_ttl).await.map(|entry| entry.media) })
     }
     fn get_pin<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = Option<ThumbMedia>> + 'a>> {
         Box::pin(async move { self.get_pin_entry(key).await.map(|entry| entry.media) })
     }
-    fn get_entry<'a>(&'a self, key: &'a str, pin_ttl: u64) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + 'a>>;
-    fn get_pin_entry<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + 'a>>;
+    fn get_entry<'a>(
+        &'a self,
+        key: &'a str,
+        pin_ttl: u64,
+    ) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + 'a>>;
+    fn get_pin_entry<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + 'a>>;
     fn promote(&self, key: String, entry: CacheEntry) -> DeferredFuture;
     fn revalidate(&self, key: String, entry: CacheEntry, expected_cache: String) -> DeferredFuture;
-    fn put(&self, key: String, media: ThumbMedia, cost: u8, cache_until: u64, pin_ttl: u64) -> DeferredFuture;
+    fn put(
+        &self,
+        key: String,
+        media: ThumbMedia,
+        cost: u8,
+        cache_until: u64,
+        pin_ttl: u64,
+    ) -> DeferredFuture;
 }
 
 //  Cache frontend (sticky + inflight)
@@ -323,7 +384,10 @@ mod frontend {
     pub(super) enum Lookup {
         Hit(ThumbResult),
         Leader(super::DebounceLeader),
-        Join { id: Arc<()>, receiver: oneshot::Receiver<Arc<ThumbResult>> },
+        Join {
+            id: Arc<()>,
+            receiver: oneshot::Receiver<Arc<ThumbResult>>,
+        },
     }
 
     pub(super) struct CacheFrontend {
@@ -361,12 +425,23 @@ mod frontend {
             if let Some(slot) = map.get_mut(key) {
                 let (tx, rx) = oneshot::channel();
                 slot.waiters.push(tx);
-                Lookup::Join { id: slot.id.clone(), receiver: rx }
+                Lookup::Join {
+                    id: slot.id.clone(),
+                    receiver: rx,
+                }
             } else {
                 let id = Arc::new(());
-                map.insert(key.to_string(), InflightSlot { id: id.clone(), waiters: vec![] });
+                map.insert(
+                    key.to_string(),
+                    InflightSlot {
+                        id: id.clone(),
+                        waiters: vec![],
+                    },
+                );
                 Lookup::Leader(super::DebounceLeader {
-                    frontend: self.clone(), key: key.to_string(), id,
+                    frontend: self.clone(),
+                    key: key.to_string(),
+                    id,
                 })
             }
         }
@@ -397,9 +472,9 @@ mod frontend {
 
 #[cfg(not(feature = "native"))]
 mod frontend {
+    use crate::result::ThumbResult;
     use std::cell::RefCell;
     use std::collections::HashMap;
-    use crate::result::ThumbResult;
 
     pub(super) struct CacheFrontend {
         sticky: RefCell<HashMap<String, (web_time::Instant, ThumbResult)>>,
@@ -408,7 +483,10 @@ mod frontend {
 
     impl CacheFrontend {
         pub fn new(ttl: u64) -> Self {
-            Self { sticky: RefCell::new(HashMap::new()), ttl: std::time::Duration::from_secs(ttl) }
+            Self {
+                sticky: RefCell::new(HashMap::new()),
+                ttl: std::time::Duration::from_secs(ttl),
+            }
         }
 
         pub fn sticky_check(&self, key: &str) -> Option<ThumbResult> {
@@ -420,8 +498,10 @@ mod frontend {
         pub fn sticky_store(&self, key: &str, result: &ThumbResult) {
             let mut sticky = self.sticky.borrow_mut();
             sticky.retain(|_, (inserted, _)| inserted.elapsed() < self.ttl);
-            if sticky.len() >= 10_000 && !sticky.contains_key(key)
-                && let Some(oldest) = sticky.iter().min_by_key(|(_, (inserted, _))| *inserted).map(|(key, _)| key.clone())
+            if sticky.len() >= 10_000
+                && !sticky.contains_key(key)
+                && let Some(oldest) =
+                    sticky.iter().min_by_key(|(_, (inserted, _))| *inserted).map(|(key, _)| key.clone())
             {
                 sticky.remove(&oldest);
             }
@@ -498,7 +578,10 @@ impl CacheStore {
     }
 
     pub fn debounce_only(ttl: u64) -> Self {
-        Self { backend: None, frontend: Some(Arc::new(frontend::CacheFrontend::new(ttl))) }
+        Self {
+            backend: None,
+            frontend: Some(Arc::new(frontend::CacheFrontend::new(ttl))),
+        }
     }
 
     /// Debounce is a fixed window from insertion, independent of freshness.
@@ -510,8 +593,13 @@ impl CacheStore {
 
     fn debounce_matches(result: &ThumbResult, client: Option<&CacheHints>) -> bool {
         if result.source == Some(ResultSource::NotModified) {
-            let Some(stored) = result.media.as_ref().and_then(|media| CacheHints::decode(&media.cache)) else { return false };
-            let Some(client) = client else { return false };
+            let Some(stored) = result.media.as_ref().and_then(|media| CacheHints::decode(&media.cache))
+            else {
+                return false;
+            };
+            let Some(client) = client else {
+                return false;
+            };
             if stored.to_conditional() != client.to_conditional()
                 || (stored.to_conditional().is_none() && stored.expires_at != client.expires_at)
             {
@@ -524,7 +612,9 @@ impl CacheStore {
     /// A miss returns a native leader guard that must survive until the final
     /// response. Dropping it wakes joiners; superseded leaders cannot publish.
     pub(crate) async fn debounce_lookup(
-        &self, key: &str, client: Option<&CacheHints>,
+        &self,
+        key: &str,
+        client: Option<&CacheHints>,
     ) -> (Option<ThumbResult>, Option<DebounceLeader>) {
         #[cfg(feature = "native")]
         {
@@ -538,7 +628,10 @@ impl CacheStore {
 
     #[cfg(feature = "native")]
     async fn debounce_lookup_with_timeout(
-        &self, key: &str, client: Option<&CacheHints>, timeout: std::time::Duration,
+        &self,
+        key: &str,
+        client: Option<&CacheHints>,
+        timeout: std::time::Duration,
     ) -> (Option<ThumbResult>, Option<DebounceLeader>) {
         if let Some(ref fe) = self.frontend {
             loop {
@@ -607,7 +700,13 @@ impl CacheStore {
         }
     }
 
-    pub fn revalidate(&self, key: String, entry: CacheEntry, expected_cache: String, after: &mut AfterResponse) {
+    pub fn revalidate(
+        &self,
+        key: String,
+        entry: CacheEntry,
+        expected_cache: String,
+        after: &mut AfterResponse,
+    ) {
         if let Some(ref backend) = self.backend {
             after.push(backend.revalidate(key, entry, expected_cache));
         }
@@ -650,7 +749,9 @@ impl CacheStore {
         // Skip durable storage when the cache string is empty (uncacheable).
         let uncacheable = result.media.as_ref().is_none_or(|m| m.cache.is_empty());
         if let Some(ref backend) = self.backend {
-            let Some(ref media) = result.media else { return };
+            let Some(ref media) = result.media else {
+                return;
+            };
             let cache_until = if uncacheable { 0 } else { expires_at };
             after.push(backend.put(key.to_string(), media.clone(), cost, cache_until, pin_ttl));
         }
@@ -682,7 +783,9 @@ pub fn retention_deadline(
     default_freshness_ttl: u64,
     max_ttl: u64,
 ) -> u64 {
-    let Some(hints) = hints else { return 0 };
+    let Some(hints) = hints else {
+        return 0;
+    };
     if hints.disallow_caching() {
         return 0;
     }
@@ -793,13 +896,16 @@ fn open_link(spec: &str) -> Result<Arc<dyn CacheBackend>, String> {
                     "entries" => memory::MemoryCacheBackend::with_max_entries(value),
                     _ => unreachable!(),
                 }
-            }.map_err(|e| format!("mem cache: {e}"))?;
+            }
+            .map_err(|e| format!("mem cache: {e}"))?;
             Ok(Arc::new(backend))
         }
         "sqlite" => {
             let parts: Vec<&str> = rest.split(',').collect();
             if parts.len() > 2 {
-                return Err("sqlite cache takes at most two parameters: 'sqlite:path[,size]'".to_string());
+                return Err(
+                    "sqlite cache takes at most two parameters: 'sqlite:path[,size]'".to_string()
+                );
             }
             let path = parts[0].trim();
             if path.is_empty() {
@@ -810,19 +916,22 @@ fn open_link(spec: &str) -> Result<Arc<dyn CacheBackend>, String> {
                 Some(size) => {
                     let size = size.trim();
                     if size.is_empty() {
-                        return Err("sqlite cache: empty size after ',' - expected e.g. 1gb".to_string());
+                        return Err(
+                            "sqlite cache: empty size after ',' - expected e.g. 1gb".to_string()
+                        );
                     }
-                    match memory::parse_mem_size(size)
-                        .map_err(|e| format!("sqlite cache: {e}"))?
-                    {
+                    match memory::parse_mem_size(size).map_err(|e| format!("sqlite cache: {e}"))? {
                         Some((bytes, "bytes")) => Some(bytes),
                         _ => {
-                            return Err("sqlite cache: size must carry a byte unit (kb/mb/gb/tb)".to_string())
+                            return Err(
+                                "sqlite cache: size must carry a byte unit (kb/mb/gb/tb)".to_string()
+                            );
                         }
                     }
                 }
             };
-            let path = crate::config_path::expand(path).map_err(|e| format!("sqlite cache path: {e}"))?;
+            let path =
+                crate::config_path::expand(path).map_err(|e| format!("sqlite cache path: {e}"))?;
             let backend = sqlite::SqliteCacheBackend::open_with_limit(&path, max_bytes)
                 .map_err(|e| format!("sqlite cache: {e}"))?;
             Ok(Arc::new(backend))
@@ -831,9 +940,9 @@ fn open_link(spec: &str) -> Result<Arc<dyn CacheBackend>, String> {
             let target = crate::connect::parse_connect_target(Some(rest.to_string()));
             cloud::CloudCacheBackend::new(target).map(|b| Arc::new(b) as Arc<dyn CacheBackend>)
         }
-        other => Err(format!(
-            "unsupported cache scheme '{other}' - supported: mem:, sqlite:, cloud:, none"
-        )),
+        other => {
+            Err(format!("unsupported cache scheme '{other}' - supported: mem:, sqlite:, cloud:, none"))
+        }
     }
 }
 
@@ -862,7 +971,9 @@ pub fn validate_dsn(dsn: &str) -> (crate::check::Validation, Option<crate::check
         let link = link.trim();
         if link.is_empty() {
             return (
-                crate::check::Validation::error(format!("invalid cache spec '{dsn}' - empty link in chain")),
+                crate::check::Validation::error(format!(
+                    "invalid cache spec '{dsn}' - empty link in chain"
+                )),
                 None,
             );
         }
@@ -906,7 +1017,9 @@ fn validate_link(spec: &str) -> Result<Option<crate::check::FileCheck>, String> 
         "sqlite" => {
             let parts: Vec<&str> = rest.split(',').collect();
             if parts.len() > 2 {
-                return Err("sqlite cache takes at most two parameters: 'sqlite:path[,size]'".to_string());
+                return Err(
+                    "sqlite cache takes at most two parameters: 'sqlite:path[,size]'".to_string()
+                );
             }
             let path = parts[0].trim();
             if path.is_empty() {
@@ -920,16 +1033,19 @@ fn validate_link(spec: &str) -> Result<Option<crate::check::FileCheck>, String> 
                 match memory::parse_mem_size(size)? {
                     Some((_, "bytes")) => {}
                     _ => {
-                        return Err("sqlite cache: size must carry a byte unit (kb/mb/gb/tb)".to_string())
+                        return Err(
+                            "sqlite cache: size must carry a byte unit (kb/mb/gb/tb)".to_string()
+                        );
                     }
                 }
             }
-            let path = crate::config_path::expand(path).map_err(|e| format!("sqlite cache path: {e}"))?;
+            let path =
+                crate::config_path::expand(path).map_err(|e| format!("sqlite cache path: {e}"))?;
             Ok(Some(sqlite::SqliteCacheBackend::check(&path)))
         }
-        other => Err(format!(
-            "unsupported cache scheme '{other}' - supported: mem:, sqlite:, cloud:, none"
-        )),
+        other => {
+            Err(format!("unsupported cache scheme '{other}' - supported: mem:, sqlite:, cloud:, none"))
+        }
     }
 }
 
@@ -944,10 +1060,7 @@ pub fn describe_dsn(dsn: &str) -> String {
     if spec == "none" || spec == "none:" {
         return "none (cache disabled)".to_string();
     }
-    spec.split('+')
-        .map(|link| describe_link(link.trim()))
-        .collect::<Vec<_>>()
-        .join("+")
+    spec.split('+').map(|link| describe_link(link.trim())).collect::<Vec<_>>().join("+")
 }
 
 #[cfg(feature = "native")]
@@ -1055,10 +1168,7 @@ mod tests {
         let (v, fc) = validate_dsn(spec);
         assert_eq!(v.status, ValidationStatus::Ok);
         assert!(fc.is_some());
-        assert_eq!(
-            describe_dsn(spec),
-            "mem:64mb+sqlite:/tmp/tbr-cache-test.db (max 1gb)"
-        );
+        assert_eq!(describe_dsn(spec), "mem:64mb+sqlite:/tmp/tbr-cache-test.db (max 1gb)");
         let (bad, _) = validate_dsn("mem:64mb+bogus");
         assert_eq!(bad.status, ValidationStatus::Error);
         let (blank, _) = validate_dsn("");
@@ -1077,7 +1187,12 @@ mod tests {
                 (Some("\"v1\"".to_string()), None),
                 (None, Some("Wed, 01 Jan 2020 00:00:00 GMT".to_string())),
             ] {
-                let hints = CacheHints { expires_at, etag, last_modified, ..Default::default() };
+                let hints = CacheHints {
+                    expires_at,
+                    etag,
+                    last_modified,
+                    ..Default::default()
+                };
                 assert_eq!(retention_deadline(NOW, Some(&hints), MAX, DEFAULT, MAX), NOW + MAX);
                 assert_eq!(retention_deadline(NOW, Some(&hints), 120, DEFAULT, MAX), NOW + 120);
             }
@@ -1091,23 +1206,40 @@ mod tests {
         const MAX: u64 = 604_800;
 
         for expiry in [NOW - 1, NOW, NOW + 60, NOW + 100_000, u64::MAX] {
-            let hints = CacheHints { expires_at: Some(expiry), ..Default::default() };
-            assert_eq!(
-                retention_deadline(NOW, Some(&hints), MAX, DEFAULT, MAX),
-                expiry.min(NOW + MAX),
-            );
+            let hints = CacheHints {
+                expires_at: Some(expiry),
+                ..Default::default()
+            };
+            assert_eq!(retention_deadline(NOW, Some(&hints), MAX, DEFAULT, MAX), expiry.min(NOW + MAX),);
         }
-        assert_eq!(retention_deadline(NOW, Some(&CacheHints::default()), MAX, DEFAULT, MAX), NOW + DEFAULT);
+        assert_eq!(
+            retention_deadline(NOW, Some(&CacheHints::default()), MAX, DEFAULT, MAX),
+            NOW + DEFAULT
+        );
         assert_eq!(retention_deadline(NOW, None, MAX, DEFAULT, MAX), 0);
         for (no_store, private) in [(true, false), (false, true)] {
-            let hints = CacheHints { no_store, private, etag: Some("\"v1\"".into()), ..Default::default() };
+            let hints = CacheHints {
+                no_store,
+                private,
+                etag: Some("\"v1\"".into()),
+                ..Default::default()
+            };
             assert_eq!(retention_deadline(NOW, Some(&hints), MAX, DEFAULT, MAX), 0);
         }
     }
 
     #[test]
     fn entry_lifetimes_are_independent_and_refresh_is_monotonic() {
-        let mut entry = CacheEntry::new(ThumbMedia { url: "https://example.com/a".into(), ..Default::default() }, 7, 200, 300, 100);
+        let mut entry = CacheEntry::new(
+            ThumbMedia {
+                url: "https://example.com/a".into(),
+                ..Default::default()
+            },
+            7,
+            200,
+            300,
+            100,
+        );
         assert!(entry.media.url.is_empty());
         assert_eq!(entry.retain_until(), 400);
         assert!(entry.lookup(200, false, 999).is_none());
@@ -1139,9 +1271,19 @@ mod tests {
     #[test]
     fn cooks_have_independent_retention_policies_and_separate_client_freshness() {
         let runtime = crate::Runtime::new(
-            CacheStore::none(), Default::default(), None, None,
-            Default::default(), Default::default(), None, false,
-            5, 60, 60, 604_800, 3_600,
+            CacheStore::none(),
+            Default::default(),
+            None,
+            None,
+            Default::default(),
+            Default::default(),
+            None,
+            false,
+            5,
+            60,
+            60,
+            604_800,
+            3_600,
         );
         let mut first = crate::ThumbCook::new("https://example.com/a.jpg", runtime.clone());
         let second = crate::ThumbCook::new("https://example.com/b.jpg", runtime.clone());
@@ -1154,7 +1296,10 @@ mod tests {
         assert_eq!(runtime.cache_default_ttl_secs, 3_600);
 
         first.status = crate::CookStatus::Complete;
-        first.src.cache_hints = Some(CacheHints { etag: Some("\"v1\"".into()), ..Default::default() });
+        first.src.cache_hints = Some(CacheHints {
+            etag: Some("\"v1\"".into()),
+            ..Default::default()
+        });
         let token = first.to_result().media.unwrap().cache;
         let hints = CacheHints::decode(&token).unwrap();
         assert_eq!(hints.etag.as_deref(), Some("\"v1\""));
@@ -1190,7 +1335,8 @@ mod tests {
 
     #[tokio::test]
     async fn memory_and_sqlite_share_payloads_and_enforce_deadlines() {
-        check_backend_lifetimes(Arc::new(memory::MemoryCacheBackend::with_max_entries(100).unwrap())).await;
+        check_backend_lifetimes(Arc::new(memory::MemoryCacheBackend::with_max_entries(100).unwrap()))
+            .await;
         check_backend_lifetimes(Arc::new(sqlite::SqliteCacheBackend::open(":memory:").unwrap())).await;
     }
 
@@ -1227,29 +1373,47 @@ mod tests {
 
     #[tokio::test]
     async fn native_promotion_preserves_newer_entries_and_does_not_revive_expired_data() {
-        check_conditional_promotion(Arc::new(memory::MemoryCacheBackend::with_max_entries(100).unwrap())).await;
-        check_conditional_promotion(Arc::new(sqlite::SqliteCacheBackend::open(":memory:").unwrap())).await;
+        check_conditional_promotion(Arc::new(
+            memory::MemoryCacheBackend::with_max_entries(100).unwrap(),
+        ))
+        .await;
+        check_conditional_promotion(Arc::new(sqlite::SqliteCacheBackend::open(":memory:").unwrap()))
+            .await;
     }
 
     #[tokio::test]
     async fn revalidation_preserves_cost_and_pins_and_cannot_overwrite_newer_tokens() {
         for backend in [
-            Arc::new(memory::MemoryCacheBackend::with_max_entries(100).unwrap()) as Arc<dyn CacheBackend>,
+            Arc::new(memory::MemoryCacheBackend::with_max_entries(100).unwrap())
+                as Arc<dyn CacheBackend>,
             Arc::new(sqlite::SqliteCacheBackend::open(":memory:").unwrap()) as Arc<dyn CacheBackend>,
         ] {
             let now = unix_now_secs();
             let mut initial = media();
-            initial.cache = CacheHints { etag: Some("\"A\"".into()), ..Default::default() }.encode(60);
+            initial.cache = CacheHints {
+                etag: Some("\"A\"".into()),
+                ..Default::default()
+            }
+            .encode(60);
             backend.put("entry".into(), initial, 73, now + 500, 900).await;
             let mut refreshed = backend.get_entry("entry", 0).await.unwrap();
             let expected = refreshed.media.cache.clone();
-            refreshed.set_cache(CacheHints {
-                etag: Some("\"B\"".into()), expires_at: Some(now + 100), ..Default::default()
-            }.encode(60));
+            refreshed.set_cache(
+                CacheHints {
+                    etag: Some("\"B\"".into()),
+                    expires_at: Some(now + 100),
+                    ..Default::default()
+                }
+                .encode(60),
+            );
             refreshed.cache_until = now + 1000;
             let delayed = backend.revalidate("entry".into(), refreshed.clone(), expected.clone());
             let mut newer = media();
-            newer.cache = CacheHints { etag: Some("\"C\"".into()), ..Default::default() }.encode(60);
+            newer.cache = CacheHints {
+                etag: Some("\"C\"".into()),
+                ..Default::default()
+            }
+            .encode(60);
             newer.thumbnail = vec![9];
             backend.put("entry".into(), newer.clone(), 99, now + 1200, 1500).await;
             delayed.await;
@@ -1297,7 +1461,11 @@ mod tests {
         let store = CacheStore::new(backend.clone(), 5);
         let mut pinned = media();
         pinned.cache.clear();
-        let result = ThumbResult { status: ResultStatus::Success, media: Some(pinned), ..Default::default() };
+        let result = ThumbResult {
+            status: ResultStatus::Success,
+            media: Some(pinned),
+            ..Default::default()
+        };
         let mut after = AfterResponse::new();
         store.store("off", &result, 0, 0, 0, &mut after);
         store.store("pin", &result, 0, 0, 600, &mut after);
@@ -1312,7 +1480,8 @@ mod tests {
     #[tokio::test]
     async fn missing_handler_placeholders_skip_storage_but_keep_debounce() {
         for backend in [
-            Arc::new(memory::MemoryCacheBackend::with_max_entries(100).unwrap()) as Arc<dyn CacheBackend>,
+            Arc::new(memory::MemoryCacheBackend::with_max_entries(100).unwrap())
+                as Arc<dyn CacheBackend>,
             Arc::new(sqlite::SqliteCacheBackend::open(":memory:").unwrap()),
         ] {
             let store = CacheStore::new(backend.clone(), 5);
@@ -1322,7 +1491,10 @@ mod tests {
             let result = ThumbResult {
                 status: ResultStatus::Success,
                 source: Some(ResultSource::Placeholder),
-                media: Some(ThumbMedia { placeholder: "image".into(), ..media() }),
+                media: Some(ThumbMedia {
+                    placeholder: "image".into(),
+                    ..media()
+                }),
                 ..Default::default()
             };
             let mut after = AfterResponse::new();
@@ -1331,12 +1503,18 @@ mod tests {
             assert!(after.is_empty());
             assert!(backend.get_entry("missing", 0).await.is_none());
             assert!(backend.get_pin("missing").await.is_none());
-            assert_eq!(backend.get_entry("existing", 0).await.unwrap().media.placeholder, original.placeholder);
+            assert_eq!(
+                backend.get_entry("existing", 0).await.unwrap().media.placeholder,
+                original.placeholder
+            );
             store.debounce_store("missing", &result);
             let cached = store.debounce_check("missing", None).unwrap();
             assert_eq!(cached.media.unwrap().cache, result.media.as_ref().unwrap().cache);
 
-            let fallback = ThumbResult { source: Some(ResultSource::Fallback), ..result };
+            let fallback = ThumbResult {
+                source: Some(ResultSource::Fallback),
+                ..result
+            };
             store.store("fallback", &fallback, 0, expires, 600, &mut after);
             for task in after.drain() {
                 task.await;
@@ -1349,7 +1527,11 @@ mod tests {
     async fn debounce_precedes_pin_refresh_and_pin_reads_ignore_sticky_results() {
         let backend = Arc::new(memory::MemoryCacheBackend::with_max_entries(100).unwrap());
         let store = CacheStore::new(backend.clone(), 5);
-        let result = ThumbResult { status: ResultStatus::Success, media: Some(media()), ..Default::default() };
+        let result = ThumbResult {
+            status: ResultStatus::Success,
+            media: Some(media()),
+            ..Default::default()
+        };
         let mut after = AfterResponse::new();
         store.store("entry", &result, 0, unix_now_secs() + 600, 0, &mut after);
         for task in after.drain() {
@@ -1392,9 +1574,8 @@ mod tests {
             let (_, old) = store.debounce_lookup("timeout", None).await;
             let old = old.unwrap();
             let old_id = old.id.clone();
-            let (hit, replacement) = store.debounce_lookup_with_timeout(
-                "timeout", None, Duration::from_millis(1),
-            ).await;
+            let (hit, replacement) =
+                store.debounce_lookup_with_timeout("timeout", None, Duration::from_millis(1)).await;
             assert!(hit.is_none());
             let replacement = replacement.unwrap();
             let fe = store.frontend.as_ref().unwrap();
@@ -1402,7 +1583,10 @@ mod tests {
                 panic!("expected a replacement joiner");
             };
             if publish {
-                old.complete(&ThumbResult { message: Some("old".into()), ..Default::default() });
+                old.complete(&ThumbResult {
+                    message: Some("old".into()),
+                    ..Default::default()
+                });
             } else {
                 drop(old);
             }
@@ -1410,7 +1594,10 @@ mod tests {
             fe.cancel("timeout", &old_id);
             assert!(receiver.try_recv().unwrap().is_none());
             assert!(store.debounce_check("timeout", None).is_none());
-            replacement.complete(&ThumbResult { message: Some("new".into()), ..Default::default() });
+            replacement.complete(&ThumbResult {
+                message: Some("new".into()),
+                ..Default::default()
+            });
             assert_eq!(receiver.await.unwrap().message.as_deref(), Some("new"));
             assert_eq!(store.debounce_check("timeout", None).unwrap().message.as_deref(), Some("new"));
         }
@@ -1420,11 +1607,17 @@ mod tests {
     async fn late_completion_cannot_overwrite_an_already_completed_replacement() {
         let store = CacheStore::debounce_only(5);
         let (_, old) = store.debounce_lookup("late", None).await;
-        let (_, replacement) = store.debounce_lookup_with_timeout(
-            "late", None, std::time::Duration::from_millis(1),
-        ).await;
-        replacement.unwrap().complete(&ThumbResult { message: Some("new".into()), ..Default::default() });
-        old.unwrap().complete(&ThumbResult { message: Some("old".into()), ..Default::default() });
+        let (_, replacement) = store
+            .debounce_lookup_with_timeout("late", None, std::time::Duration::from_millis(1))
+            .await;
+        replacement.unwrap().complete(&ThumbResult {
+            message: Some("new".into()),
+            ..Default::default()
+        });
+        old.unwrap().complete(&ThumbResult {
+            message: Some("old".into()),
+            ..Default::default()
+        });
         assert_eq!(store.debounce_check("late", None).unwrap().message.as_deref(), Some("new"));
     }
 
@@ -1432,15 +1625,22 @@ mod tests {
     async fn client_only_completion_does_not_resolve_a_bare_joiner() {
         let store = CacheStore::debounce_only(5);
         let (_, leader) = store.debounce_lookup("client", None).await;
-        let client = CacheHints { etag: Some("\"client\"".into()), ..Default::default() };
+        let client = CacheHints {
+            etag: Some("\"client\"".into()),
+            ..Default::default()
+        };
         let mut joiner = Box::pin(store.debounce_lookup("client", None));
         std::future::poll_fn(|cx| {
             assert!(joiner.as_mut().poll(cx).is_pending());
             std::task::Poll::Ready(())
-        }).await;
+        })
+        .await;
         leader.unwrap().complete(&ThumbResult {
             source: Some(ResultSource::NotModified),
-            media: Some(ThumbMedia { cache: client.encode(60), ..Default::default() }),
+            media: Some(ThumbMedia {
+                cache: client.encode(60),
+                ..Default::default()
+            }),
             ..Default::default()
         });
         let (hit, replacement) = joiner.await;
@@ -1451,10 +1651,21 @@ mod tests {
 
     #[test]
     fn freshness_is_independent_of_retention_and_survives_metadata_copies() {
-        let token = CacheHints { expires_at: Some(200), ..Default::default() }.encode(60);
-        let mut entry = CacheEntry::new(ThumbMedia {
-            cache: token.clone(), ..Default::default()
-        }, 73, 300, 400, 100);
+        let token = CacheHints {
+            expires_at: Some(200),
+            ..Default::default()
+        }
+        .encode(60);
+        let mut entry = CacheEntry::new(
+            ThumbMedia {
+                cache: token.clone(),
+                ..Default::default()
+            },
+            73,
+            300,
+            400,
+            100,
+        );
         assert_eq!(entry.fresh_until, 200);
         assert!(entry.is_fresh(199));
         assert!(!entry.is_fresh(200));
@@ -1463,10 +1674,17 @@ mod tests {
         assert_eq!(entry.fresh_until, 200);
         let copy = entry.metadata().with_media(entry.media.clone());
         assert_eq!(copy.fresh_until, 200);
-        let restored: CacheEntry = serde_json::from_value(serde_json::to_value(&copy).unwrap()).unwrap();
+        let restored: CacheEntry =
+            serde_json::from_value(serde_json::to_value(&copy).unwrap()).unwrap();
         assert_eq!(restored.fresh_until, 200);
         assert_eq!(restored.media.cache, token);
-        entry.set_cache(CacheHints { expires_at: Some(600), ..Default::default() }.encode(60));
+        entry.set_cache(
+            CacheHints {
+                expires_at: Some(600),
+                ..Default::default()
+            }
+            .encode(60),
+        );
         assert_eq!(entry.fresh_until, 600);
         assert_eq!(entry.cache_until, 300);
         entry.set_cache(String::new());
@@ -1477,20 +1695,43 @@ mod tests {
     #[test]
     fn freshness_deadline_respects_cache_policy_and_missing_hints() {
         for hints in [
-            CacheHints { no_cache: true, expires_at: Some(200), ..Default::default() },
-            CacheHints { no_store: true, expires_at: Some(200), ..Default::default() },
-            CacheHints { private: true, expires_at: Some(200), ..Default::default() },
+            CacheHints {
+                no_cache: true,
+                expires_at: Some(200),
+                ..Default::default()
+            },
+            CacheHints {
+                no_store: true,
+                expires_at: Some(200),
+                ..Default::default()
+            },
+            CacheHints {
+                private: true,
+                expires_at: Some(200),
+                ..Default::default()
+            },
         ] {
-            let entry = CacheEntry::new(ThumbMedia {
-                cache: hints.encode(60), ..Default::default()
-            }, 0, 300, 400, 100);
+            let entry = CacheEntry::new(
+                ThumbMedia {
+                    cache: hints.encode(60),
+                    ..Default::default()
+                },
+                0,
+                300,
+                400,
+                100,
+            );
             assert_eq!(entry.fresh_until, 0);
             assert!(!entry.is_fresh(100));
         }
         for cache in ["", "invalid-token"] {
             assert_eq!(CacheEntry::freshness_deadline(cache), 0);
         }
-        let token = CacheHints { etag: Some("\"A\"".into()), ..Default::default() }.encode(60);
+        let token = CacheHints {
+            etag: Some("\"A\"".into()),
+            ..Default::default()
+        }
+        .encode(60);
         assert_eq!(CacheEntry::freshness_deadline(&token), 1);
     }
 }

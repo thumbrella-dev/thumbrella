@@ -1,5 +1,7 @@
 use super::*;
-use crate::cache::{CacheBackend, CacheEntry, memory::MemoryCacheBackend, sqlite::SqliteCacheBackend, unix_now_secs};
+use crate::cache::{
+    CacheBackend, CacheEntry, memory::MemoryCacheBackend, sqlite::SqliteCacheBackend, unix_now_secs,
+};
 use crate::http_buf::{ConnectOptions, HttpError};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
@@ -18,7 +20,8 @@ struct Scenario {
     requests: Vec<Vec<(String, String)>>,
 }
 
-static SCENARIOS: LazyLock<Mutex<HashMap<String, Scenario>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static SCENARIOS: LazyLock<Mutex<HashMap<String, Scenario>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 struct MockStream {
     reply: Reply,
@@ -28,10 +31,13 @@ impl HttpStream for MockStream {
     async fn connect(url: &str, options: &ConnectOptions) -> Result<Self, HttpError> {
         let reply = {
             let mut scenarios = SCENARIOS.lock();
-            let scenario = scenarios.get_mut(url)
+            let scenario = scenarios
+                .get_mut(url)
                 .ok_or_else(|| HttpError::Network(format!("unexpected connection to {url}")))?;
             scenario.requests.push(options.headers.clone());
-            scenario.replies.pop_front()
+            scenario
+                .replies
+                .pop_front()
                 .ok_or_else(|| HttpError::Network(format!("unexpected extra request to {url}")))?
         };
         if let Some(ref gate) = reply.gate {
@@ -40,8 +46,12 @@ impl HttpStream for MockStream {
         Ok(Self { reply })
     }
 
-    fn status(&self) -> u16 { self.reply.status }
-    fn response_headers(&self) -> HashMap<String, String> { self.reply.headers.clone() }
+    fn status(&self) -> u16 {
+        self.reply.status
+    }
+    fn response_headers(&self) -> HashMap<String, String> {
+        self.reply.headers.clone()
+    }
     async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, HttpError> {
         if self.reply.body.is_empty() {
             Ok(None)
@@ -66,7 +76,13 @@ fn register(name: &str, replies: Vec<Reply>) -> String {
 
 fn register_path(name: &str, path: &str, replies: Vec<Reply>) -> String {
     let url = format!("https://{name}.example/{path}");
-    SCENARIOS.lock().insert(url.clone(), Scenario { replies: replies.into(), requests: vec![] });
+    SCENARIOS.lock().insert(
+        url.clone(),
+        Scenario {
+            replies: replies.into(),
+            requests: vec![],
+        },
+    );
     url
 }
 
@@ -75,9 +91,21 @@ fn requests(url: &str) -> Vec<Vec<(String, String)>> {
 }
 
 fn runtime(store: CacheStore) -> Arc<Runtime> {
-    Runtime::new(store, Default::default(), None, None,
-        Default::default(), Default::default(), None, false,
-        5, 60, 60, 1000, 60)
+    Runtime::new(
+        store,
+        Default::default(),
+        None,
+        None,
+        Default::default(),
+        Default::default(),
+        None,
+        false,
+        5,
+        60,
+        60,
+        1000,
+        60,
+    )
 }
 
 fn memory() -> Arc<dyn CacheBackend> {
@@ -94,22 +122,33 @@ fn hints(validator: Option<&str>, fresh: bool) -> CacheHints {
 
 async fn seed(backend: &Arc<dyn CacheBackend>, url: &str, hints: CacheHints) -> CacheEntry {
     let now = unix_now_secs();
-    let entry = CacheEntry::new(ThumbMedia {
-        cache: hints.encode(60),
-        thumbnail: vec![1, 2, 3],
-        kind: FileKind::Image,
-        extension: "png".into(),
-        mime: "image/png".into(),
-        ..Default::default()
-    }, 73, now + 500, 700, now);
+    let entry = CacheEntry::new(
+        ThumbMedia {
+            cache: hints.encode(60),
+            thumbnail: vec![1, 2, 3],
+            kind: FileKind::Image,
+            extension: "png".into(),
+            mime: "image/png".into(),
+            ..Default::default()
+        },
+        73,
+        now + 500,
+        700,
+        now,
+    );
     backend.promote(url.to_string(), entry.clone()).await;
     entry
 }
 
 async fn run(url: &str, runtime: Arc<Runtime>, client: Option<CacheHints>) -> ThumbResult {
-    let cook = ThumbCook::<MockStream>::from_input(InputSpec {
-        url: url.to_string(), cache: client, allow_local: false,
-    }, runtime);
+    let cook = ThumbCook::<MockStream>::from_input(
+        InputSpec {
+            url: url.to_string(),
+            cache: client,
+            allow_local: false,
+        },
+        runtime,
+    );
     let (result, _, mut after) = cook.run().await;
     for task in after.drain() {
         task.await;
@@ -123,24 +162,38 @@ struct CountedPinBackend {
 }
 
 impl CacheBackend for CountedPinBackend {
-    fn name(&self) -> &'static str { self.backend.name() }
+    fn name(&self) -> &'static str {
+        self.backend.name()
+    }
 
     fn pin_candidate(&self, kind: FileKind, key: &str, attempt: u32) -> Result<String, String> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         self.backend.pin_candidate(kind, key, attempt)
     }
 
-    fn get_entry<'a>(&'a self, key: &'a str, pin_ttl: u64) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<CacheEntry>> + Send + 'a>> {
+    fn get_entry<'a>(
+        &'a self,
+        key: &'a str,
+        pin_ttl: u64,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<CacheEntry>> + Send + 'a>> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         self.backend.get_entry(key, pin_ttl)
     }
 
-    fn get_pin_entry<'a>(&'a self, key: &'a str) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<CacheEntry>> + Send + 'a>> {
+    fn get_pin_entry<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<CacheEntry>> + Send + 'a>> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         self.backend.get_pin_entry(key)
     }
 
-    fn claim_pin<'a>(&'a self, id: &'a str, key: &'a str, ttl: u64) -> crate::cache::PinFuture<'a, crate::cache::pins::PinClaim> {
+    fn claim_pin<'a>(
+        &'a self,
+        id: &'a str,
+        key: &'a str,
+        ttl: u64,
+    ) -> crate::cache::PinFuture<'a, crate::cache::pins::PinClaim> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         self.backend.claim_pin(id, key, ttl)
     }
@@ -155,12 +208,24 @@ impl CacheBackend for CountedPinBackend {
         self.backend.promote(key, entry)
     }
 
-    fn revalidate(&self, key: String, entry: CacheEntry, expected_cache: String) -> crate::after::DeferredFuture {
+    fn revalidate(
+        &self,
+        key: String,
+        entry: CacheEntry,
+        expected_cache: String,
+    ) -> crate::after::DeferredFuture {
         self.calls.fetch_add(1, Ordering::Relaxed);
         self.backend.revalidate(key, entry, expected_cache)
     }
 
-    fn put(&self, key: String, media: ThumbMedia, cost: u8, cache_until: u64, pin_ttl: u64) -> crate::after::DeferredFuture {
+    fn put(
+        &self,
+        key: String,
+        media: ThumbMedia,
+        cost: u8,
+        cache_until: u64,
+        pin_ttl: u64,
+    ) -> crate::after::DeferredFuture {
         self.calls.fetch_add(1, Ordering::Relaxed);
         self.backend.put(key, media, cost, cache_until, pin_ttl)
     }
@@ -193,16 +258,21 @@ struct CapabilityRenderer {
 }
 
 impl crate::renderer::InProcessRenderer for CapabilityRenderer {
-    fn render<'a>(&'a self, cook: &'a mut dyn RenderCook) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+    fn render<'a>(
+        &'a self,
+        cook: &'a mut dyn RenderCook,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
         Box::pin(async move {
             self.calls.fetch_add(1, Ordering::Relaxed);
             if !self.available {
                 cook.note("external tool unavailable (test)");
                 return false;
             }
-            cook.set_render_image(DynamicImage::ImageRgb8(
-                RgbImage::from_pixel(16, 16, image::Rgb([240, 10, 10])),
-            ));
+            cook.set_render_image(DynamicImage::ImageRgb8(RgbImage::from_pixel(
+                16,
+                16,
+                image::Rgb([240, 10, 10]),
+            )));
             cook.set_render_renderer("test".into());
             true
         })
@@ -210,19 +280,32 @@ impl crate::renderer::InProcessRenderer for CapabilityRenderer {
 }
 
 fn vector_reply() -> Reply {
-    let mut response = reply(200, &[("cache-control", "max-age=60"), ("content-type", "image/svg+xml")]);
+    let mut response = reply(
+        200,
+        &[
+            ("cache-control", "max-age=60"),
+            ("content-type", "image/svg+xml"),
+        ],
+    );
     response.body = br#"<svg xmlns="http://www.w3.org/2000/svg"/>"#.to_vec();
     response
 }
 
 fn capability_renderer(available: bool) -> Arc<CapabilityRenderer> {
-    Arc::new(CapabilityRenderer { available, calls: Default::default() })
+    Arc::new(CapabilityRenderer {
+        available,
+        calls: Default::default(),
+    })
 }
 
 #[tokio::test]
 async fn missing_local_handlers_keep_client_and_debounce_caches_and_allow_upgrades() {
     for registered in [false, true] {
-        let url = register_path(&format!("missing-local-{registered}"), "image.svg", vec![vector_reply(), vector_reply()]);
+        let url = register_path(
+            &format!("missing-local-{registered}"),
+            "image.svg",
+            vec![vector_reply(), vector_reply()],
+        );
         let backend = memory();
         let mut rt = runtime(CacheStore::new(backend.clone(), 5));
         if registered {
@@ -247,7 +330,10 @@ async fn missing_local_handlers_keep_client_and_debounce_caches_and_allow_upgrad
         let rendered = run(&url, upgraded, None).await;
         assert_eq!(rendered.source, Some(ResultSource::Render));
         assert!(rendered.media.as_ref().unwrap().placeholder.is_empty());
-        assert_eq!(backend.get_entry(&url, 0).await.unwrap().media.thumbnail, rendered.media.unwrap().thumbnail);
+        assert_eq!(
+            backend.get_entry(&url, 0).await.unwrap().media.thumbnail,
+            rendered.media.unwrap().thumbnail
+        );
         assert_eq!(requests(&url).len(), 2);
     }
 }
@@ -272,27 +358,37 @@ async fn existing_cached_formats_do_not_require_a_current_handler() {
 
 #[tokio::test]
 async fn missing_handoff_handlers_skip_durable_storage_across_multiple_hops() {
-    crate::handoff::register_handoff_fn(Box::new(|target, _, payload| Box::pin(async move {
-        let mut rt = runtime(CacheStore::none());
-        Arc::make_mut(&mut rt).renderer = Some(capability_renderer(target == "https://available.example"));
-        if target == "https://proxy.example" {
-            Arc::make_mut(&mut rt).handoff_tier2.url = Some("https://unavailable.example".into());
-        }
-        let (mut result, trace, mut after) = ThumbCook::<MockStream>::from_handoff(payload, rt).run().await;
-        for task in after.drain() {
-            task.await;
-        }
-        if let Some(ref mut media) = result.media {
-            if !media.placeholder.is_empty() {
-                media.thumbnail.clear();
+    crate::handoff::register_handoff_fn(Box::new(|target, _, payload| {
+        Box::pin(async move {
+            let mut rt = runtime(CacheStore::none());
+            Arc::make_mut(&mut rt).renderer =
+                Some(capability_renderer(target == "https://available.example"));
+            if target == "https://proxy.example" {
+                Arc::make_mut(&mut rt).handoff_tier2.url = Some("https://unavailable.example".into());
             }
-        }
-        let wire = serde_json::to_vec(&HandoffResponse { result, trace }).unwrap();
-        Ok(serde_json::from_slice(&wire).unwrap())
-    })));
-    for (target, hops) in [("https://unavailable.example", 1), ("https://proxy.example", 2)] {
-        let url = register_path(&format!("missing-handoff-{hops}"), "image.svg",
-            (0..=hops + 2).map(|_| vector_reply()).collect());
+            let (mut result, trace, mut after) =
+                ThumbCook::<MockStream>::from_handoff(payload, rt).run().await;
+            for task in after.drain() {
+                task.await;
+            }
+            if let Some(ref mut media) = result.media {
+                if !media.placeholder.is_empty() {
+                    media.thumbnail.clear();
+                }
+            }
+            let wire = serde_json::to_vec(&HandoffResponse { result, trace }).unwrap();
+            Ok(serde_json::from_slice(&wire).unwrap())
+        })
+    }));
+    for (target, hops) in [
+        ("https://unavailable.example", 1),
+        ("https://proxy.example", 2),
+    ] {
+        let url = register_path(
+            &format!("missing-handoff-{hops}"),
+            "image.svg",
+            (0..=hops + 2).map(|_| vector_reply()).collect(),
+        );
         let backend = memory();
         let mut rt = runtime(CacheStore::new(backend.clone(), 5));
         let config = Arc::make_mut(&mut rt);
@@ -322,7 +418,10 @@ async fn missing_handoff_handlers_skip_durable_storage_across_multiple_hops() {
         let rendered = run(&url, upgraded.clone(), None).await;
         assert_eq!(rendered.source, Some(ResultSource::Render));
         assert!(rendered.media.as_ref().unwrap().placeholder.is_empty());
-        assert_eq!(backend.get_entry(&url, 0).await.unwrap().media.thumbnail, rendered.media.unwrap().thumbnail);
+        assert_eq!(
+            backend.get_entry(&url, 0).await.unwrap().media.thumbnail,
+            rendered.media.unwrap().thumbnail
+        );
         assert_eq!(run(&url, upgraded, None).await.source, Some(ResultSource::Cache));
         assert_eq!(requests(&url).len(), hops + 3);
     }
@@ -330,10 +429,18 @@ async fn missing_handoff_handlers_skip_durable_storage_across_multiple_hops() {
 
 #[tokio::test]
 async fn changed_200_renders_new_content_and_replaces_cache_metadata() {
-    let mut response = reply(200, &[("cache-control", "max-age=3600"), ("etag", "\"B\""), ("content-type", "image/png")]);
+    let mut response = reply(
+        200,
+        &[
+            ("cache-control", "max-age=3600"),
+            ("etag", "\"B\""),
+            ("content-type", "image/png"),
+        ],
+    );
     let mut bytes = std::io::Cursor::new(vec![]);
     DynamicImage::ImageRgb8(RgbImage::from_pixel(16, 16, image::Rgb([240, 10, 10])))
-        .write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .unwrap();
     response.body = bytes.into_inner();
     response.headers.insert("content-length".into(), response.body.len().to_string());
     let url = register("changed-200", vec![response]);
@@ -360,7 +467,10 @@ async fn generated_and_cached_thumbnails_publish_resolvable_pins_before_returnin
         Arc::new(SqliteCacheBackend::open(":memory:").unwrap()),
     ] {
         let url = register(&format!("pin-generated-{}", backend.name()), vec![vector_reply()]);
-        let measured = Arc::new(CountedPinBackend { backend: backend.clone(), calls: Default::default() });
+        let measured = Arc::new(CountedPinBackend {
+            backend: backend.clone(),
+            calls: Default::default(),
+        });
         let mut rt = runtime(CacheStore::new(measured.clone(), 5));
         let config = Arc::make_mut(&mut rt);
         config.pin_ttl_secs = 90;
@@ -368,7 +478,10 @@ async fn generated_and_cached_thumbnails_publish_resolvable_pins_before_returnin
         let generated = run(&url, rt.clone(), None).await;
         let pin = generated.pin.clone().expect("generated thumbnail has a pin");
         let id = pin.strip_prefix("pin/").unwrap().strip_suffix(".jpeg").unwrap();
-        assert_eq!(rt.cache.pin_thumbnail(id).await.unwrap().unwrap(), generated.media.as_ref().unwrap().thumbnail);
+        assert_eq!(
+            rt.cache.pin_thumbnail(id).await.unwrap().unwrap(),
+            generated.media.as_ref().unwrap().thumbnail
+        );
         let first_deadline = backend.get_pin_entry(&url).await.unwrap().pin_until;
         Arc::make_mut(&mut rt).pin_ttl_secs = 180;
         let before_calls = measured.calls.load(Ordering::Relaxed);
@@ -426,7 +539,8 @@ async fn a_handler_upgrade_activates_the_previously_untracked_placeholder_pin() 
     let fallback = run(&url, rt, None).await;
     assert!(fallback.pin.is_none());
 
-    let url = register_path("pin-placeholder-upgrade", "image.svg", vec![vector_reply(), vector_reply()]);
+    let url =
+        register_path("pin-placeholder-upgrade", "image.svg", vec![vector_reply(), vector_reply()]);
     let backend = memory();
     let mut rt = runtime(CacheStore::backend_only(backend.clone()));
     Arc::make_mut(&mut rt).pin_ttl_secs = 60;
@@ -445,12 +559,19 @@ async fn a_handler_upgrade_activates_the_previously_untracked_placeholder_pin() 
 
 #[tokio::test]
 async fn deriving_a_placeholder_pin_does_not_read_entries_or_write_pin_bookkeeping() {
-    let measured = Arc::new(CountedPinBackend { backend: memory(), calls: Default::default() });
+    let measured = Arc::new(CountedPinBackend {
+        backend: memory(),
+        calls: Default::default(),
+    });
     let store = CacheStore::backend_only(measured.clone());
     let result = ThumbResult {
         status: ResultStatus::Success,
         source: Some(ResultSource::Placeholder),
-        media: Some(ThumbMedia { kind: FileKind::Image, placeholder: "image".into(), ..Default::default() }),
+        media: Some(ThumbMedia {
+            kind: FileKind::Image,
+            placeholder: "image".into(),
+            ..Default::default()
+        }),
         ..Default::default()
     };
     let pin = store.pin_result("source", &result, 60).await.unwrap().unwrap();
@@ -464,9 +585,18 @@ async fn deriving_a_placeholder_pin_does_not_read_entries_or_write_pin_bookkeepi
 async fn matching_304_refreshes_freshness_cost_and_pin_without_rerendering() {
     for (name, backend) in [
         ("refresh-memory", memory()),
-        ("refresh-sqlite", Arc::new(SqliteCacheBackend::open(":memory:").unwrap()) as Arc<dyn CacheBackend>),
+        (
+            "refresh-sqlite",
+            Arc::new(SqliteCacheBackend::open(":memory:").unwrap()) as Arc<dyn CacheBackend>,
+        ),
     ] {
-        let url = register(name, vec![reply(304, &[("cache-control", "max-age=3600"), ("age", "3500")])]);
+        let url = register(
+            name,
+            vec![reply(
+                304,
+                &[("cache-control", "max-age=3600"), ("age", "3500")],
+            )],
+        );
         let original = seed(&backend, &url, hints(Some("\"A\""), false)).await;
         let rt = runtime(CacheStore::backend_only(backend.clone()));
         let before = unix_now_secs();
@@ -512,12 +642,19 @@ async fn different_client_validator_never_validates_unrelated_stored_bytes() {
     let backend = memory();
     let url = register("different-validators", vec![reply(304, &[])]);
     seed(&backend, &url, hints(Some("\"A\""), false)).await;
-    let result = run(&url, runtime(CacheStore::backend_only(backend)), Some(hints(Some("\"B\""), false))).await;
+    let result =
+        run(&url, runtime(CacheStore::backend_only(backend)), Some(hints(Some("\"B\""), false))).await;
     assert_eq!(result.media.unwrap().thumbnail, vec![1, 2, 3]);
     assert!(requests(&url)[0].contains(&("if-none-match".into(), "\"A\"".into())));
 
     let backend = memory();
-    let url = register("client-only-validator", vec![reply(304, &[("etag", "\"B\""), ("cache-control", "max-age=60")])]);
+    let url = register(
+        "client-only-validator",
+        vec![reply(
+            304,
+            &[("etag", "\"B\""), ("cache-control", "max-age=60")],
+        )],
+    );
     let original = seed(&backend, &url, hints(None, false)).await;
     let rt = runtime(CacheStore::new(backend.clone(), 5));
     let result = run(&url, rt.clone(), Some(hints(Some("\"B\""), false))).await;
@@ -530,14 +667,25 @@ async fn different_client_validator_never_validates_unrelated_stored_bytes() {
 #[tokio::test]
 async fn last_modified_and_no_cache_force_conditional_revalidation() {
     let backend = memory();
-    let url = register("last-modified", vec![reply(304, &[("cache-control", "no-cache, max-age=3600")]), reply(304, &[])]);
+    let url = register(
+        "last-modified",
+        vec![
+            reply(304, &[("cache-control", "no-cache, max-age=3600")]),
+            reply(304, &[]),
+        ],
+    );
     let lm = "Wed, 01 Jan 2020 00:00:00 GMT";
-    seed(&backend, &url, CacheHints {
-        expires_at: Some(unix_now_secs() + 3600),
-        last_modified: Some(lm.into()),
-        no_cache: true,
-        ..Default::default()
-    }).await;
+    seed(
+        &backend,
+        &url,
+        CacheHints {
+            expires_at: Some(unix_now_secs() + 3600),
+            last_modified: Some(lm.into()),
+            no_cache: true,
+            ..Default::default()
+        },
+    )
+    .await;
     let rt = runtime(CacheStore::backend_only(backend));
     for _ in 0..2 {
         let media = run(&url, rt.clone(), None).await.media.unwrap();
@@ -569,7 +717,8 @@ async fn uncacheable_200_replaces_old_pinned_payload_instead_of_leaving_stale_by
     let mut response = reply(200, &[("cache-control", "no-store"), ("content-type", "image/png")]);
     let mut bytes = std::io::Cursor::new(vec![]);
     DynamicImage::ImageRgb8(RgbImage::from_pixel(16, 16, image::Rgb([0, 240, 10])))
-        .write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .unwrap();
     response.body = bytes.into_inner();
     response.headers.insert("content-length".into(), response.body.len().to_string());
     let url = register("no-store-200", vec![response]);
@@ -594,15 +743,26 @@ async fn debounce_precedes_client_and_durable_checks_and_does_not_slide() {
     let backend = memory();
     let rt = runtime(CacheStore::new(backend, 1));
     let result = ThumbResult {
-        url: url.clone(), status: ResultStatus::Success, source: Some(ResultSource::Render),
-        media: Some(ThumbMedia { thumbnail: vec![7], cache: String::new(), ..Default::default() }),
+        url: url.clone(),
+        status: ResultStatus::Success,
+        source: Some(ResultSource::Render),
+        media: Some(ThumbMedia {
+            thumbnail: vec![7],
+            cache: String::new(),
+            ..Default::default()
+        }),
         ..Default::default()
     };
     rt.cache.debounce_store(&url, &result);
     tokio::time::sleep(std::time::Duration::from_millis(650)).await;
-    let mut cook = ThumbCook::<MockStream>::from_input(InputSpec {
-        url: url.clone(), cache: Some(hints(Some("\"client\""), true)), allow_local: false,
-    }, rt.clone());
+    let mut cook = ThumbCook::<MockStream>::from_input(
+        InputSpec {
+            url: url.clone(),
+            cache: Some(hints(Some("\"client\""), true)),
+            allow_local: false,
+        },
+        rt.clone(),
+    );
     cook.default_pin_ttl = 600;
     let (result, _, _) = cook.run().await;
     assert_eq!(result.media.unwrap().thumbnail, vec![7]);
@@ -646,7 +806,9 @@ async fn concurrent_revalidation_requests_share_the_final_response() {
         while requests(&url).is_empty() {
             tokio::task::yield_now().await;
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let second = {
         let url = url.clone();
         tokio::spawn(async move { run(&url, rt, None).await })
@@ -669,7 +831,9 @@ async fn cancelled_and_intermediate_responses_release_debounce_leaders() {
     let (hit, leader) = tokio::time::timeout(
         std::time::Duration::from_millis(100),
         cache.debounce_lookup("handoff", None),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     assert!(hit.is_none());
     leader.unwrap().complete(&ThumbResult {
         status: ResultStatus::Intermediate,
@@ -678,7 +842,9 @@ async fn cancelled_and_intermediate_responses_release_debounce_leaders() {
     let (hit, leader) = tokio::time::timeout(
         std::time::Duration::from_millis(100),
         cache.debounce_lookup("handoff", None),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     assert!(hit.is_none());
     assert!(leader.is_some());
 }
@@ -701,12 +867,15 @@ async fn aborting_a_cook_releases_its_leader_and_wakes_the_next_request() {
         while requests(&url).is_empty() {
             tokio::task::yield_now().await;
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let mut second = Box::pin(run(&url, rt, None));
     std::future::poll_fn(|cx| {
         assert!(std::future::Future::poll(second.as_mut(), cx).is_pending());
         std::task::Poll::Ready(())
-    }).await;
+    })
+    .await;
     first.abort();
     assert!(first.await.unwrap_err().is_cancelled());
     let result = tokio::time::timeout(std::time::Duration::from_secs(2), second).await.unwrap();

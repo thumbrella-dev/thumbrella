@@ -298,7 +298,8 @@ impl CacheHints {
             }
 
             if let Some(age_secs) = max_age {
-                let age_consumed = headers.get("age").and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0);
+                let age_consumed =
+                    headers.get("age").and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0);
                 let remaining = age_secs.saturating_sub(age_consumed);
                 let now = unix_now_secs();
                 hints.expires_at = Some(now.saturating_add(remaining));
@@ -346,7 +347,8 @@ impl CacheHints {
     /// Freshness requires a future `expires_at` and a policy permitting reuse.
     /// `no-cache` requires revalidation even when a future expiry is supplied.
     pub fn is_fresh(&self) -> bool {
-        !self.no_cache && !self.disallow_caching()
+        !self.no_cache
+            && !self.disallow_caching()
             && self.expires_at.is_some_and(|exp| unix_now_secs() < exp)
     }
 
@@ -404,10 +406,7 @@ impl CacheHints {
 }
 
 fn unix_now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 //  Wire format: <hex_epoch>:<base64_blob>
@@ -494,7 +493,8 @@ impl CacheHints {
         }
 
         let epoch = u64::from_str_radix(epoch_hex, 16).ok()?;
-        let buf = base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, blob).ok()?;
+        let buf =
+            base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, blob).ok()?;
 
         let mut pos = 0;
         let mut hints = Self {
@@ -700,7 +700,8 @@ mod tests {
         assert_eq!(merged.etag.as_deref(), Some("\"A\""));
         assert!(!merged.no_cache);
         assert!(merged.is_fresh());
-        let must_validate = std::collections::HashMap::from([("cache-control".into(), "no-cache".into())]);
+        let must_validate =
+            std::collections::HashMap::from([("cache-control".into(), "no-cache".into())]);
         assert!(!merged.revalidated(&must_validate).unwrap().is_fresh());
     }
 }

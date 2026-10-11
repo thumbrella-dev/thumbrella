@@ -186,7 +186,8 @@ pub fn collect_sections() -> Vec<CheckSection> {
 //  `formats` command prints which external tools were found/missing; the
 //  `check` command prints a short summary under the same conditions.
 
-static FORMAT_TOOLS: std::sync::RwLock<Option<(Vec<String>, Vec<String>)>> = std::sync::RwLock::new(None);
+static FORMAT_TOOLS: std::sync::RwLock<Option<(Vec<String>, Vec<String>)>> =
+    std::sync::RwLock::new(None);
 static CHECK_NOTES: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
 
 /// Record the external tools found and missing (for the `formats` output).
@@ -320,7 +321,6 @@ pub use crate::dispatch::{
     TIER2_BUILTIN, TIER3_BUILTIN, has_builtin_renderer, mark_tier2_builtin, mark_tier3_builtin,
 };
 
-
 /// Collect a diagnostic report for the current process environment.
 ///
 /// All configuration is read from `AppConfig` - which itself was populated
@@ -332,44 +332,40 @@ pub fn collect(cfg: &crate::config::AppConfig) -> CheckReport {
     // Tier 2 - prefer builtin when the renderer is compiled in, otherwise
     // check for a handoff URL, otherwise missing.  Bare auth tokens (no URL)
     // are treated as handoff with a default cloud endpoint.
-    let (tier2, tier2_handoff, tier2_validation) = if TIER2_BUILTIN.load(std::sync::atomic::Ordering::Acquire)
-    {
-        (TierStatus::Builtin, None, Validation::ok())
-    } else {
-        match cfg.tier2.url.as_ref() {
-            Some(url) => (
-                TierStatus::Handoff,
-                Some(url.clone()),
-                validate_handoff_target(url, &cfg.tier2.headers),
-            ),
-            None if cfg.tier2.headers.contains_key("Authorization") => (
-                TierStatus::Handoff,
-                None,
-                Validation::skipped(),
-            ),
-            None => (TierStatus::Missing, None, Validation::not_configured()),
-        }
-    };
+    let (tier2, tier2_handoff, tier2_validation) =
+        if TIER2_BUILTIN.load(std::sync::atomic::Ordering::Acquire) {
+            (TierStatus::Builtin, None, Validation::ok())
+        } else {
+            match cfg.tier2.url.as_ref() {
+                Some(url) => (
+                    TierStatus::Handoff,
+                    Some(url.clone()),
+                    validate_handoff_target(url, &cfg.tier2.headers),
+                ),
+                None if cfg.tier2.headers.contains_key("Authorization") => {
+                    (TierStatus::Handoff, None, Validation::skipped())
+                }
+                None => (TierStatus::Missing, None, Validation::not_configured()),
+            }
+        };
 
     // Tier 3 - same logic: builtin > handoff (URL or bare token) > missing.
-    let (tier3, tier3_handoff, tier3_validation) = if TIER3_BUILTIN.load(std::sync::atomic::Ordering::Acquire)
-    {
-        (TierStatus::Builtin, None, Validation::ok())
-    } else {
-        match cfg.tier3.url.as_ref() {
-            Some(url) => (
-                TierStatus::Handoff,
-                Some(url.clone()),
-                validate_handoff_target(url, &cfg.tier3.headers),
-            ),
-            None if cfg.tier3.headers.contains_key("Authorization") => (
-                TierStatus::Handoff,
-                None,
-                Validation::skipped(),
-            ),
-            None => (TierStatus::Missing, None, Validation::not_configured()),
-        }
-    };
+    let (tier3, tier3_handoff, tier3_validation) =
+        if TIER3_BUILTIN.load(std::sync::atomic::Ordering::Acquire) {
+            (TierStatus::Builtin, None, Validation::ok())
+        } else {
+            match cfg.tier3.url.as_ref() {
+                Some(url) => (
+                    TierStatus::Handoff,
+                    Some(url.clone()),
+                    validate_handoff_target(url, &cfg.tier3.headers),
+                ),
+                None if cfg.tier3.headers.contains_key("Authorization") => {
+                    (TierStatus::Handoff, None, Validation::skipped())
+                }
+                None => (TierStatus::Missing, None, Validation::not_configured()),
+            }
+        };
 
     // Cache - build a descriptive summary line.
     let (cache_config, cache_validation, cache_file_check) = match cfg.cache_url.as_ref() {
@@ -484,10 +480,7 @@ pub(crate) fn check_file_path(path: &str) -> FileCheck {
         (target.to_path_buf(), None)
     } else {
         let parent = target.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-        (
-            parent.to_path_buf(),
-            Some("file does not exist; parent directory checked".to_string()),
-        )
+        (parent.to_path_buf(), Some("file does not exist; parent directory checked".to_string()))
     };
 
     // access(2): tests with real UID/GID, never modifies the filesystem.
@@ -518,10 +511,7 @@ pub(crate) fn check_file_path(path: &str) -> FileCheck {
         (target.metadata().map(|m| !m.permissions().readonly()).unwrap_or(false), None)
     } else {
         let parent = target.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-        (
-            parent.exists(),
-            Some("file does not exist; parent directory checked".to_string()),
-        )
+        (parent.exists(), Some("file does not exist; parent directory checked".to_string()))
     };
 
     FileCheck {
@@ -605,7 +595,10 @@ fn detect_container_image() -> Option<String> {
     let containerenv = std::path::Path::new("/.containerenv").exists();
     let in_cgroup = std::fs::read_to_string("/proc/1/cgroup")
         .map(|s| {
-            s.contains("docker") || s.contains("containerd") || s.contains("kubepods") || s.contains("lxc")
+            s.contains("docker")
+                || s.contains("containerd")
+                || s.contains("kubepods")
+                || s.contains("lxc")
         })
         .unwrap_or(false);
 
@@ -704,8 +697,11 @@ impl CheckReport {
         print_dsn_var("TBR_CACHE", &self.cache_config, &self.cache_validation, &self.cache_file_check);
         if matches!(self.pin_validation.status, ValidationStatus::Error) {
             print_env_line("TBR_PIN", "invalid", "");
-            println!("  {}: {}", ux.red("error"),
-                self.pin_validation.message.as_deref().unwrap_or("invalid pin TTL"));
+            println!(
+                "  {}: {}",
+                ux.red("error"),
+                self.pin_validation.message.as_deref().unwrap_or("invalid pin TTL")
+            );
         } else {
             let value = format!("{} seconds", self.pin_ttl_secs);
             let state = if self.pin_enabled { "enabled" } else { "pinning disabled" };
@@ -773,7 +769,12 @@ fn print_env_default(name: &str, value: &str) {
 }
 
 /// Print a DSN-backed env var (TBR_TRACE, TBR_CACHE).
-fn print_dsn_var(name: &str, dsn: &Option<String>, validation: &Validation, file_check: &Option<FileCheck>) {
+fn print_dsn_var(
+    name: &str,
+    dsn: &Option<String>,
+    validation: &Validation,
+    file_check: &Option<FileCheck>,
+) {
     let ux = crate::ux::get();
 
     let Some(raw) = dsn else {
@@ -852,7 +853,10 @@ fn print_tier_var(name: &str, status: &TierStatus, validation: &Validation) {
 /// shared secret.  We only check that the URL resolves and the port accepts
 /// a TCP connection.
 #[cfg(feature = "native")]
-fn validate_handoff_target(url: &str, _headers: &std::collections::HashMap<String, String>) -> Validation {
+fn validate_handoff_target(
+    url: &str,
+    _headers: &std::collections::HashMap<String, String>,
+) -> Validation {
     use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
     use std::time::Duration;
 

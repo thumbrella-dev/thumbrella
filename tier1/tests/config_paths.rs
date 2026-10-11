@@ -8,10 +8,8 @@ struct TestDirectory(PathBuf);
 
 impl TestDirectory {
     fn new() -> Self {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        let nonce =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
         let path = std::env::temp_dir().join(format!("tbr-paths-{}-{nonce}", std::process::id()));
         std::fs::create_dir(&path).unwrap();
         Self(path)
@@ -63,10 +61,7 @@ async fn pin_and_placeholder_requests_are_logged_with_best_effort_redirect_dedup
     let directory = TestDirectory::new();
     let database = directory.0.join("cache.db");
     let backend = tier1::cache::sqlite::SqliteCacheBackend::open(database.to_str().unwrap()).unwrap();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
     backend
         .put(
             "source".into(),
@@ -123,11 +118,7 @@ async fn pin_and_placeholder_requests_are_logged_with_best_effort_redirect_dedup
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    assert!(
-        ready,
-        "server did not respond: {}",
-        std::fs::read_to_string(&error_path).unwrap()
-    );
+    assert!(ready, "server did not respond: {}", std::fs::read_to_string(&error_path).unwrap());
     let hit = client.get(format!("{base}/pin/{id}.jpeg")).send().await.unwrap();
     assert_eq!(hit.status(), reqwest::StatusCode::OK);
     let miss = client.get(format!("{base}/pin/v000000000000.jpeg")).send().await.unwrap();
@@ -161,13 +152,13 @@ async fn pin_and_placeholder_requests_are_logged_with_best_effort_redirect_dedup
     let logs = std::fs::read_to_string(&log_path).unwrap();
     let line = |prefix: &str| logs.lines().find(|line| line.starts_with(prefix)).unwrap().to_string();
     assert!(line(&format!("GET /pin/{id}.jpeg ")).contains("  200"));
-    assert!(line("GET /pin/v000000000000.jpeg ").contains("  307  redirect to /placeholder/video.jpeg"));
+    assert!(
+        line("GET /pin/v000000000000.jpeg ").contains("  307  redirect to /placeholder/video.jpeg")
+    );
     assert!(line("GET /pin/bad ").contains("  404"));
     assert!(!line("GET /pin/bad ").contains("redirect"));
     assert_eq!(
-        logs.lines()
-            .filter(|line| line.starts_with("GET /placeholder/video.jpeg "))
-            .count(),
+        logs.lines().filter(|line| line.starts_with("GET /placeholder/video.jpeg ")).count(),
         3,
         "{logs}"
     );
@@ -346,9 +337,8 @@ fn result_returns_a_real_candidate_pin_for_a_missing_handler_without_storing_the
     assert_eq!(result.pin.as_deref(), Some(format!("pin/{id}.jpeg").as_str()));
     let conn = rusqlite::Connection::open(&database).unwrap();
     for table in ["thumbrella", "thumbrella_pins"] {
-        let count: i64 = conn
-            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0))
-            .unwrap();
+        let count: i64 =
+            conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0)).unwrap();
         assert_eq!(count, 0, "{table} should not store this placeholder or its pin");
     }
 }
@@ -406,13 +396,16 @@ fn check_reports_pin_default_explicit_ttl_and_disabled_states() {
 #[test]
 fn invalid_pin_times_fail_json_and_text_checks_and_runtime_startup() {
     let directory = TestDirectory::new();
-    for value in ["-1", "1.5", "5d", "true", "4294967296", "18446744073709551616"] {
-        let output = directory
-            .command()
-            .env("TBR_PIN", value)
-            .args(["check", "--json"])
-            .output()
-            .unwrap();
+    for value in [
+        "-1",
+        "1.5",
+        "5d",
+        "true",
+        "4294967296",
+        "18446744073709551616",
+    ] {
+        let output =
+            directory.command().env("TBR_PIN", value).args(["check", "--json"]).output().unwrap();
         assert!(!output.status.success(), "{value}");
         let report: CheckReport = serde_json::from_slice(&output.stdout).unwrap();
         assert!(!report.healthy);
@@ -420,10 +413,7 @@ fn invalid_pin_times_fail_json_and_text_checks_and_runtime_startup() {
         assert!(!report.pin_default);
         assert_eq!(report.pin_validation.status, ValidationStatus::Error);
         let message = report.pin_validation.message.unwrap();
-        assert!(
-            message.contains(value) && message.contains("whole number of seconds"),
-            "{message}"
-        );
+        assert!(message.contains(value) && message.contains("whole number of seconds"), "{message}");
 
         let output = directory.command().env("TBR_PIN", value).arg("check").output().unwrap();
         assert!(!output.status.success());
@@ -439,10 +429,7 @@ fn invalid_pin_times_fail_json_and_text_checks_and_runtime_startup() {
             .unwrap();
         assert!(!output.status.success());
         let error = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            error.contains("TBR_PIN") && error.contains("whole number of seconds"),
-            "{error}"
-        );
+        assert!(error.contains("TBR_PIN") && error.contains("whole number of seconds"), "{error}");
         assert!(output.stdout.is_empty());
     }
 }

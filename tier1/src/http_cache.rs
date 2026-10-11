@@ -104,7 +104,8 @@ impl PinnedThumbnail {
             }
             // Never authorize a browser to reuse a pin beyond its own deadline.
             if let Some(stale) = hints.stale_while_revalidate.filter(|_| !hints.no_cache) {
-                let stale = u64::from(stale).min(self.until.saturating_sub(now.saturating_add(max_age)));
+                let stale =
+                    u64::from(stale).min(self.until.saturating_sub(now.saturating_add(max_age)));
                 if stale > 0 {
                     policy.push_str(&format!(", stale-while-revalidate={stale}"));
                 }
@@ -144,16 +145,8 @@ mod tests {
         assert!(headers.not_modified);
         assert_eq!(headers.etag, "\"source-v1\"");
         assert_eq!(headers.cache_control, "public, max-age=1000");
-        assert!(
-            pin.headers(1000, None, Some("Wed, 21 Oct 2015 07:28:00 GMT"))
-                .unwrap()
-                .not_modified
-        );
-        assert!(
-            !pin.headers(1000, None, Some("Tue, 20 Oct 2015 07:28:00 GMT"))
-                .unwrap()
-                .not_modified
-        );
+        assert!(pin.headers(1000, None, Some("Wed, 21 Oct 2015 07:28:00 GMT")).unwrap().not_modified);
+        assert!(!pin.headers(1000, None, Some("Tue, 20 Oct 2015 07:28:00 GMT")).unwrap().not_modified);
         assert!(
             !pin.headers(1000, Some("\"other\""), Some("Wed, 21 Oct 2015 07:28:00 GMT"))
                 .unwrap()

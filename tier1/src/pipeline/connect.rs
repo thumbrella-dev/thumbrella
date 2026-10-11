@@ -34,9 +34,7 @@ fn origin_of(url: &str) -> &str {
 pub async fn connect<S: HttpStream>(cook: &mut ThumbCook<S>) {
     let mut options = ConnectOptions::default();
 
-    options
-        .headers
-        .push(("User-Agent".to_string(), cook.runtime.user_agent.clone()));
+    options.headers.push(("User-Agent".to_string(), cook.runtime.user_agent.clone()));
 
     // Apply conditional request headers from caller's prior cache hints.
     if let Some(ref hints) = cook.input.cache
@@ -110,15 +108,14 @@ pub async fn connect<S: HttpStream>(cook: &mut ThumbCook<S>) {
         404 => Some(Arc::from("source not found")),
         410 => Some(Arc::from("source gone")),
         s if s >= 500 => Some(Arc::from(format!("server error (HTTP {s})").as_str())),
-        s if !(200..300).contains(&s) => Some(Arc::from(format!("unexpected HTTP status {s}").as_str())),
+        s if !(200..300).contains(&s) => {
+            Some(Arc::from(format!("unexpected HTTP status {s}").as_str()))
+        }
         _ => None,
     };
 
     if let Some(msg) = fail_msg {
-        cook.runtime
-            .url_failures
-            .record(cook.input.url.clone(), buf.status, msg.clone())
-            .await;
+        cook.runtime.url_failures.record(cook.input.url.clone(), buf.status, msg.clone()).await;
         cook.fail(msg.as_ref());
         return;
     }

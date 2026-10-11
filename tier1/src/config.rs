@@ -147,17 +147,19 @@ impl AppConfig {
         Self {
             port: env_u16("TBR_PORT", 3114),
             allow_local: env_bool("TBR_LOCAL", false),
-            scratch_dir: configured_scratch_dir().unwrap_or_else(|error| {
-                crate::ux::get().fatal(&format!("invalid TBR_SCRATCH: {error}"),
-                    "set TBR_SCRATCH to a path with defined variables, or unset it to use the default")
-            }).unwrap_or_else(default_scratch_dir),
+            scratch_dir: configured_scratch_dir()
+                .unwrap_or_else(|error| {
+                    crate::ux::get().fatal(
+                        &format!("invalid TBR_SCRATCH: {error}"),
+                        "set TBR_SCRATCH to a path with defined variables, or unset it to use the default",
+                    )
+                })
+                .unwrap_or_else(default_scratch_dir),
             tier2,
             tier3,
             handshake: env_opt_string("TBR_HANDSHAKE"),
             server: env_opt_string("TBR_SERVER"),
-            cache_url: std::env::var("TBR_CACHE")
-                .ok()
-                .filter(|v| !v.trim().is_empty()),
+            cache_url: std::env::var("TBR_CACHE").ok().filter(|v| !v.trim().is_empty()),
             cache_max_ttl_secs,
             cache_default_ttl_secs: env_opt_u32("TBR_CACHE_DEFAULT_TTL").unwrap_or(3_600) as u64,
             pin_ttl_secs,

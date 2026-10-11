@@ -427,7 +427,9 @@ fn infer_matcher_to_kind(mt: infer::MatcherType) -> FileKind {
         infer::MatcherType::Doc => FileKind::Document,
         infer::MatcherType::Text => FileKind::Text,
         infer::MatcherType::Book => FileKind::Document,
-        infer::MatcherType::App | infer::MatcherType::Font | infer::MatcherType::Custom => FileKind::Binary,
+        infer::MatcherType::App | infer::MatcherType::Font | infer::MatcherType::Custom => {
+            FileKind::Binary
+        }
     }
 }
 
@@ -488,18 +490,18 @@ fn ext_to_kind(ext: &str) -> FileKind {
         // Studio / VFX image formats (via oiiotool).
         "sgi" | "dpx" | "cin" | "dds" | "fits" | "iff" | "pic" | "rla" | "zfile" => FileKind::Image,
         // Camera-raw formats (TIFF-based containers).
-        "dng" | "cr2" | "nef" | "arw" | "orf" | "rw2" | "pef" | "srw" | "3fr" | "mef" | "rwl" | "raf"
-        | "fff" | "iiq" | "raw" => FileKind::Image,
+        "dng" | "cr2" | "nef" | "arw" | "orf" | "rw2" | "pef" | "srw" | "3fr" | "mef" | "rwl"
+        | "raf" | "fff" | "iiq" | "raw" => FileKind::Image,
         "svg" | "emf" | "wmf" => FileKind::Vector,
-        "mp4" | "mov" | "mkv" | "avi" | "webm" | "mpeg" | "ogv" | "flv" | "ts" | "3gp" | "wmv" | "m2ts"
-        | "mxf" | "av1" => FileKind::Video,
+        "mp4" | "mov" | "mkv" | "avi" | "webm" | "mpeg" | "ogv" | "flv" | "ts" | "3gp" | "wmv"
+        | "m2ts" | "mxf" | "av1" => FileKind::Video,
         "mp3" | "ogg" | "flac" | "wav" | "m4a" | "aac" | "midi" | "opus" | "oga" | "weba" | "wma"
         | "aiff" => FileKind::Audio,
-        "pdf" | "docx" | "xlsx" | "pptx" | "odt" | "doc" | "xls" | "ppt" | "odp" | "ods" | "epub" | "rtf"
-        | "html" | "xhtml" => FileKind::Document,
-        "usdz" | "usd" | "glb" | "gltf" | "obj" | "stl" | "fbx" | "dae" | "dxf" | "off" | "3ds" | "gml"
-        | "ply" | "pts" | "vrml" | "vtk" | "vtu" | "vtp" | "vti" | "vtr" | "vts" | "vtm" | "step"
-        | "iges" | "brep" | "exo" => FileKind::Geometry,
+        "pdf" | "docx" | "xlsx" | "pptx" | "odt" | "doc" | "xls" | "ppt" | "odp" | "ods" | "epub"
+        | "rtf" | "html" | "xhtml" => FileKind::Document,
+        "usdz" | "usd" | "glb" | "gltf" | "obj" | "stl" | "fbx" | "dae" | "dxf" | "off" | "3ds"
+        | "gml" | "ply" | "pts" | "vrml" | "vtk" | "vtu" | "vtp" | "vti" | "vtr" | "vts" | "vtm"
+        | "step" | "iges" | "brep" | "exo" => FileKind::Geometry,
         "zip" | "tar" | "gz" | "bz2" | "xz" | "rar" | "7z" => FileKind::Archive,
         "xml" | "json" | "txt" | "csv" | "md" => FileKind::Text,
         _ => FileKind::Unknown,
