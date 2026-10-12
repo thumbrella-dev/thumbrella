@@ -279,13 +279,14 @@ jobs:
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+          RELEASE_NOTES: ${{ needs.release-notes.outputs.body }}
         run: |
-          TAG="${{ needs.version.outputs.tag }}"
-          NOTES="${{ needs.release-notes.outputs.body }}"
+          printf '%s\n' "$RELEASE_NOTES" > release-notes.md
 
           gh release create "${TAG}" \
             --title "${TAG}" \
-            --notes "${NOTES}" \
+            --notes-file release-notes.md \
             --draft \
             thumbrella-${TAG}-linux-x86_64.tar.gz \
             thumbrella-${TAG}-windows-x86_64.zip
