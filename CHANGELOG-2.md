@@ -2,11 +2,15 @@
 
 ## Development
 
+
+## 2.0.0 - 2026/10/12
+
+Support for pinned urls and major version for ffmpeg
+
 - Update ffmpeg 9 and other Rust dependencies
 - Add `pin` to results with url path for sharable image link
 - Use $TBR_PIN to control pinning lifetime, or disable
 - Config envvar paths support envvar and tilde expansion
-- Simple favicon
 - Placeholder images served as cachable static media
 - Rename $TBR_ALLOW_LOCAL to $TBR_LOCAL
 - Enable Tower server concurrency limits
