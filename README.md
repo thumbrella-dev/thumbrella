@@ -47,7 +47,7 @@ galleries and file browsers, start with the `<tbr-thumb>` web component:
 
 ```html
 <script type="module">
-  import { tbrSetup } from "https://js.thumbrella.dev/1.4/tbr.js";
+  import { tbrSetup } from "https://js.thumbrella.dev/2.0/tbr.js";
   tbrSetup("http://localhost:3114");
 </script>
 
