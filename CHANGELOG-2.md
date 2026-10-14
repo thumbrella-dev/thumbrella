@@ -2,6 +2,11 @@
 
 ## Development
 
+
+## 2.0.1 - 2026/10/14
+
+Fix 2.0 regressions around handoffs and fallback behavior
+
 - Fix handoff logic regressions
 
 ## 2.0.0 - 2026/10/12

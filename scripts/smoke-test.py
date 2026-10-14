@@ -5,6 +5,8 @@ Smoke test for the Thumbrella standalone server (tier2 + tier3).
 Builds release binaries, then runs each through `check`, `result`, and `serve`
 commands.  The serve step starts a real HTTP server, hits /health and /thumb.jpeg,
 and shuts it down.
+Diagnostic checks and test servers use ephemeral ports so existing servers
+do not cause port conflicts.
 
 Usage:
     python scripts/smoke-test.py              # build + test both tiers
@@ -108,10 +110,11 @@ def run_check(binary_name, label):
     if not exe.exists():
         print(f"  SKIP: {exe} not found (build first)")
         return False
-    env = {**os.environ, "NO_COLOR": "1"}
+    env = {**os.environ, "NO_COLOR": "1", "TBR_PORT": "0"}
     result = run_capture([str(exe), "check", "--json"], env=env)
     if result.returncode != 0:
-        print(f"  {label} check FAILED:\n{result.stderr}")
+        print(f"  {label} check FAILED (exit code {result.returncode}):\n"
+              f"{result.stdout}\n{result.stderr}")
         return False
     try:
         report = json.loads(result.stdout)
