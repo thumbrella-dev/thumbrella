@@ -43,6 +43,156 @@ fn assert_success(output: &Output) {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 }
 
+#[tokio::test]
+async fn check_validates_health_for_both_handoff_targets_with_all_connect_headers() {
+    use axum::{Router, http::StatusCode, response::IntoResponse};
+    use std::sync::{Arc, Mutex};
+
+    let cases = [
+        ("missing", StatusCode::NOT_FOUND, "", Some("health returned HTTP 404")),
+        ("healthy", StatusCode::OK, r#"{"status":"ok","thumbrella":2}"#, None),
+        ("cloud", StatusCode::OK, r#"{"status":"ok","thumbrella":2,"token":true}"#, None),
+        (
+            "rejected",
+            StatusCode::OK,
+            r#"{"status":"ok","thumbrella":2,"token":false}"#,
+            Some("token rejected by cloud server"),
+        ),
+        ("unauthorized", StatusCode::UNAUTHORIZED, "", Some("health returned HTTP 401")),
+        ("unavailable", StatusCode::SERVICE_UNAVAILABLE, "", Some("health returned HTTP 503")),
+        ("html", StatusCode::OK, "<html>not a health endpoint</html>", Some("parse error")),
+        ("empty", StatusCode::OK, "{}", Some("invalid Thumbrella health response")),
+        (
+            "bad-status",
+            StatusCode::OK,
+            r#"{"status":"error","thumbrella":2}"#,
+            Some("invalid Thumbrella health response"),
+        ),
+        (
+            "bad-version",
+            StatusCode::OK,
+            r#"{"status":"ok","thumbrella":"2"}"#,
+            Some("invalid Thumbrella health response"),
+        ),
+        (
+            "bad-token",
+            StatusCode::OK,
+            r#"{"status":"ok","thumbrella":2,"token":"true"}"#,
+            Some("invalid token field"),
+        ),
+        (
+            "null-token",
+            StatusCode::OK,
+            r#"{"status":"ok","thumbrella":2,"token":null}"#,
+            Some("invalid token field"),
+        ),
+    ];
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&requests);
+    let app =
+        Router::new().fallback(move |request: axum::http::Request<axum::body::Body>| async move {
+            let path = request.uri().path().to_string();
+            recorded.lock().unwrap().push((
+                request.method().clone(),
+                path.clone(),
+                request.headers().clone(),
+            ));
+            let name = path.strip_prefix("/service/").and_then(|p| p.strip_suffix("/health"));
+            let (_, status, body, _) = cases
+                .iter()
+                .find(|case| Some(case.0) == name)
+                .copied()
+                .unwrap_or(("", StatusCode::NOT_FOUND, "", None));
+            (status, [("content-type", "application/json")], body).into_response()
+        });
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let directory = TestDirectory::new();
+
+    for variable in ["TBR_TIER2", "TBR_TIER3"] {
+        for (name, _, _, expected_error) in cases {
+            for with_headers in [false, true] {
+                let mut target = format!("{base}/service/{name}/");
+                if with_headers {
+                    target.push_str(",x-tbr-handshake=health-secret,tbr_s_health_test");
+                }
+                let mut command = directory.command();
+                command.env(variable, target).args(["check", "--json"]);
+                let output =
+                    tokio::task::spawn_blocking(move || command.output().unwrap()).await.unwrap();
+                let report: CheckReport = serde_json::from_slice(&output.stdout).unwrap();
+                let validation = if variable == "TBR_TIER2" {
+                    &report.tier2_validation
+                } else {
+                    &report.tier3_validation
+                };
+                let context = format!("{variable}: {name}, headers={with_headers}");
+                if let Some(error) = expected_error {
+                    assert_eq!(output.status.code(), Some(1), "{context}");
+                    assert!(!report.healthy, "{context}");
+                    assert_eq!(validation.status, ValidationStatus::Error, "{context}");
+                    assert!(
+                        validation.message.as_deref().unwrap().contains(error),
+                        "{context}: {:?}",
+                        validation.message
+                    );
+                } else {
+                    assert_success(&output);
+                    assert!(report.healthy, "{context}");
+                    assert_eq!(validation.status, ValidationStatus::Ok, "{context}");
+                }
+                let (method, path, headers) = requests.lock().unwrap().pop().expect(&context);
+                assert_eq!(method, axum::http::Method::GET, "{context}");
+                assert_eq!(path, format!("/service/{name}/health"), "{context}");
+                if with_headers {
+                    assert_eq!(headers["x-tbr-handshake"], "health-secret", "{context}");
+                    assert_eq!(headers["authorization"], "Bearer tbr_s_health_test", "{context}");
+                } else {
+                    assert!(!headers.contains_key("authorization"), "{context}");
+                }
+            }
+        }
+    }
+
+    let mut command = directory.command();
+    command
+        .env("TBR_TIER2", format!("{base}/service/missing"))
+        .env("TBR_TIER3", format!("{base}/service/cloud"))
+        .args(["check", "--json"]);
+    let output = tokio::task::spawn_blocking(move || command.output().unwrap()).await.unwrap();
+    let report: CheckReport = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!report.healthy);
+    assert_eq!(report.tier2_validation.status, ValidationStatus::Error);
+    assert_eq!(report.tier3_validation.status, ValidationStatus::Ok);
+    assert_eq!(requests.lock().unwrap().len(), 2);
+    server.abort();
+}
+
+#[test]
+fn check_rejects_malformed_handoff_connect_strings() {
+    let directory = TestDirectory::new();
+    for variable in ["TBR_TIER2", "TBR_TIER3"] {
+        for target in [
+            "not-a-token", "localhost:8001", "https://", "ftp://127.0.0.1",
+        ] {
+            let output =
+                directory.command().env(variable, target).args(["check", "--json"]).output().unwrap();
+            assert_eq!(output.status.code(), Some(1), "{variable}: {target}");
+            let report: CheckReport = serde_json::from_slice(&output.stdout).unwrap();
+            assert!(!report.healthy, "{variable}: {target}");
+            let validation = if variable == "TBR_TIER2" {
+                report.tier2_validation
+            } else {
+                report.tier3_validation
+            };
+            assert_eq!(validation.status, ValidationStatus::Error, "{variable}: {target}");
+            assert!(validation.message.is_some(), "{variable}: {target}");
+        }
+    }
+}
+
 struct TestServer(Child);
 
 impl Drop for TestServer {

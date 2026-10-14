@@ -131,9 +131,10 @@ impl InProcessRenderer for Tier3Renderer {
                 Some(FileKind::Document) => render_document_tier3(cook, &ext).await,
                 Some(FileKind::Geometry) => render_geometry_tier3(cook, &ext).await,
                 Some(FileKind::Image) if matches!(ext.as_str(), "jpeg" | "jpg") => {
-                    if render_image_tier3(cook, &ext).await {
-                        true
-                    } else if self.tier2.render(cook).await {
+                    if is_arithmetic_jpeg_peek(cook) {
+                        return render_image_tier3(cook, &ext).await;
+                    }
+                    if self.tier2.render(cook).await {
                         true
                     } else {
                         render_image_ffmpeg_fallback(cook, &ext).await
@@ -175,7 +176,7 @@ impl InProcessRenderer for Tier3Renderer {
 /// Render a JPEG image via tier-3-specific backends.
 ///
 /// Arithmetic-coded JPEGs (SOF9) are not supported by libav's mjpeg
-/// decoder.  Tier 3 uses ImageMagick which delegates to libjpeg-turbo
+/// decoder.  Tier 3 uses GraphicsMagick which delegates to libjpeg-turbo
 /// and handles all JPEG variants.
 async fn render_image_tier3(cook: &mut dyn RenderCook, ext: &str) -> bool {
     if !is_arithmetic_jpeg_peek(cook) {
@@ -190,7 +191,7 @@ async fn render_image_tier3(cook: &mut dyn RenderCook, ext: &str) -> bool {
         .unwrap_or(false);
 
     if !has_magick {
-        cook.note("external tool unavailable (magick)");
+        cook.note("arithmetic JPEG requires GraphicsMagick (gm) or a higher-tier handoff");
         return false;
     }
 

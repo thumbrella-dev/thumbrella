@@ -21,6 +21,8 @@
 
 use std::collections::HashMap;
 
+pub const DEFAULT_CLOUD_HOST: &str = "https://cloud.thumbrella.dev";
+
 /// Parsed connect-string target - URL plus optional HTTP headers.
 ///
 /// Follows the same syntax as `TBR_CONNECT` in the TypeScript client.
@@ -42,7 +44,7 @@ pub struct ConnectTarget {
 ///   `http://tier2:8000,tbr_e_3QnzBcWx7KpRmYT2000example` → `Authorization: Bearer`
 ///
 /// Bare tokens without a `://` URL:
-/// - Auth token (`tbr_[a-z]_` prefix) → `Authorization: Bearer <token>`, `url: None`
+/// - Auth token (`tbr_[a-z]_` prefix) resolves to the cloud endpoint with bearer authentication.
 /// - Otherwise → invalid; returns a default (not-configured) target
 pub fn parse_connect_target(raw: Option<String>) -> ConnectTarget {
     let Some(raw) = raw else {
@@ -54,7 +56,10 @@ pub fn parse_connect_target(raw: Option<String>) -> ConnectTarget {
         if looks_like_auth_token(&raw) {
             let mut headers = HashMap::new();
             headers.insert("Authorization".to_string(), format!("Bearer {raw}"));
-            return ConnectTarget { url: None, headers };
+            return ConnectTarget {
+                url: Some(DEFAULT_CLOUD_HOST.to_string()),
+                headers,
+            };
         }
         // Bare handshake / unknown values are not valid connect strings.
         return ConnectTarget::default();
@@ -111,4 +116,35 @@ pub fn parse_connect_target(raw: Option<String>) -> ConnectTarget {
 pub(crate) fn looks_like_auth_token(value: &str) -> bool {
     let b = value.as_bytes();
     b.len() >= 6 && b.starts_with(b"tbr_") && b[4].is_ascii_lowercase() && b[5] == b'_'
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bare_token_resolves_to_cloud_handoff_endpoint() {
+        let token = "tbr_s_test_only";
+        let target = parse_connect_target(Some(token.into()));
+        assert_eq!(target.url.as_deref(), Some(DEFAULT_CLOUD_HOST));
+        assert_eq!(target.headers["Authorization"], format!("Bearer {token}"));
+    }
+
+    #[test]
+    fn explicit_endpoint_and_headers_are_preserved() {
+        let target =
+            parse_connect_target(Some("http://localhost:8000/,tbr_s_test_only,x-test=yes".into()));
+        assert_eq!(target.url.as_deref(), Some("http://localhost:8000"));
+        assert_eq!(target.headers["Authorization"], "Bearer tbr_s_test_only");
+        assert_eq!(target.headers["x-test"], "yes");
+    }
+
+    #[test]
+    fn unset_and_invalid_bare_values_do_not_configure_a_handoff() {
+        for raw in [None, Some("not-a-token".into())] {
+            let target = parse_connect_target(raw);
+            assert!(target.url.is_none());
+            assert!(target.headers.is_empty());
+        }
+    }
 }

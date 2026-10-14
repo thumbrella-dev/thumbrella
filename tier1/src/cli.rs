@@ -315,34 +315,17 @@ async fn run_server(runtime: Arc<Runtime>) {
     {
         let mut report = crate::check::collect(&cfg);
 
-        // Async cloud-token validation (same as run_check).
-        // validate_handoff_target does a sync TCP connect only; the async
-        // /health check verifies the token when present.
-        for (url, headers, validation_field) in [
-            (cfg.tier2.url.as_deref(), &cfg.tier2.headers, &mut report.tier2_validation),
-            (cfg.tier3.url.as_deref(), &cfg.tier3.headers, &mut report.tier3_validation),
-        ] {
-            if let (Some(url), Some(auth)) = (url, headers.get("Authorization")) {
-                match check_handoff_health(url, auth).await {
-                    Ok(()) => *validation_field = crate::check::Validation::ok(),
-                    Err(_) => {} // stays as Error from collect(); reported below
-                }
-            }
-        }
+        validate_handoff_health(&cfg, &mut report).await;
 
         let mut issues: Vec<String> = Vec::new();
 
-        if matches!(report.tier2, crate::check::TierStatus::Error) {
-            issues.push("tier 2 handoff target is unreachable".into());
-        }
-        if matches!(report.tier3, crate::check::TierStatus::Error) {
-            issues.push("tier 3 handoff target is unreachable".into());
-        }
-        if matches!(report.tier2_validation.status, crate::check::ValidationStatus::Error) {
-            issues.push("tier 2 validation failed".into());
-        }
-        if matches!(report.tier3_validation.status, crate::check::ValidationStatus::Error) {
-            issues.push("tier 3 validation failed".into());
+        for (tier, validation) in [(2, &report.tier2_validation), (3, &report.tier3_validation)] {
+            if matches!(validation.status, crate::check::ValidationStatus::Error) {
+                issues.push(format!(
+                    "tier {tier} validation failed: {}",
+                    validation.message.as_deref().unwrap_or("validation failed")
+                ));
+            }
         }
         if matches!(report.cache_validation.status, crate::check::ValidationStatus::Error) {
             issues.push("cache backend is unreachable or misconfigured".into());
@@ -717,30 +700,14 @@ async fn run_check(json: bool, tier: u8) {
         }
     }
 
-    // For tier2/tier3: when the connect target includes an Authorization
-    // header (cloud token), validate it against the /health endpoint.
-    // Only the cloud server includes the "token" field in /health.
-    for (url, headers, validation_field) in [
-        (cfg.tier2.url.as_deref(), &cfg.tier2.headers, &mut report.tier2_validation),
-        (cfg.tier3.url.as_deref(), &cfg.tier3.headers, &mut report.tier3_validation),
-    ] {
-        if let (Some(url), Some(auth)) = (url, headers.get("Authorization")) {
-            match check_handoff_health(url, auth).await {
-                Ok(()) => {
-                    *validation_field = check::Validation::ok();
-                }
-                Err(e) => {
-                    *validation_field = check::Validation::error(e);
-                    report.healthy = false;
-                }
-            }
-        }
-    }
+    validate_handoff_health(&cfg, &mut report).await;
 
     // Recalculate healthy after async checks may have corrected the
     // TCP-only validation from collect().
     if !report.healthy {
-        report.healthy = !matches!(report.tier2_validation.status, check::ValidationStatus::Error)
+        report.healthy = !matches!(report.tier2, check::TierStatus::Error)
+            && !matches!(report.tier3, check::TierStatus::Error)
+            && !matches!(report.tier2_validation.status, check::ValidationStatus::Error)
             && !matches!(report.tier3_validation.status, check::ValidationStatus::Error)
             && !matches!(report.cache_validation.status, check::ValidationStatus::Error)
             && !matches!(report.pin_validation.status, check::ValidationStatus::Error)
@@ -765,13 +732,33 @@ async fn run_check(json: bool, tier: u8) {
     }
 }
 
-/// Check a cloud handoff target's `/health` endpoint for token validity.
-///
-/// The cloud server's `/health` response includes a `"token"` field.
-/// `"token": true` means the token is valid; `"token": false` means the
-/// token was rejected.  This check only applies to targets with an
-/// Authorization header (cloud tokens).
-async fn check_handoff_health(url: &str, auth_header: &str) -> Result<(), String> {
+async fn validate_handoff_health(
+    cfg: &crate::config::AppConfig,
+    report: &mut crate::check::CheckReport,
+) {
+    use crate::check::Validation;
+
+    for (target, validation) in [
+        (&cfg.tier2, &mut report.tier2_validation),
+        (&cfg.tier3, &mut report.tier3_validation),
+    ] {
+        if let Some(url) = target.url.as_deref() {
+            *validation = match check_handoff_health(url, &target.headers).await {
+                Ok(()) => Validation::ok(),
+                Err(e) => {
+                    report.healthy = false;
+                    Validation::error(e)
+                }
+            };
+        }
+    }
+}
+
+/// Verify a handoff target's `/health` response, including cloud token validity.
+async fn check_handoff_health(
+    url: &str,
+    headers: &std::collections::HashMap<String, String>,
+) -> Result<(), String> {
     let health_url = format!("{}/health", url.trim_end_matches('/'));
 
     let client = reqwest::Client::builder()
@@ -779,12 +766,11 @@ async fn check_handoff_health(url: &str, auth_header: &str) -> Result<(), String
         .build()
         .map_err(|e| format!("failed to create HTTP client: {e}"))?;
 
-    let resp = client
-        .get(&health_url)
-        .header("Authorization", auth_header)
-        .send()
-        .await
-        .map_err(|e| format!("health check failed: {e}"))?;
+    let mut request = client.get(&health_url);
+    for (name, value) in headers {
+        request = request.header(name, value);
+    }
+    let resp = request.send().await.map_err(|e| format!("health check failed: {e}"))?;
 
     if !resp.status().is_success() {
         return Err(format!("health returned HTTP {}", resp.status().as_u16()));
@@ -793,14 +779,21 @@ async fn check_handoff_health(url: &str, auth_header: &str) -> Result<(), String
     let body: serde_json::Value =
         resp.json().await.map_err(|e| format!("health response parse error: {e}"))?;
 
-    match body.get("token").and_then(|v| v.as_bool()) {
-        Some(true) => Ok(()),
-        Some(false) => Err("token rejected by cloud server (token: false)".to_string()),
-        None => {
-            // Standalone servers don't include "token" in /health.
-            // Absent field is fine - it's not a cloud server.
-            Ok(())
+    if body.get("status").and_then(|v| v.as_str()) != Some("ok")
+        || body.get("thumbrella").and_then(|v| v.as_u64()).is_none()
+    {
+        return Err(
+            "invalid Thumbrella health response: expected status: ok and a numeric thumbrella version"
+                .to_string(),
+        );
+    }
+
+    match body.get("token") {
+        None | Some(serde_json::Value::Bool(true)) => Ok(()),
+        Some(serde_json::Value::Bool(false)) => {
+            Err("token rejected by cloud server (token: false)".to_string())
         }
+        Some(_) => Err("health response has an invalid token field: expected a boolean".to_string()),
     }
 }
 

@@ -324,9 +324,8 @@ pub use crate::dispatch::{
 /// Collect a diagnostic report for the current process environment.
 ///
 /// All configuration is read from `AppConfig` - which itself was populated
-/// from env vars at startup.  External connectivity checks (ping handoff
-/// servers, connect to cache) are stubbed as `Skipped` until those subsystems
-/// are wired up.
+/// from env vars at startup. Handoff validation here checks TCP connectivity;
+/// the CLI check and serve diagnostics also validate the HTTP health response.
 #[cfg(feature = "native")]
 pub fn collect(cfg: &crate::config::AppConfig) -> CheckReport {
     // Tier 2 - prefer builtin when the renderer is compiled in, otherwise
@@ -345,6 +344,13 @@ pub fn collect(cfg: &crate::config::AppConfig) -> CheckReport {
                 None if cfg.tier2.headers.contains_key("Authorization") => {
                     (TierStatus::Handoff, None, Validation::skipped())
                 }
+                None if env_is_set("TBR_TIER2") => (
+                    TierStatus::Error,
+                    None,
+                    Validation::error(
+                        "invalid connect string: expected an HTTP(S) URL or Thumbrella auth token",
+                    ),
+                ),
                 None => (TierStatus::Missing, None, Validation::not_configured()),
             }
         };
@@ -363,6 +369,13 @@ pub fn collect(cfg: &crate::config::AppConfig) -> CheckReport {
                 None if cfg.tier3.headers.contains_key("Authorization") => {
                     (TierStatus::Handoff, None, Validation::skipped())
                 }
+                None if env_is_set("TBR_TIER3") => (
+                    TierStatus::Error,
+                    None,
+                    Validation::error(
+                        "invalid connect string: expected an HTTP(S) URL or Thumbrella auth token",
+                    ),
+                ),
                 None => (TierStatus::Missing, None, Validation::not_configured()),
             }
         };
@@ -831,6 +844,9 @@ fn print_tier_var(name: &str, status: &TierStatus, validation: &Validation) {
         }
         TierStatus::Error => {
             println!("{name}: {}", ux.red("error"));
+            if let Some(message) = validation.message.as_deref() {
+                println!("  {}: {message}", ux.red("error"));
+            }
         }
         TierStatus::Handoff => {
             let raw = std::env::var(name).unwrap_or_default();

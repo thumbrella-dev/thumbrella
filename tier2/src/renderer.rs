@@ -214,7 +214,7 @@ fn is_arithmetic_peek(cook: &dyn RenderCook) -> bool {
 /// Arithmetic-coded JPEGs use SOF9 (0xC9) or SOF10 (0xCA) markers.  Libav's
 /// built-in mjpeg decoder does not support these - it returns
 /// "unsupported coding type (c9)".  When detected, tier 2 returns false
-/// so the cook can fall back to tier 3's ffmpeg CLI.
+/// so the cook can fall back to tier 3's GraphicsMagick backend.
 ///
 /// Returns `true` if arithmetic coding is detected.
 fn detect_arithmetic_jpeg(reader: &mut dyn ReadSeek) -> bool {

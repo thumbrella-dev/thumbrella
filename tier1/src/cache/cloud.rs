@@ -115,10 +115,7 @@ use crate::cache::{
     PinFuture,
     pins::{pin_kind, valid_pin},
 };
-use crate::connect::ConnectTarget;
-
-/// Default cloud service host.
-const DEFAULT_CLOUD_HOST: &str = "https://cloud.thumbrella.dev";
+use crate::connect::{ConnectTarget, DEFAULT_CLOUD_HOST};
 
 /// Cache backend that delegates to the Thumbrella cloud service.
 #[derive(Clone)]

@@ -21,6 +21,8 @@
 //!
 //! # Connect-string syntax
 //!
+//! Bare auth tokens resolve to `https://cloud.thumbrella.dev`.
+//!
 //! `TBR_TIER2` and `TBR_TIER3` use the same connect-string format as
 //! `TBR_CONNECT` in the TypeScript client:
 //!

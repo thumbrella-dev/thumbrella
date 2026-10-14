@@ -1239,6 +1239,12 @@ impl<S: HttpStream> ThumbCook<S> {
                 && self.runtime.handoff_tier2.url.is_some()
             {
                 2
+            } else if routed_tier == 3
+                && self.runtime.handoff_tier3.url.is_none()
+                && self.runtime.handoff_tier2.url.is_some()
+            {
+                // An external tier 2 may provide its own higher-tier renderers.
+                2
             } else {
                 routed_tier
             };
@@ -1249,18 +1255,6 @@ impl<S: HttpStream> ThumbCook<S> {
             for attempt_tier in start_tier..=3 {
                 if attempt_tier == 1 {
                     continue; // tier 1 already tried locally
-                }
-
-                // Tier 3 gate: check the dynamic availability registry.
-                // External tier 3 servers are assumed full-capability.
-                // Skip this gate when tier 3 is built-in: the in-process
-                // renderer already tried and failed; blocking the handoff
-                // chain here would suppress the correct fallback path.
-                if attempt_tier == 3
-                    && !crate::dispatch::TIER3_BUILTIN.load(std::sync::atomic::Ordering::Acquire)
-                    && !crate::dispatch::tier3_can_handle(&ext)
-                {
-                    continue;
                 }
 
                 let target = match attempt_tier {
@@ -1319,6 +1313,20 @@ impl<S: HttpStream> ThumbCook<S> {
 
                 match outcome {
                     Ok(ref remote) if remote.result.status == ResultStatus::Success => {
+                        // A successful placeholder is not a render; let the next tier try.
+                        if attempt_tier == 2
+                            && self.runtime.handoff_tier3.url.is_some()
+                            && remote
+                                .result
+                                .media
+                                .as_ref()
+                                .is_some_and(|media| !media.placeholder.is_empty())
+                        {
+                            self.out_message = remote.result.message.clone().unwrap_or_else(|| {
+                                format!("tier {attempt_tier} returned a placeholder")
+                            });
+                            continue;
+                        }
                         self.apply_handoff_response(remote, attempt_tier, local_bytes);
                         if self.status == CookStatus::Complete {
                             self.out_duration = t0.elapsed().as_secs_f64();
