@@ -164,7 +164,7 @@ pub struct HttpBuffer<S: HttpStream> {
     pub headers: HashMap<String, String>,
     /// HTTP status code of the initial response.
     pub status: u16,
-    /// `Content-Length` from the server, if provided.
+    /// Source length from `Content-Length`, or learned by reaching the primary stream's EOF.
     pub content_length: Option<u64>,
     /// `true` if the server supports byte-range requests.
     pub accepts_ranges: bool,
@@ -495,6 +495,7 @@ impl<S: HttpStream> HttpBuffer<S> {
             let chunk = self.stream.next_chunk().await?;
             self.io_secs_count += t.elapsed().as_secs_f64();
             let Some(chunk) = chunk else {
+                self.content_length.get_or_insert(self.stream_pos);
                 return Ok(0);
             };
             self.streaming_chunk_start = self.stream_pos;
@@ -540,6 +541,7 @@ impl<S: HttpStream> HttpBuffer<S> {
             let chunk = self.stream.next_chunk().await?;
             self.io_secs_count += t.elapsed().as_secs_f64();
             let Some(chunk) = chunk else {
+                self.content_length.get_or_insert(self.stream_pos);
                 break;
             };
             let start = self.stream_pos;

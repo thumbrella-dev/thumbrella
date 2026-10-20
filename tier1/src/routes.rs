@@ -513,6 +513,48 @@ mod pin_tests {
         runtime
     }
 
+    #[tokio::test]
+    async fn batch_preserves_requested_local_paths_in_json_ndjson_and_overflow() {
+        ux::init();
+        for streaming in [false, true] {
+            let mut rt = runtime(CacheStore::none(), 0);
+            Arc::make_mut(&mut rt).allow_local = true;
+            let requested = format!(
+                "/nonexistent-tbr-url-test-{}/page.htm?signature=one#section",
+                std::process::id()
+            );
+            let req: CallRequest = serde_json::from_value(json!({
+                "items": vec![requested.clone(); BATCH_MAX_ITEMS + 1],
+            }))
+            .unwrap();
+            let mut headers = HeaderMap::new();
+            if streaming {
+                headers.insert(header::ACCEPT, "application/x-ndjson".parse().unwrap());
+            }
+            let response =
+                batch(State(rt), headers, ConnectInfo("127.0.0.1:12345".parse().unwrap()), Json(req))
+                    .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let items: Vec<ThumbResult> = if streaming {
+                std::str::from_utf8(&bytes)
+                    .unwrap()
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect()
+            } else {
+                let body: Value = serde_json::from_slice(&bytes).unwrap();
+                serde_json::from_value(body["items"].clone()).unwrap()
+            };
+            assert_eq!(items.len(), BATCH_MAX_ITEMS + 1);
+            assert!(items.iter().all(|result| result.url == requested));
+            assert_eq!(
+                items.iter().filter(|result| result.status == ResultStatus::BatchLimit).count(),
+                1
+            );
+        }
+    }
+
     async fn start_server(runtime: Arc<Runtime>) -> (String, tokio::task::JoinHandle<()>) {
         ux::init();
         let app = axum::Router::new()
@@ -1131,13 +1173,13 @@ pub async fn batch(
 
     let mut jobs = Vec::with_capacity(req.items.len());
     for (idx, input) in req.items.into_iter().enumerate() {
-        let (url, cache) = input.into_parts();
-        let url = match normalize_url(url.clone(), runtime.allow_local) {
+        let (requested_url, cache) = input.into_parts();
+        let url = match normalize_url(requested_url.clone(), runtime.allow_local) {
             Ok(u) => u,
             Err(msg) => {
                 // One rejected item aborts the whole batch - no item is
                 // processed, so report what was refused and why.
-                log_early_exit("POST", "/batch", &format!("{msg} ({url})"), &ip);
+                log_early_exit("POST", "/batch", &format!("{msg} ({requested_url})"), &ip);
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(json!({ "error": format!("items[{idx}]: {msg}") })),
@@ -1147,6 +1189,7 @@ pub async fn batch(
         };
         jobs.push((
             idx,
+            requested_url,
             InputSpec {
                 url: url.clone(),
                 cache,
@@ -1160,7 +1203,7 @@ pub async fn batch(
     let overflow: Vec<ThumbResult> = if jobs.len() > BATCH_MAX_ITEMS {
         jobs.split_off(BATCH_MAX_ITEMS)
             .into_iter()
-            .map(|(_, spec)| ThumbResult::batch_limit(spec.url, BATCH_MAX_ITEMS))
+            .map(|(_, requested_url, _)| ThumbResult::batch_limit(requested_url, BATCH_MAX_ITEMS))
             .collect()
     } else {
         Vec::new()
@@ -1180,20 +1223,23 @@ pub async fn batch(
         }
         tokio::spawn(async move {
             let mut pending = JoinSet::new();
-            for (_idx, spec) in jobs {
+            for (_idx, requested_url, spec) in jobs {
                 let item_runtime = Arc::clone(&batch_runtime);
                 let item_tx = tx.clone();
                 pending.spawn(async move {
                     let t_item = Instant::now();
                     let progress_tx = item_tx.clone();
-                    let progress = Box::new(move |result| {
+                    let progress_url = requested_url.clone();
+                    let progress = Box::new(move |mut result: ThumbResult| {
+                        result.url = progress_url.clone();
                         let _ = progress_tx
                             .send(as_ndjson_line(serde_json::to_value(&result).unwrap_or_default()));
                     });
-                    let (result, _trace, mut after) =
+                    let (mut result, _trace, mut after) =
                         ThumbCook::<PlatformStream>::from_input(spec, item_runtime)
                             .run_with_progress(Some(progress))
                             .await;
+                    result.url = requested_url;
                     after.drain_spawn();
                     let dur = t_item.elapsed().as_millis() as u64;
                     log_result(&result, dur);
@@ -1220,12 +1266,13 @@ pub async fn batch(
 
     // Non-streaming: wait for all, then log each result.
     let mut pool = FuturesUnordered::new();
-    for (idx, spec) in jobs {
+    for (idx, requested_url, spec) in jobs {
         let job_runtime = Arc::clone(&runtime);
         pool.push(async move {
             let t_item = Instant::now();
-            let (result, trace, after) =
+            let (mut result, trace, after) =
                 ThumbCook::<PlatformStream>::from_input(spec, job_runtime).run().await;
+            result.url = requested_url;
             let dur = t_item.elapsed().as_millis() as u64;
             (idx, result, trace, after, dur)
         });

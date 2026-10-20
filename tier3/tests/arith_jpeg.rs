@@ -224,7 +224,7 @@ async fn arithmetic_jpeg_escalates_past_a_successful_tier2_placeholder() {
     let placeholder = ThumbResult {
         status: ResultStatus::Success,
         source: Some(ResultSource::Placeholder),
-        message: Some("no higher-tier renderer is configured".into()),
+        message: Some("no renderer available".into()),
         media: Some(ThumbMedia {
             kind: tier1::FileKind::Image,
             extension: "jpeg".into(),
@@ -257,7 +257,7 @@ async fn arithmetic_jpeg_escalates_past_a_successful_tier2_placeholder() {
 
     let result = result(&tier2, "image.jpg", &[("TBR_TIER2", &tier2.url)], true).await;
     assert_eq!(result.source, Some(ResultSource::Placeholder));
-    assert_eq!(result.message.as_deref(), Some("no higher-tier renderer is configured"));
+    assert_eq!(result.message.as_deref(), Some("no renderer available"));
 }
 
 #[tokio::test]
@@ -310,7 +310,7 @@ async fn arithmetic_jpeg_renders_through_a_real_tier3_handoff() {
         ThumbResult {
             status: ResultStatus::Success,
             source: Some(ResultSource::Placeholder),
-            message: Some("no higher-tier renderer is configured".into()),
+            message: Some("no renderer available".into()),
             media: Some(ThumbMedia {
                 kind: tier1::FileKind::Image,
                 extension: "jpeg".into(),

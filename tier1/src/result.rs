@@ -98,7 +98,7 @@ pub struct CallRecord {
 /// stores this payload inside a cache entry, with its source URL cleared.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThumbMedia {
-    /// `Content-Length` from the upstream server, or 0.
+    /// Source size from `Content-Length` or observed EOF, or 0 when unknown.
     pub file_size: u64,
     /// Detected media category.
     pub kind: FileKind,
@@ -146,7 +146,7 @@ impl Default for ThumbMedia {
 /// for the same file share the same `media`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThumbResult {
-    /// The source URL that was requested.
+    /// The exact source URL requested by this caller, not the canonical cache identity.
     pub url: String,
     /// High-level outcome.
     pub status: ResultStatus,

@@ -261,7 +261,7 @@ pub struct MediaInfo {
     pub extension: Option<String>,
     /// Format-specific properties (dimensions, color depth, …).
     pub properties: Option<Value>,
-    /// `Content-Length` from the server, if provided.
+    /// Source size from `Content-Length` or an observed end of the body.
     pub file_size: Option<u64>,
 }
 
@@ -560,7 +560,9 @@ impl<S: HttpStream> ThumbCook<S> {
             .http_buf
             .as_mut()
             .ok_or_else(|| crate::http_buf::HttpError::Network("no open connection".into()))?;
-        buf.read_at(offset, len).await
+        let result = buf.read_at(offset, len).await;
+        self.media.file_size = buf.content_length.or(self.media.file_size);
+        result
     }
 
     /// Read up to `out.len()` bytes from the current cursor position.
@@ -569,7 +571,9 @@ impl<S: HttpStream> ThumbCook<S> {
             .http_buf
             .as_mut()
             .ok_or_else(|| crate::http_buf::HttpError::Network("no open connection".into()))?;
-        buf.read(out).await
+        let result = buf.read(out).await;
+        self.media.file_size = buf.content_length.or(self.media.file_size);
+        result
     }
 
     /// Issue a direct Range GET for `len` bytes starting at `start`.
@@ -652,13 +656,8 @@ impl<S: HttpStream> ThumbCook<S> {
     /// if one was read, for forwarding as a handoff head-start.
     /// Sets `http_buf` to `None`.
     pub async fn http_close(&mut self) -> Option<Vec<u8>> {
-        let first_page = if let Some(b) = self.http_buf.as_mut() {
-            // Snapshot I/O time before the buffer is dropped.
-            self.tel_io_secs = b.io_secs();
-            b.close().await
-        } else {
-            None
-        };
+        self.stamp_download_bytes();
+        let first_page = if let Some(b) = self.http_buf.as_mut() { b.close().await } else { None };
         self.http_buf = None;
         first_page
     }
@@ -672,7 +671,11 @@ impl<S: HttpStream> ThumbCook<S> {
         if self.out_download_bytes == 0 && fetched > 0 {
             self.out_download_bytes = fetched;
         }
-        self.tel_io_secs = self.http_io_secs();
+        if self.http_buf.is_some() {
+            self.tel_io_secs = self.http_io_secs();
+            self.media.file_size =
+                self.http_buf.as_ref().and_then(|b| b.content_length).or(self.media.file_size);
+        }
     }
 
     //  Output views
@@ -695,6 +698,7 @@ impl<S: HttpStream> ThumbCook<S> {
     pub fn to_result(&self) -> ThumbResult {
         if let Some(ref cached) = self.debounce_result {
             let mut result = cached.clone();
+            result.url = self.input.url.clone();
             result.duration = self.out_duration;
             return result;
         }
@@ -706,7 +710,7 @@ impl<S: HttpStream> ThumbCook<S> {
             CookStatus::Intermediate => ResultStatus::Intermediate,
         };
         ThumbResult {
-            url: self.src.canonical_url.clone().unwrap_or_else(|| self.input.url.clone()),
+            url: self.input.url.clone(),
             status,
             duration: self.out_duration,
             download_size: self.out_download_bytes,
@@ -1367,10 +1371,8 @@ impl<S: HttpStream> ThumbCook<S> {
 
             self.status = CookStatus::Complete;
             self.placeholder_source = Some(ResultSource::Placeholder);
-            self.out_message = self
-                .render_note
-                .clone()
-                .unwrap_or_else(|| "no higher-tier renderer is configured".to_string());
+            self.out_message =
+                self.render_note.clone().unwrap_or_else(|| "no renderer available".to_string());
             self.out_duration = t0.elapsed().as_secs_f64();
             self.finish(after).await
         }

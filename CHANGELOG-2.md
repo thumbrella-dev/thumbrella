@@ -2,6 +2,8 @@
 
 ## Development
 
+- result urls match the request urls, no longer sanitized
+- html requests provide a proper document result with placeholder
 
 ## 2.0.1 - 2026/10/14
 

@@ -299,6 +299,206 @@ fn capability_renderer(available: bool) -> Arc<CapabilityRenderer> {
 }
 
 #[tokio::test]
+async fn result_url_preserves_request_across_render_cache_and_debounce() {
+    let first_url =
+        register_path("url-identity", "image.svg?signature=first#one", vec![vector_reply()]);
+    let second_url = register_path("url-identity", "image.svg?signature=second#two", vec![]);
+    let key = crate::source::canonical_url(&first_url).unwrap();
+    let backend = memory();
+    let mut rt = runtime(CacheStore::new(backend.clone(), 60));
+    Arc::make_mut(&mut rt).renderer = Some(capability_renderer(true));
+    let first = run(&first_url, rt.clone(), None).await;
+    assert_eq!(first.url, first_url);
+    assert_eq!(first.source, Some(ResultSource::Render));
+    assert!(backend.get_entry(&key, 0).await.is_some());
+    assert!(backend.get_entry(&first_url, 0).await.is_none());
+
+    let debounced = run(&second_url, rt, None).await;
+    assert_eq!(debounced.url, second_url);
+    assert_eq!(debounced.source, Some(ResultSource::Cache));
+    assert_eq!(debounced.media.as_ref().unwrap().thumbnail, first.media.unwrap().thumbnail);
+
+    let cached = run(&second_url, runtime(CacheStore::backend_only(backend)), None).await;
+    assert_eq!(cached.url, second_url);
+    assert_eq!(cached.source, Some(ResultSource::Cache));
+    assert!(requests(&second_url).is_empty());
+
+    let fresh = run(&second_url, runtime(CacheStore::none()), Some(hints(Some("\"A\""), true))).await;
+    assert_eq!(fresh.url, second_url);
+    assert_eq!(fresh.source, Some(ResultSource::NotModified));
+}
+
+#[tokio::test]
+async fn result_url_preserves_request_on_redirects_progress_failures_and_handoffs() {
+    let url = "HTTPS://Example.COM/source.svg?signature=one#section";
+    let mut cook = ThumbCook::<MockStream>::new(url, runtime(CacheStore::none()));
+    cook.src.canonical_url = Some("https://cdn.example/redirected.svg".into());
+    cook.src.final_url = Some("https://cdn.example/redirected.svg?signature=two".into());
+    cook.status = CookStatus::Complete;
+    assert_eq!(cook.to_result().url, url);
+    assert_eq!(cook.to_progress_result(0.1).url, url);
+    cook.fail("source not found");
+    assert_eq!(cook.to_result().url, url);
+
+    let mut cook =
+        ThumbCook::<MockStream>::from_handoff(cook.take_handoff().await, runtime(CacheStore::none()));
+    assert_eq!(cook.to_result().url, url);
+    cook.debounce_result = Some(ThumbResult {
+        url: "https://previous-caller.example/".into(),
+        ..Default::default()
+    });
+    assert_eq!(cook.to_result().url, url);
+}
+
+#[tokio::test]
+async fn html_returns_document_placeholder_when_no_renderer_handles_it() {
+    for (name, path, body, content_type) in [
+        ("html-magic", "page", "<!DOCTYPE html><html><body>Hello</body></html>", None),
+        ("html-header", "page", "", Some("text/html; charset=utf-8")),
+        ("html-unknown-ext", "page.php", "", Some("text/html")),
+        ("html-extension", "page.html", "", None),
+        ("html-alias", "page.HTM?signature=one#section", "", None),
+    ] {
+        for registered in [false, true] {
+            let mut response = reply(200, &[]);
+            response.body = body.as_bytes().to_vec();
+            if let Some(ct) = content_type {
+                response.headers.insert("content-type".into(), ct.into());
+            }
+            let url = register_path(&format!("{name}-{registered}"), path, vec![response]);
+            let renderer = capability_renderer(false);
+            let mut rt = runtime(CacheStore::debounce_only(60));
+            if registered {
+                Arc::make_mut(&mut rt).renderer = Some(renderer.clone());
+            }
+            let result = run(&url, rt.clone(), None).await;
+            assert_eq!(result.url, url);
+            assert_eq!(result.status, ResultStatus::Success);
+            assert_eq!(result.source, Some(ResultSource::Placeholder));
+            if !registered {
+                assert_eq!(result.message.as_deref(), Some("no renderer available"));
+            }
+            assert_eq!(result.download_size, body.len() as u64);
+            let media = result.media.unwrap();
+            assert_eq!(media.file_size, body.len() as u64);
+            assert_eq!(media.kind, FileKind::Document);
+            assert_eq!(media.extension, "html");
+            assert_eq!(media.mime, "text/html");
+            assert_eq!(media.placeholder, "document");
+            assert_eq!(media.thumbnail, crate::assets::placeholder_for_kind(FileKind::Document));
+            assert_eq!(renderer.calls.load(Ordering::Relaxed), usize::from(registered));
+            assert_eq!(run(&url, rt, None).await.source, Some(ResultSource::Cache));
+            assert_eq!(requests(&url).len(), 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn closing_http_buffer_preserves_download_accounting_for_any_media() {
+    let body = vec![b'x'; 8192];
+    let mut response = reply(200, &[]);
+    response.body = body.clone();
+    let url = register_path("close-accounting", "file.unknown", vec![response]);
+    let mut cook = ThumbCook::<MockStream>::new(url, runtime(CacheStore::none()));
+    pipeline::connect(&mut cook).await;
+    pipeline::inspect(&mut cook).await;
+    assert_eq!(cook.http_bytes_fetched(), body.len() as u64);
+    assert_eq!(cook.out_download_bytes, 0);
+    cook.http_close().await;
+    assert_eq!(cook.out_download_bytes, body.len() as u64);
+    let io_secs = cook.tel_io_secs;
+    cook.http_close().await;
+    cook.stamp_download_bytes();
+    assert_eq!(cook.out_download_bytes, body.len() as u64);
+    assert_eq!(cook.tel_io_secs, io_secs);
+}
+
+#[tokio::test]
+async fn inspect_learns_source_size_only_when_real_eof_is_observed() {
+    let page_size = crate::http_buf::PAGE_SIZE;
+    for size in [
+        0,
+        37,
+        page_size - 1,
+        page_size,
+        page_size + 1,
+        page_size * 2,
+    ] {
+        let mut response = reply(200, &[]);
+        response.body = vec![b'x'; size];
+        let url = register_path(&format!("learn-size-{size}"), "file.unknown", vec![response]);
+        let mut cook = ThumbCook::<MockStream>::new(url, runtime(CacheStore::none()));
+        pipeline::connect(&mut cook).await;
+        pipeline::inspect(&mut cook).await;
+        let expected = (size < page_size).then_some(size as u64);
+        assert_eq!(cook.media.file_size, expected, "size={size}");
+        assert_eq!(cook.to_progress_result(0.1).media.unwrap().file_size, expected.unwrap_or(0));
+        assert_eq!(cook.http_read_at(0, size + 1).await.unwrap().len(), size);
+        assert_eq!(cook.media.file_size, Some(size as u64));
+        cook.http_close().await;
+        assert_eq!(cook.to_result().media.unwrap().file_size, size as u64);
+    }
+}
+
+#[tokio::test]
+async fn artificial_eof_does_not_become_source_size_but_streaming_eof_does() {
+    let size = crate::http_buf::PAGE_SIZE * 2;
+    let mut response = reply(200, &[]);
+    response.body = vec![b'x'; size];
+    let url = register_path("streaming-learn-size", "file.unknown", vec![response]);
+    let mut cook = ThumbCook::<MockStream>::new(url, runtime(CacheStore::none()));
+    pipeline::connect(&mut cook).await;
+    cook.http_set_eof(64);
+    assert_eq!(cook.http_read_at(0, 128).await.unwrap().len(), 64);
+    assert_eq!(cook.media.file_size, None);
+    cook.http_clear_eof();
+    cook.http_enter_streaming_mode();
+    let mut bytes = vec![0; size + 1];
+    let mut received = 0;
+    loop {
+        let n = cook.http_read(&mut bytes).await.unwrap();
+        if n == 0 {
+            break;
+        }
+        received += n;
+    }
+    assert_eq!(received, size);
+    assert_eq!(cook.media.file_size, Some(size as u64));
+}
+
+#[tokio::test]
+async fn learned_source_size_excludes_range_downloads() {
+    let body = b"small source";
+    let mut response = reply(200, &[]);
+    response.body = body.to_vec();
+    let mut range = reply(206, &[]);
+    range.body = vec![b'y'; 8];
+    let url = register_path("range-learn-size", "file.unknown", vec![response, range]);
+    let mut cook = ThumbCook::<MockStream>::new(url, runtime(CacheStore::none()));
+    pipeline::connect(&mut cook).await;
+    cook.http_fetch_range(10000, 8).await.unwrap();
+    pipeline::inspect(&mut cook).await;
+    assert_eq!(cook.media.file_size, Some(body.len() as u64));
+    cook.http_close().await;
+    assert_eq!(cook.out_download_bytes, body.len() as u64 + 8);
+    assert_eq!(cook.to_result().media.unwrap().file_size, body.len() as u64);
+}
+
+#[tokio::test]
+async fn html_http_errors_remain_failures() {
+    let url = register_path(
+        "html-not-found",
+        "page.html",
+        vec![reply(404, &[("content-type", "text/html")])],
+    );
+    let result = run(&url, runtime(CacheStore::none()), None).await;
+    assert_eq!(result.status, ResultStatus::Failed);
+    assert_eq!(result.http_status, Some(404));
+    assert_eq!(result.url, url);
+    assert_eq!(result.media.unwrap().placeholder, "failed");
+}
+
+#[tokio::test]
 async fn missing_local_handlers_keep_client_and_debounce_caches_and_allow_upgrades() {
     for registered in [false, true] {
         let url = register_path(

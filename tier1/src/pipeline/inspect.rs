@@ -70,9 +70,8 @@ pub async fn inspect<S: HttpStream>(cook: &mut ThumbCook<S>) {
 ///
 /// Priority order:
 /// 1. Magic bytes via `infer` - most reliable.
-/// 2. HTTP `Content-Type` header - trusted server classification, used when
-///    magic bytes produce nothing or only a generic container result.
-/// 3. URL path extension - last resort when neither infer nor server helped.
+/// 2. Known URL path extension - also refines generic containers.
+/// 3. HTTP `Content-Type` header - used when neither magic nor extension helped.
 fn sniff(bytes: &[u8], url: &str, content_type: Option<&str>) -> (FileKind, String, String) {
     let url_ext = url_extension(url);
 
@@ -135,7 +134,12 @@ fn sniff(bytes: &[u8], url: &str, content_type: Option<&str>) -> (FileKind, Stri
     if let Some(ct) = content_type {
         // Strip parameters like "; charset=utf-8".
         let mime = ct.split(';').next().unwrap_or(ct).trim().to_ascii_lowercase();
-        let ct_ext = url_ext.clone().unwrap_or_else(|| mime_to_extension(&mime).to_string());
+        let mime_ext = mime_to_extension(&mime);
+        let ct_ext = if mime_ext == "bin" {
+            url_ext.clone().unwrap_or_else(|| mime_ext.to_string())
+        } else {
+            mime_ext.to_string()
+        };
         let ct_kind = mime_to_kind(&mime, &ct_ext);
         if !matches!(ct_kind, FileKind::Unknown) {
             return (ct_kind, mime, ct_ext);
@@ -150,6 +154,46 @@ fn sniff(bytes: &[u8], url: &str, content_type: Option<&str>) -> (FileKind, Stri
     }
 
     (FileKind::Unknown, "application/octet-stream".to_string(), "bin".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn html_uses_normal_sniffing_and_canonical_extensions() {
+        for (bytes, url, content_type) in [
+            (
+                b"<!DOCTYPE html><html><body>Hello</body></html>".as_slice(),
+                "https://example.com/",
+                None,
+            ),
+            (b"".as_slice(), "https://example.com/page", Some("text/html; charset=utf-8")),
+            (b"".as_slice(), "https://example.com/page.php", Some("TEXT/HTML; charset=utf-8")),
+            (b"".as_slice(), "https://example.com/page.html", None),
+            (b"".as_slice(), "https://example.com/page.HTM?token=1#section", None),
+        ] {
+            assert_eq!(
+                sniff(bytes, url, content_type),
+                (FileKind::Document, "text/html".into(), "html".into()),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn html_header_does_not_override_magic_or_a_known_extension() {
+        for (bytes, url) in [
+            (b"\x89PNG\r\n\x1a\n".as_slice(), "https://example.com/"),
+            (b"".as_slice(), "https://example.com/file.png"),
+        ] {
+            assert_eq!(
+                sniff(bytes, url, Some("text/html")),
+                (FileKind::Image, "image/png".into(), "png".into())
+            );
+        }
+        assert_eq!(sniff(b"not recognized", "https://example.com/page", None).0, FileKind::Unknown);
+    }
 }
 
 //  Image property inspection
@@ -572,6 +616,7 @@ fn mime_to_extension(mime: &str) -> &'static str {
         "model/vnd.collada+xml" => "dae",
         "model/stl" => "stl",
         "text/html" => "html",
+        "application/xhtml+xml" => "xhtml",
         "text/xml" => "xml",
         "text/plain" => "txt",
         "text/csv" => "csv",
