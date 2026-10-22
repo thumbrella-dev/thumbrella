@@ -2,6 +2,11 @@
 
 ## Development
 
+
+## 2.1.0 - 2026/10/22
+
+Cleanup reponse urls so clients can match results to requests
+
 - result urls match the request urls, no longer sanitized
 - html requests provide a proper document result with placeholder
 
