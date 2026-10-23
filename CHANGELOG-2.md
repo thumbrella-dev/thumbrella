@@ -2,6 +2,11 @@
 
 ## Development
 
+
+## 2.1.1 - 2026/10/23
+
+Cache updating and freshness handling
+
 - Update cache expirations on 304 responses
 - Default freshness ttl is 5 minutes, even with etag or last modified
 
