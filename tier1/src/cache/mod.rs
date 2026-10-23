@@ -1295,15 +1295,19 @@ mod tests {
         assert_eq!(second.default_pin_ttl, 0);
         assert_eq!(runtime.cache_default_ttl_secs, 3_600);
 
+        // Validators alone no longer zero out client freshness; the runtime
+        // freshness default still applies and stays separate from retention.
         first.status = crate::CookStatus::Complete;
         first.src.cache_hints = Some(CacheHints {
             etag: Some("\"v1\"".into()),
             ..Default::default()
         });
+        let now = unix_now_secs();
         let token = first.to_result().media.unwrap().cache;
         let hints = CacheHints::decode(&token).unwrap();
         assert_eq!(hints.etag.as_deref(), Some("\"v1\""));
-        assert!(!hints.is_fresh());
+        assert!(hints.is_fresh());
+        assert!(hints.expires_at.unwrap() >= now + 3_600);
 
         first.src.cache_hints = Some(CacheHints::default());
         let now = unix_now_secs();
@@ -1727,11 +1731,15 @@ mod tests {
         for cache in ["", "invalid-token"] {
             assert_eq!(CacheEntry::freshness_deadline(cache), 0);
         }
+        // A validator without a Cache-Control freshness directive falls back to
+        // the default TTL rather than being treated as immediately stale.
+        let before = unix_now_secs();
         let token = CacheHints {
             etag: Some("\"A\"".into()),
             ..Default::default()
         }
         .encode(60);
-        assert_eq!(CacheEntry::freshness_deadline(&token), 1);
+        let deadline = CacheEntry::freshness_deadline(&token);
+        assert!((before + 60..=unix_now_secs() + 60).contains(&deadline));
     }
 }

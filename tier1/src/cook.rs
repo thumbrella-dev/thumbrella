@@ -1004,23 +1004,16 @@ impl<S: HttpStream> ThumbCook<S> {
         if !self.status.is_processing() {
             if self.status == CookStatus::Fresh {
                 let prior = self.input.cache.clone().expect("304 requires conditional hints");
-                let updated = prior.revalidated(&self.http_headers);
-                self.src.cache_hints = Some(updated.clone().unwrap_or(prior));
+                let refreshed =
+                    prior.revalidated(&self.http_headers, self.runtime.cache_default_ttl_secs);
+                self.src.cache_hints = Some(refreshed.clone());
                 if validates_stored && let Some((mut entry, backend)) = pre_cached {
                     let expected_cache = entry.media.cache.clone();
                     self.restore_cached_media(&entry.media, backend);
-                    if updated.is_some() {
-                        entry.set_cache(
-                            self.src
-                                .cache_hints
-                                .as_ref()
-                                .unwrap()
-                                .encode(self.runtime.cache_default_ttl_secs),
-                        );
-                        entry.cache_until = self.cache_expires_at();
-                        entry.last_accessed_at = crate::cache::unix_now_secs();
-                        self.runtime.cache.revalidate(cache_key, entry, expected_cache, after);
-                    }
+                    entry.set_cache(refreshed.encode(self.runtime.cache_default_ttl_secs));
+                    entry.cache_until = self.cache_expires_at();
+                    entry.last_accessed_at = crate::cache::unix_now_secs();
+                    self.runtime.cache.revalidate(cache_key, entry, expected_cache, after);
                 }
             }
             self.stamp_download_bytes();
@@ -1425,10 +1418,10 @@ impl<S: HttpStream> ThumbCook<S> {
 
                 // Inject a cache expiry so clients know when to retry.
                 // - No renderer for this format → 1 day.
-                // - Tried and fell back → upstream cache with 1 h floor.
+                // - Tried and fell back → upstream cache with the default floor.
                 let hints = self.src.cache_hints.take();
                 self.src.cache_hints = if tried_render {
-                    Some(hints.unwrap_or_default().with_min_expiry(3600))
+                    Some(hints.unwrap_or_default().with_min_expiry(self.runtime.cache_default_ttl_secs))
                 } else if let Some(ttl) = self.render_disabled_ttl_secs {
                     Some(CacheHints::expiring_in(ttl))
                 } else {

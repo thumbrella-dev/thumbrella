@@ -86,8 +86,9 @@ pub struct AppConfig {
     /// Maximum server-side cache TTL in seconds.  Upstream `max-age` values
     /// are capped at this duration.  Default: 7 days (604800).
     pub cache_max_ttl_secs: u64,
-    /// Default cache TTL when upstream provides no freshness hints.
-    /// Default: 1 hour (3600).
+    /// Default cache TTL when upstream provides no `Cache-Control` freshness
+    /// directive.  Validators alone (ETag / Last-Modified) do not override it.
+    /// Hardcoded: 5 minutes (300).
     pub cache_default_ttl_secs: u64,
     /// Sliding pin TTL. Defaults to the maximum cache TTL; zero disables pins.
     pub pin_ttl_secs: u64,
@@ -122,8 +123,8 @@ impl Default for AppConfig {
             tier3: ConnectTarget::default(),
             handshake: None,
             cache_url: None,
-            cache_max_ttl_secs: 604_800,   // 7 days
-            cache_default_ttl_secs: 3_600, // 1 hour
+            cache_max_ttl_secs: 604_800, // 7 days
+            cache_default_ttl_secs: 300, // 5 minutes
             pin_ttl_secs: 604_800,
             pin_ttl_default: true,
             pin_ttl_error: None,
@@ -163,7 +164,7 @@ impl AppConfig {
             server: env_opt_string("TBR_SERVER"),
             cache_url: std::env::var("TBR_CACHE").ok().filter(|v| !v.trim().is_empty()),
             cache_max_ttl_secs,
-            cache_default_ttl_secs: env_opt_u32("TBR_CACHE_DEFAULT_TTL").unwrap_or(3_600) as u64,
+            cache_default_ttl_secs: 300, // hardcoded - not exposed as an env var
             pin_ttl_secs,
             pin_ttl_default,
             pin_ttl_error,

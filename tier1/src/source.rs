@@ -211,6 +211,12 @@ pub struct CacheHints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale_while_revalidate: Option<u32>,
 
+    /// Origin freshness lifetime in seconds from `Cache-Control: max-age` or
+    /// `s-maxage`.  Kept separate from `expires_at` so a 304 can restart the
+    /// clock without shortening a long lifetime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_age: Option<u32>,
+
     /// True when `Cache-Control: immutable` was present.
     /// The resource will not change within its freshness window; clients should
     /// skip revalidation until `expires_at` elapses.
@@ -303,6 +309,7 @@ impl CacheHints {
                 let remaining = age_secs.saturating_sub(age_consumed);
                 let now = unix_now_secs();
                 hints.expires_at = Some(now.saturating_add(remaining));
+                hints.max_age = u32::try_from(age_secs).ok();
                 any = true;
             }
         }
@@ -352,28 +359,54 @@ impl CacheHints {
             && self.expires_at.is_some_and(|exp| unix_now_secs() < exp)
     }
 
-    /// Merge metadata for the representation validated by a 304. A response
-    /// without cache metadata leaves the prior hints unchanged.
-    pub fn revalidated(&self, headers: &std::collections::HashMap<String, String>) -> Option<Self> {
-        let updated = Self::from_response_headers(headers)?;
+    /// Merge metadata for the representation validated by a 304.
+    ///
+    /// A 304 confirms the stored representation is still current, so the
+    /// freshness clock restarts.  A `Cache-Control` window in the 304 wins;
+    /// otherwise the expiry becomes `default_ttl_secs` from now.  Validators
+    /// and policy flags from the stored response are preserved when the 304
+    /// omits them.
+    pub fn revalidated(
+        &self,
+        headers: &std::collections::HashMap<String, String>,
+        default_ttl_secs: u64,
+    ) -> Self {
         let mut merged = self.clone();
-        if headers.contains_key("cache-control") {
-            merged.no_cache = updated.no_cache;
-            merged.no_store = updated.no_store;
-            merged.private = updated.private;
-            merged.immutable = updated.immutable;
-            merged.stale_while_revalidate = updated.stale_while_revalidate;
+        let mut explicit_window = false;
+
+        if let Some(updated) = Self::from_response_headers(headers) {
+            if headers.contains_key("cache-control") {
+                merged.no_cache = updated.no_cache;
+                merged.no_store = updated.no_store;
+                merged.private = updated.private;
+                merged.immutable = updated.immutable;
+                merged.stale_while_revalidate = updated.stale_while_revalidate;
+                explicit_window = updated.expires_at.is_some();
+                if updated.max_age.is_some() {
+                    merged.max_age = updated.max_age;
+                }
+            }
+            if updated.expires_at.is_some() {
+                merged.expires_at = updated.expires_at;
+            }
+            if updated.etag.is_some() {
+                merged.etag = updated.etag;
+            }
+            if updated.last_modified.is_some() {
+                merged.last_modified = updated.last_modified;
+            }
         }
-        if updated.expires_at.is_some() {
-            merged.expires_at = updated.expires_at;
+
+        // Restart the freshness clock unless the response supplied its own
+        // window or forbids reuse.  The stored origin lifetime is reused so a
+        // long `max-age` is not shortened to the default; only hints without a
+        // recorded lifetime fall back to it.
+        if !explicit_window && !merged.no_cache && !merged.disallow_caching() {
+            let lifetime = merged.max_age.map(u64::from).unwrap_or(default_ttl_secs);
+            merged.expires_at = Some(unix_now_secs().saturating_add(lifetime));
         }
-        if updated.etag.is_some() {
-            merged.etag = updated.etag;
-        }
-        if updated.last_modified.is_some() {
-            merged.last_modified = updated.last_modified;
-        }
-        Some(merged)
+
+        merged
     }
 
     /// Returns `true` if this resource must NOT be stored in any cache.
@@ -421,24 +454,20 @@ impl CacheHints {
     ///
     /// Trailing zero bytes in the blob are trimmed to keep the string compact.
     ///
-    /// When validators (etag/last-modified) are present but no freshness
-    /// window exists, epoch is set to `1` (already expired).  Clients MUST
-    /// re-validate but SHOULD store the data for conditional requests.
-    ///
-    /// `default_ttl_secs` is used when no `expires_at` and no validators
-    /// are present - the result gets a short freshness window.
+    /// `default_ttl_secs` is used when the upstream supplied no `Cache-Control`
+    /// freshness directive.  Validators (etag/last-modified) do **not**
+    /// suppress this window; they only enable conditional revalidation once it
+    /// lapses.  `no-cache` still forces the stale epoch `1`, and `no-store` /
+    /// `private` still produce an empty string.
     pub fn encode(&self, default_ttl_secs: u64) -> String {
         if self.no_store || self.private {
             return String::new();
         }
 
-        let has_validator = self.etag.is_some() || self.last_modified.is_some();
         let epoch = if self.no_cache {
             1
         } else if let Some(e) = self.expires_at {
             e
-        } else if has_validator {
-            1 // stale immediately, but client should store for conditional revalidation
         } else {
             unix_now_secs() + default_ttl_secs
         };
@@ -470,6 +499,14 @@ impl CacheHints {
 
         // Field 6: no_cache (old readers still see the stale epoch).
         buf.push(if self.no_cache { 1 } else { 0 });
+
+        // Field 7: max_age (origin freshness lifetime)
+        if let Some(max_age) = self.max_age {
+            buf.push(4);
+            buf.extend_from_slice(&max_age.to_be_bytes());
+        } else {
+            buf.push(0);
+        }
 
         // Trim trailing zero bytes (missing positional fields default to zero),
         // but keep at least one byte so the base64 portion is never empty.
@@ -542,6 +579,17 @@ impl CacheHints {
         }
         if pos < buf.len() {
             hints.no_cache = buf[pos] != 0;
+            pos += 1;
+        }
+
+        // Field 7: max_age
+        if pos < buf.len() {
+            let hdr = buf[pos];
+            pos += 1;
+            if hdr == 4 && pos + 4 <= buf.len() {
+                let arr: [u8; 4] = buf[pos..pos + 4].try_into().unwrap();
+                hints.max_age = Some(u32::from_be_bytes(arr));
+            }
         }
 
         Some(hints)
@@ -585,6 +633,7 @@ mod tests {
         let orig = CacheHints {
             expires_at: Some(1780007113),
             stale_while_revalidate: Some(3600),
+            max_age: Some(86_400),
             immutable: true,
             etag: Some("\"abc123\"".into()),
             last_modified: Some("Thu, 01 Jan 2026 00:00:00 GMT".into()),
@@ -595,6 +644,7 @@ mod tests {
         let back = CacheHints::decode(&wire).expect("should decode");
         assert_eq!(back.expires_at, orig.expires_at);
         assert_eq!(back.stale_while_revalidate, orig.stale_while_revalidate);
+        assert_eq!(back.max_age, orig.max_age);
         assert_eq!(back.immutable, orig.immutable);
         assert_eq!(back.etag, orig.etag);
         assert_eq!(back.last_modified, orig.last_modified);
@@ -606,11 +656,13 @@ mod tests {
             etag: Some("\"xyz789\"".into()),
             ..Default::default()
         };
-        let wire = orig.encode(0);
+        let before = unix_now_secs();
+        let wire = orig.encode(300);
         let back = CacheHints::decode(&wire).expect("should decode");
         assert_eq!(back.etag, orig.etag);
-        // Etag with no max-age → epoch 1 (stale, but cacheable for conditionals).
-        assert_eq!(back.expires_at, Some(1));
+        // Etag with no max-age does not suppress the default freshness window.
+        let expires = back.expires_at.expect("default TTL should set an expiry");
+        assert!((before + 300..=unix_now_secs() + 300).contains(&expires));
         assert!(!back.no_store);
     }
 
@@ -673,35 +725,72 @@ mod tests {
             ]);
             let hints = CacheHints::from_response_headers(&headers).unwrap();
             assert!((now + 10..=unix_now_secs() + 10).contains(&hints.expires_at.unwrap()));
+            assert_eq!(hints.max_age, Some(100), "shared max-age is recorded as the lifetime");
         }
         let headers = std::collections::HashMap::from([
             ("cache-control".into(), "max-age=100".into()),
             ("age".into(), "200".into()),
         ]);
-        assert!(!CacheHints::from_response_headers(&headers).unwrap().is_fresh());
+        let expired = CacheHints::from_response_headers(&headers).unwrap();
+        assert!(!expired.is_fresh());
+        assert_eq!(expired.max_age, Some(100));
     }
 
     #[test]
-    fn revalidation_merges_only_supplied_metadata_and_preserves_missing_validators() {
+    fn revalidation_refreshes_the_clock_and_merges_only_supplied_metadata() {
         let original = CacheHints {
             expires_at: Some(1),
             etag: Some("\"A\"".into()),
             no_cache: true,
             ..Default::default()
         };
-        assert!(original.revalidated(&std::collections::HashMap::new()).is_none());
-        let only_validator = std::collections::HashMap::from([("etag".into(), "\"B\"".into())]);
-        let merged = original.revalidated(&only_validator).unwrap();
-        assert_eq!(merged.etag.as_deref(), Some("\"B\""));
-        assert_eq!(merged.expires_at, Some(1));
-        assert!(merged.no_cache);
-        let fresh = std::collections::HashMap::from([("cache-control".into(), "max-age=100".into())]);
-        let merged = original.revalidated(&fresh).unwrap();
+        // `no-cache` survives a headerless 304, so freshness stays disabled.
+        let merged = original.revalidated(&std::collections::HashMap::new(), 300);
         assert_eq!(merged.etag.as_deref(), Some("\"A\""));
-        assert!(!merged.no_cache);
+        assert!(merged.no_cache);
+        assert!(!merged.is_fresh());
+
+        // A headerless 304 restarts the clock at the default TTL.
+        let stale = CacheHints {
+            expires_at: Some(1),
+            etag: Some("\"A\"".into()),
+            ..Default::default()
+        };
+        let before = unix_now_secs();
+        let merged = stale.revalidated(&std::collections::HashMap::new(), 300);
+        let expiry = merged.expires_at.expect("headerless 304 must refresh expiry");
+        assert!((before + 300..=unix_now_secs() + 300).contains(&expiry));
         assert!(merged.is_fresh());
+
+        // A new validator is adopted; a missing Cache-Control keeps the prior policy.
+        let only_validator = std::collections::HashMap::from([("etag".into(), "\"B\"".into())]);
+        let merged = original.revalidated(&only_validator, 300);
+        assert_eq!(merged.etag.as_deref(), Some("\"B\""));
+        assert!(merged.no_cache);
+
+        // A recorded origin lifetime is reused instead of being shortened to
+        // the default.
+        let long_lived = CacheHints {
+            expires_at: Some(1),
+            max_age: Some(86_400),
+            etag: Some("\"A\"".into()),
+            ..Default::default()
+        };
+        let before = unix_now_secs();
+        let renewed = long_lived.revalidated(&std::collections::HashMap::new(), 300);
+        let expiry = renewed.expires_at.expect("renewed expiry");
+        assert!((before + 86_400..=unix_now_secs() + 86_400).contains(&expiry));
+        assert_eq!(renewed.max_age, Some(86_400));
+
+        // An explicit window wins over the default and clears `no-cache`.
+        let fresh = std::collections::HashMap::from([("cache-control".into(), "max-age=100".into())]);
+        let refreshed = original.revalidated(&fresh, 300);
+        assert_eq!(refreshed.etag.as_deref(), Some("\"A\""));
+        assert!(!refreshed.no_cache);
+        assert!(refreshed.is_fresh());
+        assert!(refreshed.expires_at.unwrap() <= unix_now_secs() + 100);
         let must_validate =
             std::collections::HashMap::from([("cache-control".into(), "no-cache".into())]);
-        assert!(!merged.revalidated(&must_validate).unwrap().is_fresh());
+        assert!(!refreshed.revalidated(&must_validate, 300).is_fresh());
     }
 }

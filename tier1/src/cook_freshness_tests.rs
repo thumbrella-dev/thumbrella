@@ -820,21 +820,27 @@ async fn matching_304_refreshes_freshness_cost_and_pin_without_rerendering() {
 }
 
 #[tokio::test]
-async fn headerless_304_preserves_the_original_token_and_retention() {
-    let url = register("headerless", vec![reply(304, &[]), reply(304, &[])]);
+async fn headerless_304_refreshes_freshness_and_retention() {
+    let url = register("headerless", vec![reply(304, &[])]);
     let backend = memory();
     let original = seed(&backend, &url, hints(Some("\"A\""), false)).await;
     let rt = runtime(CacheStore::backend_only(backend.clone()));
-    for _ in 0..2 {
-        let result = run(&url, rt.clone(), None).await;
-        assert_eq!(result.media.unwrap().cache, original.media.cache);
-        let stored = backend.get_entry(&url, 0).await.unwrap();
-        assert_eq!(stored.cache_until, original.cache_until);
-        assert_eq!(stored.fresh_until, original.fresh_until);
-        assert_eq!(stored.pin_until, original.pin_until);
-        assert_eq!(stored.render_cost, original.render_cost);
-    }
-    assert_eq!(requests(&url).len(), 2);
+    let result = run(&url, rt.clone(), None).await;
+    assert_eq!(result.source, Some(ResultSource::Cache));
+    assert_eq!(result.http_status, Some(304));
+    let media = result.media.unwrap();
+    assert_ne!(media.cache, original.media.cache, "the token must be renewed");
+    let refreshed = CacheHints::decode(&media.cache).unwrap();
+    assert!(refreshed.expires_at.unwrap() > unix_now_secs(), "freshness must restart");
+    let stored = backend.get_entry(&url, 0).await.unwrap();
+    assert_eq!(stored.media.cache, media.cache);
+    assert_eq!(stored.fresh_until, refreshed.expires_at.unwrap());
+    assert_eq!(stored.pin_until, original.pin_until);
+    assert_eq!(stored.render_cost, original.render_cost);
+
+    // The refreshed entry now answers without another upstream request.
+    assert_eq!(run(&url, rt, None).await.source, Some(ResultSource::Cache));
+    assert_eq!(requests(&url).len(), 1);
 }
 
 #[tokio::test]
