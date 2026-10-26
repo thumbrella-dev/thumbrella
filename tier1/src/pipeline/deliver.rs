@@ -363,11 +363,16 @@ impl ProcessBuffer {
     ///
     /// `thickness` is the pre-computed border width in pixels (2..=10), set
     /// before `deliver` from the document's page count or a rough estimate.
+    ///
+    /// The content is first shrunk by `thickness` pixels on each axis and
+    /// pinned to the top-left, so the border is painted into the vacated
+    /// right/bottom band rather than on top of the cover artwork.
     pub(super) fn draw_page_edges(&mut self, thickness: u32) {
         // Gold = warm highlight, purple = shadow colour from tier3's
-        // stylize_f3d_image tone map.
+        // stylize_f3d_image tone map.  The purple is a pale lavender, darkened
+        // and saturated enough to read as a soft page shadow, not ink.
         const GOLD: [u8; 3] = [236, 212, 155];
-        const PURPLE: [u8; 3] = [98, 80, 138];
+        const PURPLE: [u8; 3] = [130, 115, 163];
 
         let n = thickness.clamp(2, 10);
         let (w, h) = self.dimensions();
@@ -389,6 +394,29 @@ impl ProcessBuffer {
         let BufInner::Rgba(img) = &mut self.inner else {
             return;
         };
+
+        // Reserve the border band: shrink the cover by `n` pixels on each axis
+        // and pin it to the top-left.  The vacated right/bottom band stays
+        // transparent, so the border drawn below sits outside the cover and
+        // none of the page artwork is clipped.
+        let inner_w = w.saturating_sub(n).max(1);
+        let inner_h = h.saturating_sub(n).max(1);
+        if inner_w != w || inner_h != h {
+            // Resize in premultiplied-alpha space (matching `fit_to_target`) so
+            // transparent cover edges do not bleed dark fringes.
+            let mut src = std::mem::replace(img, image::RgbaImage::new(0, 0));
+            premultiply_rgba(&mut src);
+            let mut shrunk = image::imageops::resize(
+                &src,
+                inner_w,
+                inner_h,
+                image::imageops::FilterType::Triangle,
+            );
+            unpremultiply_rgba(&mut shrunk);
+            let mut padded = image::RgbaImage::from_pixel(w, h, image::Rgba([0, 0, 0, 0]));
+            image::imageops::replace(&mut padded, &shrunk, 0, 0);
+            *img = padded;
+        }
 
         for y in 0..h {
             for x in 0..w {
@@ -814,5 +842,42 @@ mod tests {
         // the content box instead.
         assert_eq!(content_dims(20000, 2), (250, 120));
         assert_eq!(content_dims(2, 20000), (150, 200));
+    }
+
+    #[test]
+    fn page_edges_do_not_grow_the_buffer() {
+        let mut buf = ProcessBuffer::from_dynamic(DynamicImage::ImageRgb8(RgbImage::new(100, 100)));
+        buf.draw_page_edges(6);
+        assert_eq!(buf.dimensions(), (100, 100));
+    }
+
+    #[test]
+    fn page_edges_reserve_the_band_instead_of_clipping_the_cover() {
+        // Cover is red except for a blue marker in its rightmost 6 columns -
+        // exactly the width the border will occupy.  The cover is shrunk to
+        // make room, so the marker survives inside the content area instead of
+        // being painted over, and the border lands in the reserved band.
+        let mut img = RgbImage::from_pixel(100, 100, Rgb([200, 30, 30]));
+        for x in 94..100 {
+            for y in 0..100 {
+                img.put_pixel(x, y, Rgb([30, 30, 220]));
+            }
+        }
+        let mut buf = ProcessBuffer::from_dynamic(DynamicImage::ImageRgb8(img));
+        buf.draw_page_edges(6);
+
+        let BufInner::Rgba(out) = &buf.inner else {
+            panic!("expected an RGBA buffer")
+        };
+
+        // The far-right content column is still cover artwork (the marker).
+        let cover = out.get_pixel(93, 50);
+        assert!(cover[2] > cover[0], "rightmost cover column was clipped: {cover:?}");
+        assert_eq!(cover[3], 255);
+
+        // The final column is the opaque border, not cover pixels.
+        let edge = out.get_pixel(99, 50);
+        assert_eq!(edge[3], 255, "border band has to be opaque");
+        assert!(!(edge[2] > edge[0]), "border band must not show cover pixels");
     }
 }

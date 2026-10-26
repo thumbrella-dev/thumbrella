@@ -2,6 +2,8 @@
 
 ## Development
 
+- pdf/document rendering allows space for page border to avoid crop
+
 
 ## 2.1.1 - 2026/10/23
 
