@@ -376,6 +376,132 @@ fn is_oiio_format(ext: &str) -> bool {
     )
 }
 
+/// Header information parsed directly from a JPEG 2000 codestream.
+///
+/// Parsing in Rust lets the ffmpeg path skip the `ffprobe` subprocess and,
+/// more importantly, discover how many wavelet resolution levels exist so we
+/// can ask ffmpeg to decode at a reduced resolution (`-lowres`).
+struct Jp2Header {
+    width: u32,
+    height: u32,
+    /// Resolution levels in the COD marker (decomposition levels + 1).
+    resolutions: u32,
+    /// Tile count (width * height).  Reported for diagnostics; multi-tile
+    /// codestreams cannot be low-res decoded from a simple byte prefix.
+    tiles: u32,
+}
+
+/// Parse a JP2/raw codestream far enough to read dimensions, tiling, and the
+/// number of resolution levels.  Returns `None` for anything unexpected.
+fn parse_jp2_header(bytes: &[u8]) -> Option<Jp2Header> {
+    // Find the codestream: either the `jp2c` box of a JP2 container, or a bare
+    // codestream that starts immediately with SOC (0xFF4F).
+    let mut cs = 0usize;
+    if bytes.len() >= 12 && &bytes[4..8] == b"jP  " {
+        let mut i = 0usize;
+        while i + 8 <= bytes.len() {
+            let lbox = u32::from_be_bytes(bytes[i..i + 4].try_into().ok()?) as usize;
+            let typ = &bytes[i + 4..i + 8];
+            let (box_len, payload) = if lbox == 1 {
+                if i + 16 > bytes.len() {
+                    return None;
+                }
+                (u64::from_be_bytes(bytes[i + 8..i + 16].try_into().ok()?) as usize, 16)
+            } else if lbox == 0 {
+                (bytes.len() - i, 8)
+            } else {
+                (lbox, 8)
+            };
+            if typ == b"jp2c" {
+                cs = i + payload;
+                break;
+            }
+            if box_len < payload || i + box_len > bytes.len() {
+                return None;
+            }
+            i += box_len;
+        }
+    }
+    if bytes.get(cs..cs + 2)? != [0xFF, 0x4F] {
+        return None;
+    }
+
+    let mut j = cs + 2;
+    let mut width = 0u32;
+    let mut height = 0u32;
+    let mut resolutions = 1u32;
+    let mut tiles = 1u32;
+    while j + 4 <= bytes.len() {
+        let marker = u16::from_be_bytes([bytes[j], bytes[j + 1]]);
+        if marker == 0xFF93 {
+            break; // SOD - end of header markers
+        }
+        if marker & 0xFF00 != 0xFF00 {
+            j += 1;
+            continue;
+        }
+        let seg_len = u16::from_be_bytes([bytes[j + 2], bytes[j + 3]]) as usize;
+        if seg_len < 2 || j + 2 + seg_len > bytes.len() {
+            return None;
+        }
+        let seg = &bytes[j + 4..j + 2 + seg_len];
+        match marker {
+            0xFF51 => {
+                // SIZ: Rsiz(2) Xsiz Ysiz XOsiz YOsiz XTsiz YTsiz XTOsiz YTOsiz (4 each)
+                if seg.len() < 36 {
+                    return None;
+                }
+                let rd = |o: usize| u32::from_be_bytes([seg[o], seg[o + 1], seg[o + 2], seg[o + 3]]);
+                let xsiz = rd(2);
+                let ysiz = rd(6);
+                let xosiz = rd(10);
+                let yosiz = rd(14);
+                let xtsiz = rd(18);
+                let ytsiz = rd(22);
+                let xtosiz = rd(26);
+                let ytosiz = rd(30);
+                width = xsiz.saturating_sub(xosiz);
+                height = ysiz.saturating_sub(yosiz);
+                if xtsiz > 0 && ytsiz > 0 {
+                    let nx = xsiz.saturating_sub(xtosiz).div_ceil(xtsiz).max(1);
+                    let ny = ysiz.saturating_sub(ytosiz).div_ceil(ytsiz).max(1);
+                    tiles = nx.saturating_mul(ny);
+                }
+            }
+            0xFF52 => {
+                // COD: Scod(1) prog(1) layers(2) mct(1) decomp_levels(1) ...
+                if seg.len() < 6 {
+                    return None;
+                }
+                resolutions = seg[5] as u32 + 1;
+            }
+            _ => {}
+        }
+        j += 2 + seg_len;
+    }
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some(Jp2Header {
+        width,
+        height,
+        resolutions,
+        tiles,
+    })
+}
+
+/// Pick the largest decode reduction that still leaves roughly 2x the canvas
+/// resolution before the final downscale.  `-lowres` drops wavelet levels
+/// during decode, which costs a fraction of decoding full resolution.
+fn jp2_lowres(max_dim: u32, resolutions: u32) -> u32 {
+    const MIN_DECODED_SIDE: u32 = 512; // ~2x the canonical 250 px canvas
+    let mut n = 0u32;
+    while n + 1 < resolutions && (max_dim >> (n + 1)) >= MIN_DECODED_SIDE {
+        n += 1;
+    }
+    n.min(resolutions.saturating_sub(1)).min(5)
+}
+
 /// Run ffmpeg CLI to decode an image or video frame to PNG, with properties
 /// via ffprobe and power-of-2 downscaling.
 ///
@@ -391,8 +517,20 @@ fn run_ffmpeg_decode(bytes: &[u8], ext: &str, is_video: bool) -> Result<RenderOu
         .stage_bytes(bytes, &format!("input.{ext}"))
         .map_err(|e| format!("stage input: {e}"))?;
 
+    // JPEG 2000: read the codestream header directly instead of spawning
+    // `ffprobe`.  This also exposes the wavelet level count so ffmpeg can
+    // decode at reduced resolution rather than decoding full size then scaling.
+    let jp2 = if !is_video && matches!(ext, "jp2" | "j2k" | "j2c" | "jpc" | "jpx") {
+        parse_jp2_header(bytes)
+    } else {
+        None
+    };
+    let lowres = jp2.as_ref().map(|h| jp2_lowres(h.width.max(h.height), h.resolutions)).unwrap_or(0);
+
     //  ffprobe: get dimensions, colour depth, duration, audio channels
-    let (src_w, src_h, bits_per_pixel, duration_secs, channel_count) = {
+    let (src_w, src_h, bits_per_pixel, duration_secs, channel_count) = if let Some(h) = &jp2 {
+        (h.width, h.height, 24, None, 0)
+    } else {
         let output = Command::new("ffprobe")
             .arg("-v")
             .arg("quiet")
@@ -437,24 +575,48 @@ fn run_ffmpeg_decode(bytes: &[u8], ext: &str, is_video: bool) -> Result<RenderOu
         (w, h, bpp, dur, chan)
     };
 
+    // Dimensions ffmpeg will actually emit.  With `-lowres` the decoder
+    // produces a smaller frame, so the scale filter is computed from that.
+    let shift = 1u32 << lowres;
+    let decoded_w = if lowres > 0 { (src_w + shift - 1) >> lowres } else { src_w };
+    let decoded_h = if lowres > 0 { (src_h + shift - 1) >> lowres } else { src_h };
+
     //  power-of-2 downscale
-    let max_dim = src_w.max(src_h);
+    //
+    // For JPEG 2000 the decoded frame is already reduced, so keep at least
+    // ~2x the canvas (512 px) on the long side and let `deliver` do the single
+    // final resample.  Going below that here makes `deliver` upscale it back,
+    // which adds a second resample and visibly roughens the result.
+    let floor = if jp2.is_some() { 512 } else { 256 };
+    let max_dim = decoded_w.max(decoded_h);
     let scale: u32 = if max_dim > 512 {
         let mut s = 1u32;
-        while max_dim / (s * 2) >= 256 {
+        while max_dim / (s * 2) >= floor {
             s *= 2;
         }
         s
     } else {
         1
     };
-    let resize_w = src_w / scale;
-    let resize_h = src_h / scale;
+    let resize_w = decoded_w / scale;
+    let resize_h = decoded_h / scale;
 
     //  ffmpeg: decode + resize → PNG
     let output_path = arena.output_path("png");
     let mut cmd = Command::new("ffmpeg");
     cmd.arg("-v").arg("error");
+
+    // Decode-time reduction: `-lowres` drops wavelet levels during decode
+    // instead of decoding full resolution and scaling afterwards.  Tiled
+    // codestreams are decoded tile-parallel, so give those all the cores.
+    if let Some(h) = &jp2 {
+        if lowres > 0 {
+            cmd.arg("-lowres").arg(lowres.to_string());
+        }
+        if h.tiles > 1 {
+            cmd.arg("-threads").arg("0");
+        }
+    }
 
     // Input seeking: -ss before -i seeks to nearest keyframe (fast).
     if is_video {
@@ -463,7 +625,7 @@ fn run_ffmpeg_decode(bytes: &[u8], ext: &str, is_video: bool) -> Result<RenderOu
     cmd.arg("-i").arg(&input_path);
 
     // Output filter: thumbnail (video) and/or scale (both).
-    let needs_resize = resize_w != src_w || resize_h != src_h;
+    let needs_resize = resize_w != decoded_w || resize_h != decoded_h;
     if is_video {
         if needs_resize {
             cmd.arg("-vf").arg(format!("thumbnail=n=20,scale={resize_w}:{resize_h}"));
@@ -608,8 +770,8 @@ fn pix_fmt_bits_per_pixel(pix_fmt: &str) -> u32 {
 ///
 /// | Extension | Tool |
 /// |-----------|------|
-/// | exr, hdr, dpx, jp2, j2k | oiiotool |
-/// | All others | ffmpeg CLI |
+/// | exr, hdr, dpx, … | oiiotool |
+/// | All others (incl. jp2/j2k) | ffmpeg CLI |
 async fn render_image_ffmpeg_fallback(cook: &mut dyn RenderCook, ext: &str) -> bool {
     let report = crate::env_check::cached_report();
 
@@ -1550,4 +1712,66 @@ fn autocrop_transparent(img: image::DynamicImage) -> image::DynamicImage {
 
     let cropped = image::imageops::crop_imm(&rgba, left, top, right - left + 1, bottom - top + 1);
     image::DynamicImage::ImageRgba8(cropped.to_image())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{jp2_lowres, parse_jp2_header};
+
+    /// Build a minimal JP2 container with a single-component codestream whose
+    /// SIZ/COD markers carry the given geometry and decomposition level count.
+    fn build_jp2(xsiz: u32, ysiz: u32, xtsiz: u32, ytsiz: u32, levels: u8) -> Vec<u8> {
+        let mut siz = Vec::new();
+        siz.extend_from_slice(&0u16.to_be_bytes()); // Rsiz
+        for v in [xsiz, ysiz, 0, 0, xtsiz, ytsiz, 0, 0] {
+            siz.extend_from_slice(&v.to_be_bytes());
+        }
+        siz.extend_from_slice(&1u16.to_be_bytes()); // Csiz
+        siz.extend_from_slice(&[7, 1, 1]); // Ssiz, XRsiz, YRsiz
+
+        let mut cod = vec![0u8, 1]; // Scod, progression order
+        cod.extend_from_slice(&1u16.to_be_bytes()); // layers
+        cod.extend_from_slice(&[1, levels, 4, 4, 0, 0]); // mct, levels, cbw, cbh, style, transform
+
+        let mut cs = Vec::new();
+        cs.extend_from_slice(&[0xFF, 0x4F]); // SOC
+        cs.extend_from_slice(&[0xFF, 0x51]); // SIZ
+        cs.extend_from_slice(&((siz.len() + 2) as u16).to_be_bytes());
+        cs.extend_from_slice(&siz);
+        cs.extend_from_slice(&[0xFF, 0x52]); // COD
+        cs.extend_from_slice(&((cod.len() + 2) as u16).to_be_bytes());
+        cs.extend_from_slice(&cod);
+        cs.extend_from_slice(&[0xFF, 0x93]); // SOD
+        cs.extend_from_slice(&[0xFF, 0xD9]); // EOC
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&12u32.to_be_bytes()); // signature box
+        out.extend_from_slice(b"jP  ");
+        out.extend_from_slice(&0x0D0A_870Au32.to_be_bytes());
+        out.extend_from_slice(&((cs.len() + 8) as u32).to_be_bytes()); // jp2c
+        out.extend_from_slice(b"jp2c");
+        out.extend_from_slice(&cs);
+        out
+    }
+
+    #[test]
+    fn parses_dimensions_tiling_and_resolution_levels() {
+        let h = parse_jp2_header(&build_jp2(8000, 6000, 1024, 1024, 6)).expect("header");
+        assert_eq!((h.width, h.height), (8000, 6000));
+        assert_eq!(h.resolutions, 7); // decomposition levels + 1
+        assert_eq!(h.tiles, 48); // ceil(8000/1024) * ceil(6000/1024)
+    }
+
+    #[test]
+    fn rejects_non_jp2_buffers() {
+        assert!(parse_jp2_header(b"not a jpeg 2000 file").is_none());
+    }
+
+    #[test]
+    fn lowres_keeps_roughly_double_canvas_resolution() {
+        assert_eq!(jp2_lowres(8688, 7), 4); // 8688 >> 4 = 543
+        assert_eq!(jp2_lowres(8000, 7), 3); // 8000 >> 3 = 1000, >> 4 = 500
+        assert_eq!(jp2_lowres(300, 7), 0); // already tiny
+        assert_eq!(jp2_lowres(8688, 1), 0); // only one resolution level
+    }
 }

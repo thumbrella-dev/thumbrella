@@ -3,7 +3,7 @@
 ## Development
 
 - pdf/document rendering allows space for page border to avoid crop
-
+- jpeg2000 reduces wavelet decoding for faster low resolution results
 
 ## 2.1.1 - 2026/10/23
 
