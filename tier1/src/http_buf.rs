@@ -194,6 +194,8 @@ pub struct HttpBuffer<S: HttpStream> {
     /// Byte offset at which `streaming_chunk` begins.
     streaming_chunk_start: u64,
 
+    sparse_ranges: bool,
+
     /// `true` if a tail Range request was ever issued.
     pub did_tail_fetch: bool,
 }
@@ -230,6 +232,7 @@ impl<S: HttpStream> HttpBuffer<S> {
             streaming_mode: false,
             streaming_chunk: Vec::new(),
             streaming_chunk_start: 0,
+            sparse_ranges: false,
             did_tail_fetch: false,
         })
     }
@@ -413,6 +416,16 @@ impl<S: HttpStream> HttpBuffer<S> {
             return Ok(());
         }
 
+        if self.sparse_ranges
+            && self.accepts_ranges
+            && let Some(total) = self.content_length
+            && page_start.saturating_sub(self.stream_pos) > 64 * 1024
+        {
+            if self.fetch_sparse_pages(page_start, total).await? {
+                return Ok(());
+            }
+        }
+
         // The stream has already advanced past this page; store_chunk_at will
         // have deposited whatever bytes arrived, so we cannot get any more.
         if self.stream_pos >= page_end {
@@ -423,7 +436,7 @@ impl<S: HttpStream> HttpBuffer<S> {
         if let Some(total) = self.content_length {
             let in_tail = page_start >= total.saturating_sub(TAIL_FETCH_SIZE);
             let big_gap = page_start.saturating_sub(self.stream_pos) > STREAM_SKIP_THRESHOLD;
-            if in_tail && big_gap && self.accepts_ranges {
+            if in_tail && big_gap && self.accepts_ranges && !self.sparse_ranges {
                 return self.fetch_tail_into_pages(total).await;
             }
         }
@@ -573,6 +586,41 @@ impl<S: HttpStream> HttpBuffer<S> {
         Ok(())
     }
 
+    async fn fetch_sparse_pages(&mut self, start: u64, total: u64) -> Result<bool, HttpError> {
+        let end = start.saturating_add(64 * 1024).min(total) - 1;
+        let options = ConnectOptions {
+            headers: vec![("range".into(), format!("bytes={start}-{end}"))],
+        };
+        let start_time = Instant::now();
+        let mut stream = S::connect(&self.url, &options).await?;
+        if stream.status() == 200 {
+            self.accepts_ranges = false;
+            stream.close().await;
+            self.io_secs_count += start_time.elapsed().as_secs_f64();
+            return Ok(false);
+        }
+        let expected = format!("bytes {start}-{end}/{total}");
+        if stream.status() != 206 || stream.response_headers().get("content-range") != Some(&expected) {
+            stream.close().await;
+            return Err(HttpError::Network("invalid range response".into()));
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = stream.next_chunk().await? {
+            self.bytes_fetched_count += chunk.len() as u64;
+            if bytes.len().saturating_add(chunk.len()) as u64 > end - start + 1 {
+                stream.close().await;
+                return Err(HttpError::Network("oversized range response".into()));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        self.io_secs_count += start_time.elapsed().as_secs_f64();
+        if bytes.len() as u64 != end - start + 1 {
+            return Err(HttpError::Network("incomplete range response".into()));
+        }
+        self.store_chunk_at(start, &bytes);
+        Ok(true)
+    }
+
     /// Issue a direct `Range: bytes=start-(start+len-1)` request and return
     /// the raw bytes.
     ///
@@ -705,6 +753,12 @@ impl HttpStream for ReqwestStream {
             headers.insert("content-length".to_string(), slice_len.to_string());
             // Advertise range support so ZIP shortcut and tail-fetch work.
             headers.insert("accept-ranges".to_string(), "bytes".to_string());
+            if range_start > 0 {
+                headers.insert(
+                    "content-range".to_string(),
+                    format!("bytes {range_start}-{}/{file_len}", range_end - 1),
+                );
+            }
 
             return Ok(Self {
                 status: if range_start > 0 { 206 } else { 200 },
@@ -902,6 +956,7 @@ impl<T: std::io::Read + std::io::Seek> ReadSeek for T {}
 pub struct SyncHttpReader<S: HttpStream> {
     buf: HttpBuffer<S>,
     handle: tokio::runtime::Handle,
+    bytes_fetched: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[cfg(feature = "native")]
@@ -909,10 +964,20 @@ impl<S: HttpStream> SyncHttpReader<S> {
     /// Wrap `buf` in a sync adapter.  Must be called from an async context
     /// (i.e. while a tokio runtime is active on the current thread).
     pub fn new(buf: HttpBuffer<S>) -> Self {
+        let bytes_fetched = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(buf.bytes_fetched()));
         Self {
             buf,
             handle: tokio::runtime::Handle::current(),
+            bytes_fetched,
         }
+    }
+
+    pub fn enable_sparse_ranges(&mut self) {
+        self.buf.sparse_ranges = true;
+    }
+
+    pub fn bytes_fetched_counter(&self) -> std::sync::Arc<std::sync::atomic::AtomicU64> {
+        self.bytes_fetched.clone()
     }
 
     /// Return the `Content-Length` reported by the server, if any.
@@ -929,7 +994,101 @@ impl<S: HttpStream> SyncHttpReader<S> {
 #[cfg(feature = "native")]
 impl<S: HttpStream> std::io::Read for SyncHttpReader<S> {
     fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
-        self.handle.block_on(self.buf.read(out)).map_err(|e| std::io::Error::other(e.to_string()))
+        let result = self.handle.block_on(self.buf.read(out));
+        self.bytes_fetched.store(self.buf.bytes_fetched(), std::sync::atomic::Ordering::Relaxed);
+        result.map_err(|e| std::io::Error::other(e.to_string()))
+    }
+}
+
+#[cfg(all(test, feature = "native"))]
+mod sparse_range_tests {
+    use super::*;
+
+    struct MockStream {
+        data: Vec<u8>,
+        offset: usize,
+        status: u16,
+        headers: HashMap<String, String>,
+    }
+
+    impl HttpStream for MockStream {
+        async fn connect(url: &str, options: &ConnectOptions) -> Result<Self, HttpError> {
+            let source: Vec<u8> = (0..512 * 1024).map(|index| (index % 251) as u8).collect();
+            let range = options.headers.iter().find(|(name, _)| name == "range");
+            let (start, end) = if range.is_some() && url != "ignored" {
+                parse_file_range(&options.headers, source.len() as u64)
+            } else {
+                (0, source.len() as u64)
+            };
+            let mut headers = HashMap::new();
+            headers.insert("content-length".into(), (end - start).to_string());
+            headers.insert("accept-ranges".into(), "bytes".into());
+            if range.is_some() && url != "ignored" {
+                let reported_start = if url == "bad-range" { start + 1 } else { start };
+                headers.insert(
+                    "content-range".into(),
+                    format!("bytes {reported_start}-{}/{len}", end - 1, len = source.len()),
+                );
+            }
+            Ok(Self {
+                data: source[start as usize..end as usize].to_vec(),
+                offset: 0,
+                status: if range.is_some() && url != "ignored" { 206 } else { 200 },
+                headers,
+            })
+        }
+
+        fn status(&self) -> u16 {
+            self.status
+        }
+        fn response_headers(&self) -> HashMap<String, String> {
+            self.headers.clone()
+        }
+        async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, HttpError> {
+            if self.offset == self.data.len() {
+                return Ok(None);
+            }
+            let end = (self.offset + PAGE_SIZE).min(self.data.len());
+            let chunk = self.data[self.offset..end].to_vec();
+            self.offset = end;
+            Ok(Some(chunk))
+        }
+    }
+
+    #[tokio::test]
+    async fn sparse_ranges_are_validated_and_counted() {
+        let mut buffer =
+            HttpBuffer::<MockStream>::open("valid".into(), ConnectOptions::default()).await.unwrap();
+        buffer.sparse_ranges = true;
+        let data = buffer.read_at(300 * 1024 + 17, 100).await.unwrap();
+        assert_eq!(
+            data,
+            (300 * 1024 + 17..300 * 1024 + 117).map(|index| (index % 251) as u8).collect::<Vec<_>>()
+        );
+        assert_eq!(buffer.bytes_fetched(), 64 * 1024);
+    }
+
+    #[tokio::test]
+    async fn ignored_ranges_fall_back_to_original_stream() {
+        let mut buffer =
+            HttpBuffer::<MockStream>::open("ignored".into(), ConnectOptions::default()).await.unwrap();
+        buffer.sparse_ranges = true;
+        let data = buffer.read_at(300 * 1024 + 17, 100).await.unwrap();
+        assert_eq!(
+            data,
+            (300 * 1024 + 17..300 * 1024 + 117).map(|index| (index % 251) as u8).collect::<Vec<_>>()
+        );
+        assert!(!buffer.accepts_ranges);
+        assert!(buffer.bytes_fetched() > 300 * 1024);
+    }
+
+    #[tokio::test]
+    async fn invalid_content_range_is_rejected() {
+        let mut buffer = HttpBuffer::<MockStream>::open("bad-range".into(), ConnectOptions::default())
+            .await
+            .unwrap();
+        buffer.sparse_ranges = true;
+        assert!(buffer.read_at(300 * 1024, 100).await.is_err());
     }
 }
 

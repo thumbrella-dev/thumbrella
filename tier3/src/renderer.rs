@@ -847,6 +847,9 @@ async fn render_image_ffmpeg_fallback(cook: &mut dyn RenderCook, ext: &str) -> b
                 return true;
             }
         };
+        if ext == "exr" {
+            cook.add_bytes_consumed(bytes.len() as u64);
+        }
         let result = tokio::task::spawn_blocking(move || {
             if use_oiiotool {
                 run_oiiotool_decode(&bytes, &ext_owned)

@@ -210,6 +210,8 @@ pub fn format_manifest() -> &'static [FormatEntry] {&[
                 kind: FileKind::Vector, tier: 2, renderer: "resvg", shortcut: false},
     FormatEntry {extension: "jxl", label: "JPEG XL",
                 kind: FileKind::Image,  tier: 2, renderer: "jxl_oxide", shortcut: false},
+    FormatEntry {extension: "exr", label: "OpenEXR",
+                kind: FileKind::Image,  tier: 2, renderer: "exr", shortcut: false},
     FormatEntry {extension: "hdr", label: "Radiance",
                 kind: FileKind::Image,  tier: 2, renderer: "libav", shortcut: false},
     FormatEntry {extension: "heic", label: "HEIC",

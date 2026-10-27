@@ -2,8 +2,9 @@
 
 ## Development
 
-- pdf/document rendering allows space for page border to avoid crop
-- jpeg2000 reduces wavelet decoding for faster low resolution results
+- pdf/document renders inside page count border to avoid cropping edges
+- jpeg2000 reduces wavelet decoding for faster low resolution results, 5x faster
+- native exr handling can be, 2x faster
 
 ## 2.1.1 - 2026/10/23
 

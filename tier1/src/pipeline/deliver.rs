@@ -406,12 +406,8 @@ impl ProcessBuffer {
             // transparent cover edges do not bleed dark fringes.
             let mut src = std::mem::replace(img, image::RgbaImage::new(0, 0));
             premultiply_rgba(&mut src);
-            let mut shrunk = image::imageops::resize(
-                &src,
-                inner_w,
-                inner_h,
-                image::imageops::FilterType::Triangle,
-            );
+            let mut shrunk =
+                image::imageops::resize(&src, inner_w, inner_h, image::imageops::FilterType::Triangle);
             unpremultiply_rgba(&mut shrunk);
             let mut padded = image::RgbaImage::from_pixel(w, h, image::Rgba([0, 0, 0, 0]));
             image::imageops::replace(&mut padded, &shrunk, 0, 0);
@@ -738,6 +734,8 @@ mod tests {
         buf.fit_to_target(250, 200, 0.6, 0.10, false);
 
         assert_eq!(buf.dimensions(), (250, 200));
+        let opaque = RgbaImage::from_pixel(1262, 860, Rgba([9, 9, 9, 255]));
+        assert_eq!(fitted(opaque), (250, 200));
     }
 
     #[test]

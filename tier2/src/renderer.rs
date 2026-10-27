@@ -6,7 +6,7 @@
 //! # How the HTTP connection is used
 //!
 //! The renderer receives `&mut dyn RenderCook`.  Calling `cook.take_reader()`
-//! enters streaming mode on the `HttpBuffer` and moves it out as a
+//! moves the paged `HttpBuffer` out as a
 //! `Box<dyn ReadSeek + Send>`.  This reader is passed directly into
 //! `spawn_blocking` where libav's `AVIOContext` callbacks pull bytes through
 //! the paged cache on-demand - no full-file drain, no clone, no second request.
@@ -70,6 +70,9 @@ impl InProcessRenderer for Tier2Renderer {
 
             match kind {
                 Some(FileKind::Image) => {
+                    if ext == "exr" {
+                        return render_exr(cook).await;
+                    }
                     // Formats tier2's libav can't decode - return false
                     // immediately so tier3's oiiotool / ffmpeg CLI can
                     // take over without the reader being consumed.
@@ -96,6 +99,34 @@ impl InProcessRenderer for Tier2Renderer {
 
 //  Image decode
 
+async fn render_exr(cook: &mut dyn RenderCook) -> bool {
+    let (reader, counter) = match cook.take_sparse_reader() {
+        Some(reader) => reader,
+        None => {
+            let Some(bytes) = fetch_url(cook.input_url()).await else {
+                cook.fail_cook("EXR fetch failed");
+                return true;
+            };
+            cook.set_bytes_consumed(bytes.len() as u64);
+            (Box::new(Cursor::new(bytes)) as Box<dyn ReadSeek + Send>, None)
+        }
+    };
+    let result = tokio::task::spawn_blocking(move || crate::exr::decode(reader)).await.ok().flatten();
+    if let Some(counter) = counter {
+        cook.set_bytes_consumed(counter.load(std::sync::atomic::Ordering::Relaxed));
+    }
+    match result {
+        Some(output) => {
+            apply_render_output(cook, output);
+            true
+        }
+        None => {
+            cook.note("EXR decoder could not render this image");
+            false
+        }
+    }
+}
+
 fn is_image_crate_format(ext: &str) -> bool {
     matches!(ext, "png")
     // image library seems to handle interlaced png more efficiently than libav.
@@ -103,7 +134,7 @@ fn is_image_crate_format(ext: &str) -> bool {
 }
 
 /// Returns `true` for image formats that tier2's libav can decode.
-/// Studio formats (EXR, HDR, DPX, …) and esoteric formats are handled by
+/// Other studio formats (HDR, DPX, …) and esoteric formats are handled by
 /// tier3's oiiotool / ffmpeg CLI.
 fn tier2_handles_image(ext: &str) -> bool {
     matches!(

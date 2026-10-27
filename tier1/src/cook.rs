@@ -1208,10 +1208,8 @@ impl<S: HttpStream> ThumbCook<S> {
                 }
                 return self.finish(after).await;
             }
-            // Renderer returned false (format not recognised).
-            // Contract: the renderer did not call take_reader(), so the
-            // connection is still open.  Fall through to out-of-process
-            // handoff - a higher tier may still be able to handle this.
+            // Fall through to an out-of-process handoff when the renderer
+            // cannot handle the input, even if it consumed the reader.
             // Intermediate already emitted above; don't re-emit in handoff chain.
             self.placeholder_source = Some(ResultSource::Fallback);
             on_progress = None;
@@ -1224,7 +1222,10 @@ impl<S: HttpStream> ThumbCook<S> {
         // tier 1 drives the entire chain.
         {
             let payload = self.take_handoff().await;
-            let local_bytes = self.http_bytes_fetched();
+            let local_bytes = self.render_bytes_consumed.unwrap_or_else(|| self.http_bytes_fetched());
+            if self.render_bytes_consumed.is_some() {
+                self.out_download_bytes = local_bytes;
+            }
             let ext = self.media.extension.clone().unwrap_or_default();
             let kind = self.media.kind;
 
@@ -1536,6 +1537,19 @@ impl<S: HttpStream + Send + 'static> crate::renderer::RenderCook for ThumbCook<S
     fn take_reader(&mut self) -> Option<Box<dyn crate::http_buf::ReadSeek + Send>> {
         self.http_take_reader()
     }
+    fn take_sparse_reader(
+        &mut self,
+    ) -> Option<(
+        Box<dyn crate::http_buf::ReadSeek + Send>,
+        Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    )> {
+        let buf = self.http_buf.as_mut()?;
+        self.tel_io_secs = buf.io_secs();
+        let mut reader = crate::http_buf::SyncHttpReader::new(self.http_buf.take()?);
+        reader.enable_sparse_ranges();
+        let counter = reader.bytes_fetched_counter();
+        Some((Box::new(reader), Some(counter)))
+    }
     fn peek_bytes(&self, len: usize) -> Option<Vec<u8>> {
         let page = self.http_buf.as_ref()?.peek_page0()?;
         if page.len() >= len { Some(page[..len].to_vec()) } else { None }
@@ -1593,5 +1607,8 @@ impl<S: HttpStream + Send + 'static> crate::renderer::RenderCook for ThumbCook<S
     }
     fn set_bytes_consumed(&mut self, n: u64) {
         self.render_bytes_consumed = Some(n);
+    }
+    fn add_bytes_consumed(&mut self, n: u64) {
+        self.render_bytes_consumed = Some(self.render_bytes_consumed.unwrap_or(0).saturating_add(n));
     }
 }

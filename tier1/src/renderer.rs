@@ -33,7 +33,7 @@
 //! - Set `cook.set_render_image(img)` on success.
 //! - Return `true` when the format was claimed (whether decode succeeded
 //!   or not - call `cook.fail_cook(msg)` on unrecoverable errors).
-//! - Return `false` to signal "not my format".
+//! - Return `false` to defer to a higher tier when the format cannot be rendered.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -62,11 +62,7 @@ pub trait RenderCook: Send {
     /// `Content-Length` reported by the server, if available.
     fn content_length(&self) -> Option<u64>;
 
-    /// Enter streaming mode on the buffer and move it out as a sync reader.
-    ///
-    /// Streaming mode means the `HttpBuffer` will not add new pages to its
-    /// cache going forward, keeping memory bounded for large files.  Already
-    /// cached pages (from the inspect / shortcut phase) remain readable.
+    /// Move the buffer out as a synchronous paged reader.
     ///
     /// The returned reader drives HTTP I/O on-demand: each `read` call blocks
     /// the calling thread (inside `spawn_blocking`) and bridges back to the
@@ -74,6 +70,12 @@ pub trait RenderCook: Send {
     ///
     /// Returns `None` if no connection is currently open.
     fn take_reader(&mut self) -> Option<Box<dyn ReadSeek + Send>>;
+
+    fn take_sparse_reader(
+        &mut self,
+    ) -> Option<(Box<dyn ReadSeek + Send>, Option<Arc<std::sync::atomic::AtomicU64>>)> {
+        self.take_reader().map(|reader| (reader, None))
+    }
 
     /// Peek at the first `len` bytes of the source without consuming the
     /// reader.  Returns bytes from the already-cached first page (populated
@@ -121,6 +123,9 @@ pub trait RenderCook: Send {
     /// in the download counter, enabling accurate reporting for formats that
     /// use partial reads (e.g. HEIC/AVIF with probe_limit).
     fn set_bytes_consumed(&mut self, n: u64);
+    fn add_bytes_consumed(&mut self, n: u64) {
+        self.set_bytes_consumed(n);
+    }
 }
 
 // RenderCook is implemented for ThumbCook in cook.rs (needs private field access).

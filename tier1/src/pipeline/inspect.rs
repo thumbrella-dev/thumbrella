@@ -46,7 +46,7 @@ pub async fn inspect<S: HttpStream>(cook: &mut ThumbCook<S>) {
     cook.media.properties = Some(serde_json::json!({}));
 
     // For image formats, dimension headers are always within the first few KB.
-    if kind == FileKind::Image {
+    if kind == FileKind::Image && cook.media.extension.as_deref() != Some("exr") {
         inspect_image_properties(&prefix, cook.media.properties.as_mut().unwrap());
     }
 
@@ -194,6 +194,21 @@ mod tests {
         }
         assert_eq!(sniff(b"not recognized", "https://example.com/page", None).0, FileKind::Unknown);
     }
+
+    #[test]
+    fn exr_is_routed_to_tier2_without_a_shortcut() {
+        let (kind, _, extension) =
+            sniff(&[0x76, 0x2f, 0x31, 0x01], "https://example.com/image.exr", None);
+        assert_eq!(kind, FileKind::Image);
+        assert_eq!(extension, "exr");
+        assert_eq!(dispatch::route(kind, Some(&extension)).tier, 2);
+        assert!(
+            dispatch::format_manifest()
+                .iter()
+                .filter(|entry| entry.extension == "exr")
+                .all(|entry| entry.tier > 1 && !entry.shortcut)
+        );
+    }
 }
 
 //  Image property inspection
@@ -264,7 +279,6 @@ fn is_lossless(format: image::ImageFormat) -> bool {
             | ImageFormat::Gif
             | ImageFormat::Ico
             | ImageFormat::Tga
-            | ImageFormat::OpenExr
     )
 }
 
