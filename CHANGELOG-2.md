@@ -2,6 +2,11 @@
 
 ## Development
 
+
+## 2.2.0 - 2026/10/28
+
+Improve slowest image formats and add more tier2 formats
+
 - Pdf/document renders inside page count border to avoid cropping edges
 - Jpeg2000 reduces wavelet decoding for faster low resolution results, 5x faster
 - Promote to tier2; exr, ddr, xbm, xpm, sgi, pxc
