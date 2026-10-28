@@ -6,6 +6,8 @@
 pub use tier1::*;
 
 pub mod avdecode;
+mod dds;
 mod exr;
+mod image_extras;
 pub mod renderer;
 pub use renderer::Tier2Renderer;

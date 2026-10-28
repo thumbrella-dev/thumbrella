@@ -1251,6 +1251,9 @@ impl<S: HttpStream> ThumbCook<S> {
             let mut tried_any = false;
             let mut first_attempt = true;
             for attempt_tier in start_tier..=3 {
+                if attempt_tier == 3 && ext == "exr" {
+                    break;
+                }
                 if attempt_tier == 1 {
                     continue; // tier 1 already tried locally
                 }
@@ -1313,6 +1316,7 @@ impl<S: HttpStream> ThumbCook<S> {
                     Ok(ref remote) if remote.result.status == ResultStatus::Success => {
                         // A successful placeholder is not a render; let the next tier try.
                         if attempt_tier == 2
+                            && ext != "exr"
                             && self.runtime.handoff_tier3.url.is_some()
                             && remote
                                 .result

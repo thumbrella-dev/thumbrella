@@ -70,8 +70,11 @@ impl InProcessRenderer for Tier2Renderer {
 
             match kind {
                 Some(FileKind::Image) => {
-                    if ext == "exr" {
-                        return render_exr(cook).await;
+                    if matches!(ext.as_str(), "exr" | "dds") {
+                        return render_sparse_image(cook, &ext).await;
+                    }
+                    if is_extra_image(&ext) {
+                        return render_extra_image(cook, &ext).await;
                     }
                     // Formats tier2's libav can't decode - return false
                     // immediately so tier3's oiiotool / ffmpeg CLI can
@@ -99,19 +102,78 @@ impl InProcessRenderer for Tier2Renderer {
 
 //  Image decode
 
-async fn render_exr(cook: &mut dyn RenderCook) -> bool {
+fn is_extra_image(ext: &str) -> bool {
+    matches!(ext, "icns" | "ora" | "otb" | "pcx" | "sgi" | "wbmp" | "xbm" | "xpm")
+}
+
+async fn render_extra_image(cook: &mut dyn RenderCook, ext: &str) -> bool {
     let (reader, counter) = match cook.take_sparse_reader() {
         Some(reader) => reader,
         None => {
             let Some(bytes) = fetch_url(cook.input_url()).await else {
-                cook.fail_cook("EXR fetch failed");
+                cook.fail_cook("image-extras fetch failed");
                 return true;
             };
             cook.set_bytes_consumed(bytes.len() as u64);
             (Box::new(Cursor::new(bytes)) as Box<dyn ReadSeek + Send>, None)
         }
     };
-    let result = tokio::task::spawn_blocking(move || crate::exr::decode(reader)).await.ok().flatten();
+    let extension = ext.to_owned();
+    let result = tokio::task::spawn_blocking(move || crate::image_extras::decode(reader, &extension))
+        .await
+        .ok()
+        .flatten();
+    if let Some(counter) = counter {
+        cook.set_bytes_consumed(counter.load(std::sync::atomic::Ordering::Relaxed));
+    }
+    match result {
+        Some(image) => {
+            let mut properties = serde_json::json!({"width": image.width(), "height": image.height()});
+            if matches!(ext, "ora" | "otb" | "pcx" | "sgi" | "wbmp" | "xbm" | "xpm") {
+                properties["lossless"] = 1.into();
+            }
+            if matches!(ext, "otb" | "wbmp" | "xbm") {
+                properties["alpha"] = 0.into();
+            }
+            apply_render_output(
+                cook,
+                RenderOutput {
+                    image,
+                    renderer: Some("image_extras".into()),
+                    codec: Some(ext.into()),
+                    video_seek_secs: None,
+                    properties: Some(properties),
+                },
+            );
+            true
+        }
+        None => {
+            cook.note("image-extras decoder could not render this image");
+            false
+        }
+    }
+}
+
+async fn render_sparse_image(cook: &mut dyn RenderCook, ext: &str) -> bool {
+    let name = if ext == "exr" { "EXR" } else { "DDS" };
+    let (reader, counter) = match cook.take_sparse_reader() {
+        Some(reader) => reader,
+        None => {
+            let Some(bytes) = fetch_url(cook.input_url()).await else {
+                cook.fail_cook(&format!("{name} fetch failed"));
+                return true;
+            };
+            cook.set_bytes_consumed(bytes.len() as u64);
+            (Box::new(Cursor::new(bytes)) as Box<dyn ReadSeek + Send>, None)
+        }
+    };
+    let result = tokio::task::spawn_blocking(move || match name {
+        "EXR" => crate::exr::decode(reader),
+        _ => crate::dds::decode(reader),
+    })
+    .await
+    .ok()
+    .flatten();
     if let Some(counter) = counter {
         cook.set_bytes_consumed(counter.load(std::sync::atomic::Ordering::Relaxed));
     }
@@ -121,8 +183,13 @@ async fn render_exr(cook: &mut dyn RenderCook) -> bool {
             true
         }
         None => {
-            cook.note("EXR decoder could not render this image");
-            false
+            if ext == "exr" {
+                cook.fail_cook("EXR decoder could not render this image");
+                true
+            } else {
+                cook.note(&format!("{name} decoder could not render this image"));
+                false
+            }
         }
     }
 }
@@ -374,8 +441,34 @@ fn render_svg(reader: &mut dyn ReadSeek) -> Option<RenderOutput> {
         renderer: Some("resvg".into()),
         codec: None,
         video_seek_secs: None,
-        properties: Some(serde_json::json!({ "width": src_w, "height": src_h, "bpp": 32 })),
+        properties: Some(serde_json::json!({ "width": src_w, "height": src_h })),
     })
+}
+
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+
+    #[test]
+    fn svg_reports_dimensions_without_raster_depth() {
+        let mut svg = Cursor::new(br#"<svg xmlns="http://www.w3.org/2000/svg" width="640" height="480"><rect width="640" height="480" fill="red"/></svg>"#.to_vec());
+        let properties = render_svg(&mut svg).unwrap().properties.unwrap();
+        assert_eq!(properties["width"], 640);
+        assert_eq!(properties["height"], 480);
+        assert!(properties.get("bpp").is_none());
+    }
+
+    #[test]
+    fn image_crate_depth_excludes_alpha() {
+        tier1::ux::init();
+        let image = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 128])));
+        let mut data = Cursor::new(Vec::new());
+        image.write_to(&mut data, image::ImageFormat::Png).unwrap();
+        data.set_position(0);
+        let properties = collect_and_decode_image_crate(Box::new(data), None, "png")
+            .unwrap().properties.unwrap();
+        assert_eq!(properties["bpp"], 24);
+    }
 }
 
 //  Raw TIFF preview extraction
@@ -885,14 +978,26 @@ fn collect_and_decode_image_crate(
             None => {
                 let img = image::load_from_memory(&bytes).ok()?;
                 let (w, h) = img.dimensions();
-                let d = img.color().bits_per_pixel() as u32;
+                let color = img.color();
+                let d = u32::from(color.bits_per_pixel())
+                    - if color.has_alpha() {
+                        u32::from(color.bits_per_pixel()) / u32::from(color.channel_count())
+                    } else {
+                        0
+                    };
                 (img, w, h, d)
             }
         }
     } else {
         let img = image::load_from_memory(&bytes).ok()?;
         let (w, h) = img.dimensions();
-        let d = img.color().bits_per_pixel() as u32;
+        let color = img.color();
+        let d = u32::from(color.bits_per_pixel())
+            - if color.has_alpha() {
+                u32::from(color.bits_per_pixel()) / u32::from(color.channel_count())
+            } else {
+                0
+            };
         (img, w, h, d)
     };
 

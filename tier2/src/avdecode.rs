@@ -76,6 +76,24 @@ use serde_json::json;
 use tier1::renderer::RenderOutput;
 use tier1::spec::ThumbnailConfig;
 
+fn color_bits_per_pixel(pix_fmt: AVPixelFormat) -> Option<i32> {
+    unsafe {
+        let desc = av_pix_fmt_desc_get(pix_fmt);
+        if desc.is_null() {
+            return None;
+        }
+        let mut depth = av_get_bits_per_pixel(desc);
+        if (*desc).flags & AV_PIX_FMT_FLAG_ALPHA as u64 != 0 {
+            let components = (*desc).nb_components as usize;
+            if components < 2 || components > (*desc).comp.len() {
+                return None;
+            }
+            depth -= (*desc).comp[components - 1].depth;
+        }
+        (depth > 0).then_some(depth)
+    }
+}
+
 /// Emit a debug message only when raw logs are enabled (TBR_LOG=full).
 /// avdecode cannot use tier1::ux (native-only), so it checks the env var directly.
 macro_rules! tbr_debug {
@@ -564,10 +582,28 @@ unsafe fn decode_inner(
     );
 
     // Bits-per-pixel from the pixel-format descriptor.
-    let depth = {
-        let desc = av_pix_fmt_desc_get(pix_fmt);
-        if desc.is_null() { 0 } else { av_get_bits_per_pixel(desc) }
-    };
+    let depth = color_bits_per_pixel(pix_fmt).unwrap_or(0);
+
+    let mut properties = json!({ "width": reported_w, "height": reported_h });
+    if depth > 0 {
+        properties["bpp"] = json!(depth);
+    }
+    if seek_secs.is_some() {
+        let duration = (**fmt_ctx).duration;
+        if duration > 0
+            && (**fmt_ctx).duration_estimation_method
+                != AVDurationEstimationMethod::AVFMT_DURATION_FROM_BITRATE
+        {
+            properties["duration"] = json!(duration as f64 / AV_TIME_BASE as f64);
+        }
+        let audio_tracks = (0..nb)
+            .filter(|&index| {
+                let stream = *(**fmt_ctx).streams.add(index);
+                (*(*stream).codecpar).codec_type == AVMediaType::AVMEDIA_TYPE_AUDIO
+            })
+            .count();
+        properties["channels"] = json!(audio_tracks);
+    }
 
     //  Decoder
     let dec = avcodec_find_decoder(codec_id);
@@ -783,10 +819,19 @@ unsafe fn decode_inner(
         renderer: Some("ffmpeg".to_string()),
         codec: codec_name,
         video_seek_secs: applied_seek_secs,
-        properties: Some(json!({
-            "width":  reported_w,
-            "height": reported_h,
-            "bpp":  depth,
-        })),
+        properties: Some(properties),
     })
+}
+
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+
+    #[test]
+    fn pixel_depth_excludes_alpha() {
+        assert_eq!(color_bits_per_pixel(AVPixelFormat::AV_PIX_FMT_RGB24), Some(24));
+        assert_eq!(color_bits_per_pixel(AVPixelFormat::AV_PIX_FMT_RGBA), Some(24));
+        assert_eq!(color_bits_per_pixel(AVPixelFormat::AV_PIX_FMT_YUV420P), Some(12));
+        assert_eq!(color_bits_per_pixel(AVPixelFormat::AV_PIX_FMT_NONE), None);
+    }
 }

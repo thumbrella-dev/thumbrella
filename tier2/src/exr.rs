@@ -1,9 +1,9 @@
-use std::io::{BufReader, Seek, SeekFrom};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 
 use exr::block::reader::ChunksReader;
 use exr::math::Vec2;
 use exr::meta::BlockDescription;
-use exr::meta::attribute::{LevelMode, SampleType};
+use exr::meta::attribute::{LevelMode, Preview, SampleType};
 use exr::prelude::f16;
 use image::{DynamicImage, RgbaImage};
 use tier1::ReadSeek;
@@ -21,11 +21,29 @@ pub(crate) fn decode(mut source: Box<dyn ReadSeek + Send>) -> Option<RenderOutpu
     if width == 0 || height == 0 {
         return None;
     }
-    let properties = serde_json::json!({
+    let mut properties = serde_json::json!({
         "width": width,
         "height": height,
-        "bpp": header.channels.bytes_per_pixel * 8,
     });
+    if reader.headers().len() == 1 {
+        let channels = &header.channels.list;
+        let named = |name: &[u8]| channels.iter().any(|channel| channel.name.as_slice() == name);
+        let simple = channels.iter().all(|channel| {
+            matches!(channel.name.as_slice(), b"R" | b"G" | b"B" | b"Y" | b"A")
+        }) && (named(b"R") && named(b"G") && named(b"B") || named(b"Y"));
+        if simple {
+            let bits: usize = channels.iter().filter(|channel| channel.name.as_slice() != b"A")
+                .map(|channel| match channel.sample_type {
+                    SampleType::F16 => 16,
+                    SampleType::F32 | SampleType::U32 => 32,
+                }).sum();
+            properties["bpp"] = bits.into();
+            properties["alpha"] = u8::from(named(b"A")).into();
+        }
+        properties["lossless"] = u8::from(channels.iter().all(|channel| {
+            header.compression.is_lossless_for(channel.sample_type)
+        })).into();
+    }
     let same_window =
         display.position == header.own_attributes.layer_position && display.size == header.layer_size;
     let longest_side = u64::from(width.max(height));
@@ -36,18 +54,26 @@ pub(crate) fn decode(mut source: Box<dyn ReadSeek + Send>) -> Option<RenderOutpu
         && preview.size.0 as u64 >= (u64::from(width) * target_side).div_ceil(longest_side)
         && preview.size.1 as u64 >= (u64::from(height) * target_side).div_ceil(longest_side)
     {
-        let pixels = preview.pixel_data.iter().map(|value| *value as u8).collect();
-        if let Some(image) = RgbaImage::from_raw(
-            u32::try_from(preview.size.0).ok()?,
-            u32::try_from(preview.size.1).ok()?,
-            pixels,
-        ) {
-            if image.width() > 0 && image.height() > 0 {
-                return Some(output(DynamicImage::ImageRgba8(image), properties, "preview"));
-            }
+        if let Some(image) = preview_image(preview) {
+            return Some(output(image, properties, "preview"));
         }
     }
 
+    let fallback_preview = header.own_attributes.preview.clone();
+    let decoded = decode_pixels(reader, same_window, properties.clone());
+    decoded.or_else(|| {
+        let image = preview_image(fallback_preview.as_ref()?)?;
+        Some(output(image, properties, "preview"))
+    })
+}
+
+fn decode_pixels<R: Read + Seek>(
+    reader: exr::block::reader::Reader<R>,
+    same_window: bool,
+    properties: serde_json::Value,
+) -> Option<RenderOutput> {
+    let header = reader.headers().first()?;
+    let display = header.shared_attributes.display_window;
     if header.deep || header.channels.list.iter().any(|channel| channel.sampling != Vec2(1, 1)) {
         return None;
     }
@@ -256,6 +282,16 @@ pub(crate) fn decode(mut source: Box<dyn ReadSeek + Send>) -> Option<RenderOutpu
     Some(output(DynamicImage::ImageRgba8(image), properties, "pixels"))
 }
 
+fn preview_image(preview: &Preview) -> Option<DynamicImage> {
+    let width = u32::try_from(preview.size.0).ok()?;
+    let height = u32::try_from(preview.size.1).ok()?;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let pixels = preview.pixel_data.iter().map(|value| *value as u8).collect();
+    RgbaImage::from_raw(width, height, pixels).map(DynamicImage::ImageRgba8)
+}
+
 fn linear_to_srgb(value: f32) -> f32 {
     if value <= 0.003_130_8 {
         value * 12.92
@@ -377,6 +413,90 @@ mod tests {
     }
 
     #[test]
+    fn uses_small_preview_for_unsupported_channels() {
+        let mut attributes = LayerAttributes::named("depth");
+        attributes.preview = Some(Preview {
+            size: Vec2(1, 1),
+            pixel_data: vec![12, 34, 56, -1],
+        });
+        let channels = AnyChannels::sort(SmallVec::from_vec(vec![AnyChannel::new(
+            "Z",
+            FlatSamples::F32(vec![0.5; 64]),
+        )]));
+        let layer = Layer::new((8, 8), attributes, Encoding::FAST_LOSSLESS, channels);
+        let mut data = Cursor::new(Vec::new());
+        Image::from_layer(layer).write().to_buffered(&mut data).unwrap();
+        let result = decode(Box::new(data)).unwrap();
+        assert_eq!(result.codec.as_deref(), Some("preview"));
+        assert_eq!(result.image.to_rgba8().get_pixel(0, 0).0, [12, 34, 56, 255]);
+        assert_eq!(result.properties.unwrap()["width"], 8);
+    }
+
+    #[test]
+    fn unsupported_channels_without_preview_are_not_claimed() {
+        let channels = AnyChannels::sort(SmallVec::from_vec(vec![AnyChannel::new(
+            "Z",
+            FlatSamples::F32(vec![0.5; 64]),
+        )]));
+        let layer =
+            Layer::new((8, 8), LayerAttributes::named("depth"), Encoding::FAST_LOSSLESS, channels);
+        let mut data = Cursor::new(Vec::new());
+        Image::from_layer(layer).write().to_buffered(&mut data).unwrap();
+        assert!(decode(Box::new(data)).is_none());
+    }
+
+    #[test]
+    fn uses_small_preview_for_unsupported_compression() {
+        let mut attributes = LayerAttributes::named("unsupported compression");
+        attributes.preview = Some(Preview {
+            size: Vec2(1, 1),
+            pixel_data: vec![12, 34, 56, -1],
+        });
+        let layer = Layer::new(
+            (8, 8),
+            attributes,
+            Encoding::FAST_LOSSLESS,
+            SpecificChannels::rgb(|_| (1.0_f32, 0.0_f32, 0.0_f32)),
+        );
+        let mut data = Cursor::new(Vec::new());
+        Image::from_layer(layer).write().to_buffered(&mut data).unwrap();
+        let bytes = data.get_mut();
+        let attribute = b"compression\0compression\0\x01\0\0\0";
+        let position = bytes.windows(attribute.len()).position(|window| window == attribute).unwrap();
+        bytes[position + attribute.len()] = 11;
+        let result = decode(Box::new(data)).unwrap();
+        assert_eq!(result.codec.as_deref(), Some("preview"));
+        assert_eq!(result.image.to_rgba8().get_pixel(0, 0).0, [12, 34, 56, 255]);
+    }
+
+    #[test]
+    fn uses_preview_for_unsupported_channels_with_different_windows() {
+        let mut attributes = LayerAttributes::named("depth").with_position(Vec2(1, 1));
+        attributes.preview = Some(Preview {
+            size: Vec2(1, 1),
+            pixel_data: vec![12, 34, 56, -1],
+        });
+        let channels = AnyChannels::sort(SmallVec::from_vec(vec![AnyChannel::new(
+            "Z",
+            FlatSamples::F32(vec![0.5; 4]),
+        )]));
+        let layer = Layer::new((2, 2), attributes, Encoding::FAST_LOSSLESS, channels);
+        let display = IntegerBounds {
+            position: Vec2(0, 0),
+            size: Vec2(4, 4),
+        };
+        let mut data = Cursor::new(Vec::new());
+        Image::empty(ImageAttributes::new(display))
+            .with_layer(layer)
+            .write()
+            .to_buffered(&mut data)
+            .unwrap();
+        let result = decode(Box::new(data)).unwrap();
+        assert_eq!(result.codec.as_deref(), Some("preview"));
+        assert_eq!(result.properties.unwrap()["width"], 4);
+    }
+
+    #[test]
     fn positions_cropped_data_inside_display_window() {
         let display = IntegerBounds {
             position: Vec2(-2, -3),
@@ -464,7 +584,12 @@ mod tests {
             .write()
             .to_buffered(&mut data)
             .unwrap();
-        let image = decode(Box::new(data)).unwrap().image.to_rgba8();
+        let result = decode(Box::new(data)).unwrap();
+        let properties = result.properties.unwrap();
+        assert_eq!(properties["bpp"], 96);
+        assert_eq!(properties["alpha"], 1);
+        assert_eq!(properties["lossless"], 1);
+        let image = result.image.to_rgba8();
         assert_eq!(image.get_pixel(0, 1).0, [0, 0, 0, 0]);
         assert_eq!(image.get_pixel(1, 1).0[0], 188);
         assert_eq!(image.get_pixel(1, 1).0[3], 128);

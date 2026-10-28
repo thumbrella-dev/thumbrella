@@ -141,6 +141,9 @@ impl InProcessRenderer for Tier3Renderer {
                     }
                 }
                 Some(FileKind::Image) => {
+                    if ext == "exr" {
+                        return self.tier2.render(cook).await;
+                    }
                     // Tier 3 is a superset of tier 2: try the builtin libav
                     // path first (even on handoff), then the external
                     // ffmpeg/oiio CLI path.
@@ -346,6 +349,8 @@ fn run_magick_image_decode(bytes: &[u8], ext: &str) -> Result<RenderOutput, Stri
         properties: Some(serde_json::json!({
             "width": src_w,
             "height": src_h,
+            "alpha": 0,
+            "lossless": 0,
         })),
     })
 }
@@ -354,25 +359,15 @@ fn run_magick_image_decode(bytes: &[u8], ext: &str) -> Result<RenderOutput, Stri
 fn is_oiio_format(ext: &str) -> bool {
     matches!(
         ext,
-        "exr"
-            | "sxr"
-            | "mxr"
-            | "hdr"
+        "hdr"
             | "rgbe"
             | "dpx"
             | "cin"
-            | "dds"
             | "fits"
             | "iff"
             | "pic"
             | "rla"
             | "zfile"
-            | "sgi"
-            | "rgb"
-            | "rgba"
-            | "bw"
-            | "int"
-            | "inta"
     )
 }
 
@@ -529,7 +524,7 @@ fn run_ffmpeg_decode(bytes: &[u8], ext: &str, is_video: bool) -> Result<RenderOu
 
     //  ffprobe: get dimensions, colour depth, duration, audio channels
     let (src_w, src_h, bits_per_pixel, duration_secs, channel_count) = if let Some(h) = &jp2 {
-        (h.width, h.height, 24, None, 0)
+        (h.width, h.height, 0, None, 0)
     } else {
         let output = Command::new("ffprobe")
             .arg("-v")
@@ -566,8 +561,7 @@ fn run_ffmpeg_decode(bytes: &[u8], ext: &str, is_video: bool) -> Result<RenderOu
         let chan = streams
             .iter()
             .filter(|s| s["codec_type"] == "audio")
-            .filter_map(|s| s["channels"].as_u64())
-            .sum::<u64>() as u32;
+            .count() as u32;
 
         //  duration
         let dur = json["format"]["duration"].as_str().and_then(|s| s.parse::<f64>().ok());
@@ -669,7 +663,7 @@ fn run_ffmpeg_decode(bytes: &[u8], ext: &str, is_video: bool) -> Result<RenderOu
         codec: None,
         video_seek_secs: if is_video { Some(1.0) } else { None },
         properties: Some(build_video_properties(
-            src_w, src_h, bits_per_pixel, duration_secs, channel_count,
+            src_w, src_h, bits_per_pixel, duration_secs, channel_count, is_video,
         )),
     })
 }
@@ -682,6 +676,7 @@ fn build_video_properties(
     bits_per_pixel: u32,
     duration_secs: Option<f64>,
     channel_count: u32,
+    is_video: bool,
 ) -> serde_json::Value {
     let mut props = serde_json::json!({
         "width": w,
@@ -690,11 +685,12 @@ fn build_video_properties(
     if bits_per_pixel > 0 {
         props["bpp"] = serde_json::json!(bits_per_pixel);
     }
-    if let Some(d) = duration_secs {
-        props["duration_seconds"] = serde_json::json!(d);
+    if let Some(d) = duration_secs.filter(|d| is_video && d.is_finite() && *d > 0.0) {
+        props["duration"] = serde_json::json!(d);
     }
-    // channel_count is always written - 0 means "known to be silent".
-    props["channel_count"] = serde_json::json!(channel_count);
+    if is_video {
+        props["channels"] = serde_json::json!(channel_count);
+    }
     props
 }
 
@@ -770,7 +766,7 @@ fn pix_fmt_bits_per_pixel(pix_fmt: &str) -> u32 {
 ///
 /// | Extension | Tool |
 /// |-----------|------|
-/// | exr, hdr, dpx, … | oiiotool |
+/// | hdr, dpx, … | oiiotool |
 /// | All others (incl. jp2/j2k) | ffmpeg CLI |
 async fn render_image_ffmpeg_fallback(cook: &mut dyn RenderCook, ext: &str) -> bool {
     let report = crate::env_check::cached_report();
@@ -847,7 +843,10 @@ async fn render_image_ffmpeg_fallback(cook: &mut dyn RenderCook, ext: &str) -> b
                 return true;
             }
         };
-        if ext == "exr" {
+        if matches!(
+            ext,
+            "dds" | "icns" | "ora" | "otb" | "pcx" | "sgi" | "wbmp" | "xbm" | "xpm"
+        ) {
             cook.add_bytes_consumed(bytes.len() as u64);
         }
         let result = tokio::task::spawn_blocking(move || {
@@ -1719,7 +1718,28 @@ fn autocrop_transparent(img: image::DynamicImage) -> image::DynamicImage {
 
 #[cfg(test)]
 mod tests {
-    use super::{jp2_lowres, parse_jp2_header};
+    use super::{build_video_properties, is_oiio_format, jp2_lowres, parse_jp2_header};
+
+    #[test]
+    fn properties_follow_media_kind() {
+        let image = build_video_properties(640, 480, 24, Some(2.0), 0, false);
+        assert!(image.get("channels").is_none());
+        assert!(image.get("duration").is_none());
+        let video = build_video_properties(640, 480, 12, Some(2.0), 1, true);
+        assert_eq!(video["channels"], 1);
+        assert_eq!(video["duration"], 2.0);
+        assert!(video.get("channel_count").is_none());
+        assert!(build_video_properties(1, 1, 0, Some(f64::NAN), 0, true).get("duration").is_none());
+    }
+
+    #[test]
+    fn tier2_images_do_not_use_oiiotool() {
+        for ext in ["exr", "sxr", "mxr", "dds", "sgi", "rgb", "rgba", "bw", "int", "inta"] {
+            assert!(!is_oiio_format(ext), "{ext}");
+        }
+        assert!(is_oiio_format("dpx"));
+        assert!(is_oiio_format("hdr"));
+    }
 
     /// Build a minimal JP2 container with a single-component codestream whose
     /// SIZ/COD markers carry the given geometry and decomposition level count.

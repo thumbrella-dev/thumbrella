@@ -167,31 +167,78 @@ async fn tier3_handoff_keeps_local_png_renderer() {
 }
 
 #[tokio::test]
-async fn exr_handoffs_work_with_either_or_both_targets() {
+async fn unsupported_exr_does_not_handoff_after_local_tier2() {
     let server = server(vec![0x76, 0x2f, 0x31, 0x01, 2, 0, 0, 0], "image/x-exr").await;
     let target = format!("{},tbr_s_test_only", server.url);
     for targets in [
         vec![("TBR_TIER2", target.as_str())],
         vec![("TBR_TIER3", target.as_str())],
-        vec![
-            ("TBR_TIER2", target.as_str()),
-            ("TBR_TIER3", target.as_str()),
-        ],
     ] {
-        let before = server.handoffs.lock().unwrap().len();
         let result = result(&server, "image.exr", &targets, true).await;
-        assert_eq!(result.source, Some(ResultSource::Render));
-        assert_eq!(result.message, None);
-        assert!(result.media.unwrap().placeholder.is_empty());
-        let calls = server.handoffs.lock().unwrap();
-        assert_eq!(calls.len(), before + 1);
-        assert!(
-            calls
-                .last()
-                .unwrap()
-                .to_ascii_lowercase()
-                .contains("authorization: bearer tbr_s_test_only")
-        );
+        assert_eq!(result.source, Some(ResultSource::Fallback));
+        assert_eq!(result.message.as_deref(), Some("EXR decoder could not render this image"));
+        assert!(!result.media.unwrap().placeholder.is_empty());
+        assert!(server.handoffs.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn unsupported_exr_does_not_escalate_after_remote_tier2() {
+    let bytes = vec![0x76, 0x2f, 0x31, 0x01, 2, 0, 0, 0];
+    let failure = ThumbResult {
+        status: ResultStatus::Failed,
+        message: Some("EXR decoder could not render this image".into()),
+        ..Default::default()
+    };
+    let tier2 = server_with_result(bytes.clone(), "image/x-exr", failure).await;
+    let tier3 = server(bytes, "image/x-exr").await;
+    let result = result(
+        &tier2,
+        "image.exr",
+        &[("TBR_TIER2", &tier2.url), ("TBR_TIER3", &tier3.url)],
+        true,
+    )
+    .await;
+    assert_eq!(result.source, Some(ResultSource::Fallback));
+    assert_eq!(result.message.as_deref(), Some("EXR decoder could not render this image"));
+    assert!(!result.media.unwrap().placeholder.is_empty());
+    assert_eq!(tier2.handoffs.lock().unwrap().len(), 1);
+    assert!(tier3.handoffs.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn remote_tier2_exr_results_do_not_escalate() {
+    let bytes = vec![0x76, 0x2f, 0x31, 0x01, 2, 0, 0, 0];
+    let tier3 = server(bytes.clone(), "image/x-exr").await;
+    let rendered = server(bytes.clone(), "image/x-exr").await;
+    let placeholder = ThumbResult {
+        status: ResultStatus::Success,
+        source: Some(ResultSource::Fallback),
+        message: Some("EXR decoder could not render this image".into()),
+        media: Some(ThumbMedia {
+            kind: tier1::FileKind::Image,
+            extension: "exr".into(),
+            mime: "image/x-exr".into(),
+            placeholder: "image".into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let unavailable = server_with_result(bytes, "image/x-exr", placeholder).await;
+    for (tier2, expected_source) in [
+        (&rendered, ResultSource::Render),
+        (&unavailable, ResultSource::Fallback),
+    ] {
+        let output = result(
+            tier2,
+            "image.exr",
+            &[("TBR_TIER2", &tier2.url), ("TBR_TIER3", &tier3.url)],
+            true,
+        )
+        .await;
+        assert_eq!(output.source, Some(expected_source));
+        assert_eq!(tier2.handoffs.lock().unwrap().len(), 1);
+        assert!(tier3.handoffs.lock().unwrap().is_empty());
     }
 }
 

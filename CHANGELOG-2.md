@@ -2,9 +2,11 @@
 
 ## Development
 
-- pdf/document renders inside page count border to avoid cropping edges
-- jpeg2000 reduces wavelet decoding for faster low resolution results, 5x faster
-- native exr handling can be, 2x faster
+- Pdf/document renders inside page count border to avoid cropping edges
+- Jpeg2000 reduces wavelet decoding for faster low resolution results, 5x faster
+- Promote to tier2; exr, ddr, xbm, xpm, sgi, pxc
+- Add tier2 support for; otb, wbmp, icns
+- Improve result properties consistency and data
 
 ## 2.1.1 - 2026/10/23
 

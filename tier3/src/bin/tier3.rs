@@ -168,7 +168,7 @@ async fn main() {
 /// Representative headline format per external tool that tier 3 needs.
 /// Used only for the startup cloud nudge.
 const TOOL_FORMAT_EXAMPLES: &[(&str, &str)] =
-    &[("oiiotool", "exr"), ("f3d", "gltf"), ("pdftoppm", "pdf")];
+    &[("oiiotool", "dpx"), ("f3d", "gltf"), ("pdftoppm", "pdf")];
 
 /// Build the one-line cloud nudge: at most three of the missing tools' formats
 /// plus `and more` when there are more.  `None` when every tool is present.

@@ -41,6 +41,7 @@ native = [
 #  Core - always available, WASM-compatible
 serde       = { version = "1", features = ["derive"] }
 serde_json  = { version = "1", features = ["preserve_order"] }
+roxmltree   = "0.21"
 tracing     = "0.1"
 futures     = { version = "0.3", default-features = false, features = ["alloc"] }
 base64      = "0.23"

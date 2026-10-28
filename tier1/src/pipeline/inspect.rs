@@ -46,8 +46,16 @@ pub async fn inspect<S: HttpStream>(cook: &mut ThumbCook<S>) {
     cook.media.properties = Some(serde_json::json!({}));
 
     // For image formats, dimension headers are always within the first few KB.
-    if kind == FileKind::Image && cook.media.extension.as_deref() != Some("exr") {
-        inspect_image_properties(&prefix, cook.media.properties.as_mut().unwrap());
+    if kind == FileKind::Image {
+        let ext = cook.media.extension.as_deref().unwrap_or("");
+        let props = cook.media.properties.as_mut().unwrap();
+        if is_raw_tiff_extension(ext) {
+            if raw_without_alpha(ext) {
+                props["alpha"] = 0.into();
+            }
+        } else if !matches!(ext, "exr" | "dds") {
+            inspect_image_properties(&prefix, props);
+        }
     }
 
     // Audio lossless: inferred from extension.
@@ -56,7 +64,9 @@ pub async fn inspect<S: HttpStream>(cook: &mut ThumbCook<S>) {
     {
         let obj = props.as_object_mut().expect("properties is always a JSON object");
         let ext = cook.media.extension.as_deref().unwrap_or("");
-        obj.insert("lossless".into(), (is_lossless_audio_ext(ext) as i32).into());
+        if let Some(lossless) = audio_lossless_from_ext(ext) {
+            obj.insert("lossless".into(), (lossless as i32).into());
+        }
     }
 
     // Route determines which tier should process this - informational only at
@@ -74,6 +84,40 @@ pub async fn inspect<S: HttpStream>(cook: &mut ThumbCook<S>) {
 /// 3. HTTP `Content-Type` header - used when neither magic nor extension helped.
 fn sniff(bytes: &[u8], url: &str, content_type: Option<&str>) -> (FileKind, String, String) {
     let url_ext = url_extension(url);
+
+    if bytes.starts_with(b"DDS ") {
+        return (FileKind::Image, "image/vnd-ms.dds".into(), "dds".into());
+    }
+    let extra_magic = if bytes.starts_with(b"icns") {
+        Some("icns")
+    } else if bytes.len() >= 4
+        && bytes[0..2] == [1, 0xda]
+        && bytes[2] <= 1
+        && (1..=2).contains(&bytes[3])
+    {
+        Some("sgi")
+    } else if bytes.len() >= 128
+        && bytes[0] == 0x0a
+        && bytes[1] <= 5
+        && bytes[2] == 1
+        && matches!(bytes[3], 1 | 2 | 4 | 8)
+    {
+        Some("pcx")
+    } else if bytes.starts_with(b"/* XPM */") {
+        Some("xpm")
+    } else {
+        None
+    };
+    if let Some(ext) = extra_magic {
+        return (FileKind::Image, ext_to_mime(ext).into(), ext.into());
+    }
+    if bytes.starts_with(b"PK\x03\x04")
+        && content_type.is_some_and(|ct| {
+            ct.split(';').next().unwrap_or(ct).trim().eq_ignore_ascii_case("image/openraster")
+        })
+    {
+        return (FileKind::Image, "image/openraster".into(), "ora".into());
+    }
 
     if let Some(t) = infer::get(bytes) {
         let infer_ext = canonical_extension(t.extension());
@@ -161,6 +205,81 @@ mod tests {
     use super::*;
 
     #[test]
+    fn proprietary_camera_raw_formats_have_no_alpha() {
+        for extension in ["cr2", "nef", "arw", "orf", "rw2", "pef", "srw", "raf", "3fr", "fff", "iiq", "mef", "rwl"] {
+            assert!(is_raw_tiff_extension(extension));
+            assert!(raw_without_alpha(extension));
+        }
+        for extension in ["dng", "raw", "tiff"] {
+            assert!(!raw_without_alpha(extension));
+        }
+    }
+
+    #[test]
+    fn webp_properties_come_from_source_chunks() {
+        fn container(chunks: &[u8]) -> Vec<u8> {
+            let mut bytes = b"RIFF\0\0\0\0WEBP".to_vec();
+            bytes.extend_from_slice(chunks);
+            bytes
+        }
+        let lossy = b"VP8 \x0a\0\0\0\x10\0\0\x9d\x01\x2a\x01\0\x01\0";
+        let lossless = b"VP8L\x05\0\0\0\x2f\0\0\0\0\0";
+        let extended = b"VP8X\x0a\0\0\0\x08\0\0\0\0\0\0\0\0\0";
+        let mut props = serde_json::json!({});
+        inspect_image_properties(&container(lossy), &mut props);
+        assert_eq!(props, serde_json::json!({"bpp": 12, "alpha": 0, "lossless": 0}));
+
+        let mut chunks = extended.to_vec();
+        chunks.extend_from_slice(lossy);
+        props = serde_json::json!({});
+        inspect_image_properties(&container(&chunks), &mut props);
+        assert_eq!(props, serde_json::json!({"bpp": 12, "alpha": 0, "lossless": 0}));
+        chunks[8] = 0x10;
+        props = serde_json::json!({});
+        inspect_image_properties(&container(&chunks), &mut props);
+        assert_eq!(props["alpha"], 1);
+
+        props = serde_json::json!({});
+        inspect_image_properties(&container(lossless), &mut props);
+        assert_eq!(props, serde_json::json!({"bpp": 24, "lossless": 1}));
+        chunks[8] = 0x02;
+        props = serde_json::json!({});
+        inspect_image_properties(&container(&chunks), &mut props);
+        assert_eq!(props, serde_json::json!({"alpha": 0}));
+
+        props = serde_json::json!({});
+        inspect_image_properties(&container(&lossy[..12]), &mut props);
+        assert_eq!(props, serde_json::json!({}));
+    }
+
+    #[test]
+    fn audio_losslessness_requires_an_unambiguous_format() {
+        assert_eq!(audio_lossless_from_ext("flac"), Some(true));
+        assert_eq!(audio_lossless_from_ext("mp3"), Some(false));
+        for extension in ["wav", "aiff", "m4a", "ogg", "wma", "wv"] {
+            assert_eq!(audio_lossless_from_ext(extension), None, "{extension}");
+        }
+    }
+
+    #[test]
+    fn arithmetic_jpeg_properties_are_source_properties() {
+        let jpeg = [0xff, 0xd8, 0xff, 0xc9, 0, 11, 8, 0, 20, 0, 30, 3];
+        let mut properties = serde_json::json!({});
+        inspect_image_properties(&jpeg, &mut properties);
+        assert_eq!(properties["width"], 30);
+        assert_eq!(properties["height"], 20);
+        assert_eq!(properties["alpha"], 0);
+        assert_eq!(properties["lossless"], 0);
+        assert!(jpeg_sof_dimensions(&jpeg[..11]).is_none());
+        assert!(!jpeg_is_progressive(&jpeg));
+        let mut progressive = jpeg;
+        progressive[3] = 0xc2;
+        assert!(jpeg_is_progressive(&progressive));
+        progressive[3] = 0xc0;
+        assert!(!jpeg_is_progressive(&progressive));
+    }
+
+    #[test]
     fn html_uses_normal_sniffing_and_canonical_extensions() {
         for (bytes, url, content_type) in [
             (
@@ -206,8 +325,71 @@ mod tests {
             dispatch::format_manifest()
                 .iter()
                 .filter(|entry| entry.extension == "exr")
-                .all(|entry| entry.tier > 1 && !entry.shortcut)
+                .all(|entry| entry.tier == 2 && !entry.shortcut)
         );
+    }
+
+    #[test]
+    fn dds_is_sniffed_and_routed_to_tier2() {
+        for (bytes, url, content_type) in [
+            (b"DDS ".as_slice(), "https://example.com/image", None),
+            (b"".as_slice(), "https://example.com/image.DDS?token=1", None),
+            (b"".as_slice(), "https://example.com/image", Some("image/vnd-ms.dds; charset=binary")),
+            (b"".as_slice(), "https://example.com/image", Some("image/x-dds")),
+        ] {
+            let (kind, _, extension) = sniff(bytes, url, content_type);
+            assert_eq!(kind, FileKind::Image);
+            assert_eq!(extension, "dds");
+            assert_eq!(dispatch::route(kind, Some(&extension)).tier, 2);
+        }
+        for extension in ["dds", "sgi"] {
+            assert!(!dispatch::format_manifest().iter().any(|entry| {
+                entry.extension == extension && entry.renderer == "oiiotool"
+            }));
+        }
+    }
+
+    #[test]
+    fn extra_images_are_detected_and_routed_to_tier2() {
+        for (extension, mime) in [
+            ("icns", "image/x-icns"),
+            ("ora", "image/openraster"),
+            ("otb", "image/x-otb"),
+            ("pcx", "image/x-pcx"),
+            ("sgi", "image/x-sgi"),
+            ("wbmp", "image/vnd.wap.wbmp"),
+            ("xbm", "image/x-xbitmap"),
+            ("xpm", "image/x-xpixmap"),
+        ] {
+            let url = format!("https://example.com/image.{extension}?token=1");
+            for (bytes, url, content_type) in [
+                (b"".as_slice(), url.as_str(), None),
+                (b"".as_slice(), "https://example.com/image", Some(mime)),
+            ] {
+                let (kind, _, detected) = sniff(bytes, url, content_type);
+                assert_eq!((kind, detected.as_str()), (FileKind::Image, extension));
+                assert_eq!(dispatch::route(kind, Some(&detected)).tier, 2);
+            }
+        }
+        for (bytes, extension) in [
+            (b"icns".as_slice(), "icns"),
+            (b"\x01\xda\x00\x01".as_slice(), "sgi"),
+            (b"/* XPM */".as_slice(), "xpm"),
+        ] {
+            assert_eq!(sniff(bytes, "https://example.com/image", None).2, extension);
+        }
+        let mut pcx = [0u8; 128];
+        pcx[..4].copy_from_slice(&[0x0a, 5, 1, 8]);
+        assert_eq!(sniff(&pcx, "https://example.com/image", None).2, "pcx");
+        assert_eq!(
+            sniff(b"PK\x03\x04", "https://example.com/image", Some("image/openraster")).2,
+            "ora"
+        );
+        assert_eq!(sniff(b"PK\x03\x04", "https://example.com/image.ora", None).2, "ora");
+        for alias in ["rgb", "rgba", "bw", "iris", "int", "inta"] {
+            assert_eq!(canonical_extension(alias), "sgi");
+        }
+        assert_eq!(canonical_extension("bm"), "xbm");
     }
 }
 
@@ -223,6 +405,10 @@ mod tests {
 /// Writes any properties it can determine into `props`, leaving existing keys
 /// untouched if it cannot determine a value.  Prefer no entry over a wrong one.
 pub(super) fn inspect_image_properties(bytes: &[u8], props: &mut serde_json::Value) {
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        inspect_webp_properties(bytes, props);
+        return;
+    }
     // JPEG: parse marker structure ourselves so we skip large APP segments.
     if bytes.len() >= 4
         && bytes[0] == 0xFF
@@ -263,28 +449,78 @@ pub(super) fn inspect_image_properties(bytes: &[u8], props: &mut serde_json::Val
     obj.insert("height".into(), h.into());
     obj.insert("bpp".into(), bits_per_pixel.into());
     obj.insert("alpha".into(), (ct.has_alpha() as i32).into());
-    if let Some(fmt) = format {
-        obj.insert("lossless".into(), (is_lossless(fmt) as i32).into());
+    if let Some(lossless) = format.and_then(is_lossless) {
+        obj.insert("lossless".into(), (lossless as i32).into());
+    }
+}
+
+fn inspect_webp_properties(bytes: &[u8], props: &mut serde_json::Value) {
+    let mut offset = 12usize;
+    let mut extended = false;
+    let mut animated = false;
+    while let Some(header) = bytes.get(offset..offset + 8) {
+        let length = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+        let Some(data_start) = offset.checked_add(8) else { return };
+        match &header[..4] {
+            b"VP8X" if offset == 12 && length == 10 => {
+                let Some(data) = bytes.get(data_start..data_start + 10) else { return };
+                if data[0] & 0xc1 != 0 || data[1..4] != [0, 0, 0] {
+                    return;
+                }
+                extended = true;
+                animated = data[0] & 0x02 != 0;
+                props["alpha"] = u8::from(data[0] & 0x10 != 0).into();
+            }
+            b"VP8 " if !animated && length >= 10 => {
+                let Some(data) = bytes.get(data_start..data_start + 10) else { return };
+                if data[0] & 1 != 0 || data[3..6] != [0x9d, 0x01, 0x2a] {
+                    return;
+                }
+                props["bpp"] = 12.into();
+                props["lossless"] = 0.into();
+                if !extended {
+                    props["alpha"] = 0.into();
+                }
+                return;
+            }
+            b"VP8L" if !animated && length >= 5 => {
+                let Some(data) = bytes.get(data_start..data_start + 5) else { return };
+                if data[0] != 0x2f || data[4] & 0xe0 != 0 {
+                    return;
+                }
+                props["bpp"] = 24.into();
+                props["lossless"] = 1.into();
+                return;
+            }
+            _ => {}
+        }
+        let Some(next) = data_start.checked_add(length).and_then(|end| end.checked_add(length & 1)) else {
+            return;
+        };
+        if next > bytes.len() {
+            return;
+        }
+        offset = next;
     }
 }
 
 /// Whether the given image format uses lossless compression.
-fn is_lossless(format: image::ImageFormat) -> bool {
+fn is_lossless(format: image::ImageFormat) -> Option<bool> {
     use image::ImageFormat;
-    matches!(
-        format,
-        ImageFormat::Png
-            | ImageFormat::Bmp
-            | ImageFormat::Tiff
-            | ImageFormat::Gif
-            | ImageFormat::Ico
-            | ImageFormat::Tga
-    )
+    match format {
+        ImageFormat::Png | ImageFormat::Bmp | ImageFormat::Gif | ImageFormat::Ico | ImageFormat::Tga => Some(true),
+        ImageFormat::Jpeg => Some(false),
+        _ => None,
+    }
 }
 
 /// Whether the given audio extension implies lossless encoding.
-fn is_lossless_audio_ext(ext: &str) -> bool {
-    matches!(ext, "flac" | "wav" | "aiff" | "aif" | "alac" | "ape" | "wv")
+fn audio_lossless_from_ext(ext: &str) -> Option<bool> {
+    match ext {
+        "flac" | "alac" | "ape" => Some(true),
+        "mp3" | "aac" | "opus" => Some(false),
+        _ => None,
+    }
 }
 
 /// Walk JPEG markers starting after SOI (offset 2), skipping APP segments
@@ -292,8 +528,16 @@ fn is_lossless_audio_ext(ext: &str) -> bool {
 /// the first SOF0/SOF1/SOF2 marker found.  Returns `None` if no SOF is
 /// reachable within `bytes`.
 pub(super) fn jpeg_sof_dimensions(bytes: &[u8]) -> Option<(u32, u32, u32)> {
+    jpeg_sof(bytes).map(|(width, height, bpp, _)| (width, height, bpp))
+}
+
+pub(super) fn jpeg_is_progressive(bytes: &[u8]) -> bool {
+    jpeg_sof(bytes).is_some_and(|(_, _, _, marker)| marker == 0xC2)
+}
+
+fn jpeg_sof(bytes: &[u8]) -> Option<(u32, u32, u32, u8)> {
     let mut pos: usize = 2;
-    while pos + 8 < bytes.len() {
+    while pos + 9 < bytes.len() {
         if bytes[pos] != 0xFF {
             return None;
         }
@@ -304,12 +548,12 @@ pub(super) fn jpeg_sof_dimensions(bytes: &[u8]) -> Option<(u32, u32, u32)> {
             continue;
         }
         // SOF markers: baseline, extended sequential, progressive
-        if matches!(marker, 0xC0..=0xC2) {
+        if matches!(marker, 0xC0..=0xC2 | 0xC9 | 0xCA) {
             let h = u16::from_be_bytes([bytes[pos + 5], bytes[pos + 6]]) as u32;
             let w = u16::from_be_bytes([bytes[pos + 7], bytes[pos + 8]]) as u32;
             let components = bytes[pos + 9];
             let bpp = (components as u32) * (bytes[pos + 4] as u32);
-            return Some((w, h, bpp));
+            return Some((w, h, bpp, marker));
         }
         // SOS - scan data follows, SOF must precede it
         if marker == 0xDA {
@@ -417,6 +661,10 @@ fn is_raw_tiff_extension(ext: &str) -> bool {
     )
 }
 
+fn raw_without_alpha(ext: &str) -> bool {
+    matches!(ext, "cr2" | "nef" | "arw" | "orf" | "rw2" | "pef" | "srw" | "raf" | "3fr" | "fff" | "iiq" | "mef" | "rwl")
+}
+
 /// Normalise common extension aliases to their canonical form.
 /// Unknown extensions are returned as-is.
 pub fn canonical_extension(raw: &str) -> String {
@@ -427,7 +675,8 @@ pub fn canonical_extension(raw: &str) -> String {
         "j2k" => "jp2",
         "sxr" | "mxr" => "exr",
         "rgbe" => "hdr",
-        "rgb" | "rgba" | "int" | "inta" => "sgi",
+        "rgb" | "rgba" | "int" | "inta" | "bw" | "iris" => "sgi",
+        "bm" => "xbm",
         "pgm" | "ppm" | "pfm" => "pbm",
         "heics" => "heic",
         "heif" => "heic",
@@ -542,7 +791,8 @@ fn mime_to_kind(mime: &str, ext: &str) -> FileKind {
 fn ext_to_kind(ext: &str) -> FileKind {
     match ext {
         "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff" | "avif" | "heic" | "exr" | "hdr" | "apng"
-        | "ico" | "xcf" | "jxl" | "psd" | "pbm" | "tga" => FileKind::Image,
+        | "ico" | "xcf" | "jxl" | "psd" | "pbm" | "tga" | "icns" | "ora" | "otb" | "pcx"
+        | "wbmp" | "xbm" | "xpm" => FileKind::Image,
         // JPEG 2000
         "jp2" => FileKind::Image,
         // Studio / VFX image formats (via oiiotool).
@@ -587,6 +837,15 @@ fn mime_to_extension(mime: &str) -> &'static str {
         "image/jxl" => "jxl",
         "image/vnd.adobe.photoshop" => "psd",
         "image/jp2" => "jp2",
+        "image/vnd-ms.dds" | "image/x-dds" => "dds",
+        "image/x-icns" => "icns",
+        "image/openraster" => "ora",
+        "image/x-otb" => "otb",
+        "image/x-pcx" | "image/pcx" => "pcx",
+        "image/x-sgi" | "image/sgi" => "sgi",
+        "image/vnd.wap.wbmp" => "wbmp",
+        "image/x-xbitmap" => "xbm",
+        "image/x-xpixmap" => "xpm",
         "video/mp4" => "mp4",
         "video/quicktime" => "mov",
         "video/webm" => "webm",
@@ -659,6 +918,13 @@ fn ext_to_mime(ext: &str) -> &'static str {
         "tga" => "image/x-tga",
         "xcf" => "image/x-xcf",
         "sgi" => "image/x-sgi",
+        "icns" => "image/x-icns",
+        "ora" => "image/openraster",
+        "otb" => "image/x-otb",
+        "pcx" => "image/x-pcx",
+        "wbmp" => "image/vnd.wap.wbmp",
+        "xbm" => "image/x-xbitmap",
+        "xpm" => "image/x-xpixmap",
         "dpx" => "image/x-dpx",
         "cin" => "image/x-cineon",
         "dds" => "image/vnd-ms.dds",

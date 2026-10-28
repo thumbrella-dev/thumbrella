@@ -143,6 +143,9 @@ async fn try_progressive_jpeg_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
             Ok(b) => b,
             Err(_) => return,
         };
+        if !super::inspect::jpeg_is_progressive(&header) {
+            return;
+        }
         let (w, h) = jpeg_source_dimensions(&header);
         let pixel_count = w.unwrap_or(0) as u64 * h.unwrap_or(0) as u64;
         // pixel_count == 0 means we couldn't read the SOF marker (e.g. large
@@ -269,7 +272,13 @@ async fn try_exif_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     let Ok(img) = image::load_from_memory(&embedded) else {
         return;
     };
-    let color_type = img.color();
+    if cook.media.extension.as_deref() == Some("jpeg")
+        && cook.media.properties.as_ref().and_then(|props| props.get("alpha")).is_none()
+        && let Ok(source) = cook.http_read_at(0, 65536).await
+    {
+        let props = cook.media.properties.get_or_insert_with(|| serde_json::json!({}));
+        super::inspect::inspect_image_properties(&source, props);
+    }
     let dl_bytes = cook.http_bytes_fetched();
 
     let img = pre_scale_to_target(img, config.exact_width, config.exact_height);
@@ -279,7 +288,9 @@ async fn try_exif_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     cook.render_handler = RenderHandler::Builtin;
     cook.out_download_bytes = dl_bytes;
     if prop_w > 0 && prop_h > 0 {
-        cook.media.properties = Some(image_properties(prop_w, prop_h, color_type));
+        let props = cook.media.properties.get_or_insert_with(|| serde_json::json!({}));
+        props["width"] = prop_w.into();
+        props["height"] = prop_h.into();
     }
     cook.render_image = Some(img);
 }
@@ -423,11 +434,9 @@ async fn try_raw_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     if let Some((sw, sh)) = tiff_ifd0_dimensions(&header, little) {
         // Raw sensor bpp - TIFF IFD0 BitsPerSample tag (0x0102) is per-component,
         // typically 12 or 14 for raw files.  We don't parse it here yet, so omit bpp.
-        cook.media.properties = Some(serde_json::json!({
-            "width": sw,
-            "height": sh,
-            "lossless": 1,
-        }));
+        let props = cook.media.properties.get_or_insert_with(|| serde_json::json!({}));
+        props["width"] = sw.into();
+        props["height"] = sh.into();
     }
     cook.render_image = Some(img);
 }
@@ -506,14 +515,36 @@ async fn zip_extract<S: HttpStream>(cook: &mut ThumbCook<S>) -> Option<(Vec<u8>,
     // LibreOffice and some other producers.  When present and cheap to fetch,
     // it becomes the real "pages" property and the border uses it directly.
     let mut exact_pages: Option<u32> = None;
-    if let Some(meta) = &dir.meta_xml {
-        let head_end = meta.local_offset + meta.comp_size + 512; // + local header / fname / extra overhead
-        if head_end <= ODT_META_HEAD_BUDGET {
-            if let Ok(head) = cook.http_read_at(0, head_end as usize).await {
-                if let Some(bytes) = zip_extract_from_buffer(&head, meta, 0) {
-                    exact_pages = odt_meta_page_count(&bytes);
-                }
+    let extension = cook.media.extension.clone().unwrap_or_default();
+    let extension = extension.as_str();
+    let metadata = if matches!(extension, "odt" | "ods" | "odp") {
+        dir.meta_xml.as_ref()
+    } else if matches!(extension, "docx" | "pptx") {
+        dir.app_xml.as_ref()
+    } else {
+        None
+    };
+    if let Some(meta) = metadata.filter(|entry| {
+        entry.uncomp_size <= 256 * 1024 && entry.comp_size <= 256 * 1024
+    }) {
+        let head_end = meta.local_offset.saturating_add(meta.comp_size).saturating_add(512);
+        let bytes = if meta.local_offset >= tail_start {
+            zip_extract_from_buffer(&tail, meta, tail_start)
+        } else if head_end <= ODT_META_HEAD_BUDGET {
+            match cook.http_read_at(0, head_end as usize).await {
+                Ok(head) => zip_extract_from_buffer(&head, meta, 0),
+                Err(_) => None,
             }
+        } else if accepts_ranges {
+            match cook.http_fetch_range(meta.local_offset, meta.comp_size as usize + 512).await {
+                Ok(bytes) => zip_extract_from_buffer(&bytes, meta, meta.local_offset),
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+        if let Some(bytes) = bytes {
+            exact_pages = document_metadata_pages(&bytes, extension);
         }
     }
 
@@ -570,13 +601,19 @@ fn record_exact_page_count<S: HttpStream>(cook: &mut ThumbCook<S>, pages: u32) {
 }
 
 /// Extract the `meta:page-count` value from an ODF `meta.xml` document.
-fn odt_meta_page_count(xml: &[u8]) -> Option<u32> {
-    let text = std::str::from_utf8(xml).ok()?;
-    let needle = "page-count=\"";
-    let idx = text.find(needle)?;
-    let rest = &text[idx + needle.len()..];
-    let end = rest.find('"')?;
-    rest[..end].parse::<u32>().ok()
+fn document_metadata_pages(xml: &[u8], extension: &str) -> Option<u32> {
+    let document = roxmltree::Document::parse(std::str::from_utf8(xml).ok()?).ok()?;
+    let count = if matches!(extension, "odt" | "ods" | "odp") {
+        document.descendants().find(|node| {
+            node.has_tag_name(("urn:oasis:names:tc:opendocument:xmlns:meta:1.0", "document-statistic"))
+        })?.attribute(("urn:oasis:names:tc:opendocument:xmlns:meta:1.0", "page-count"))?
+    } else {
+        let name = if extension == "pptx" { "Slides" } else { "Pages" };
+        document.descendants().find(|node| {
+            node.has_tag_name(("http://schemas.openxmlformats.org/officeDocument/2006/extended-properties", name))
+        })?.text()?
+    };
+    count.trim().parse::<u32>().ok().filter(|count| *count > 0)
 }
 
 /// Scan a ZIP tail buffer's Central Directory.  Returns the thumbnail entry
@@ -653,6 +690,7 @@ struct ZipDir {
     thumb: Option<ZipEntry>,
     content_xml_uncomp: Option<u64>,
     meta_xml: Option<ZipEntry>,
+    app_xml: Option<ZipEntry>,
 }
 
 //  ZIP helper functions
@@ -678,6 +716,7 @@ fn zip_scan_dir(cd: &[u8]) -> ZipDir {
         thumb: None,
         content_xml_uncomp: None,
         meta_xml: None,
+        app_xml: None,
     };
     let mut pos = 0;
     while pos + 46 <= cd.len() {
@@ -722,6 +761,9 @@ fn zip_scan_dir(cd: &[u8]) -> ZipDir {
                     method,
                 });
             }
+            if dir.app_xml.is_none() && fname == "docProps/app.xml" {
+                dir.app_xml = Some(ZipEntry { local_offset, comp_size, uncomp_size, method });
+            }
         }
         pos += 46 + fname_len + extra_len + comment_len;
     }
@@ -731,10 +773,13 @@ fn zip_scan_dir(cd: &[u8]) -> ZipDir {
 /// Decompress raw DEFLATE (ZIP method 8) bytes.
 fn zip_inflate(data: &[u8], expected_size: usize) -> Option<Vec<u8>> {
     use std::io::Read;
-    let mut decoder = flate2::read::DeflateDecoder::new(data);
+    let decoder = flate2::read::DeflateDecoder::new(data);
     let cap = expected_size.min(64 * 1024 * 1024);
     let mut out = Vec::with_capacity(cap);
-    decoder.read_to_end(&mut out).ok()?;
+    decoder.take(cap as u64 + 1).read_to_end(&mut out).ok()?;
+    if out.len() > 64 * 1024 * 1024 || out.len() != expected_size {
+        return None;
+    }
     Some(out)
 }
 
@@ -1064,7 +1109,6 @@ async fn try_webp_exif_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
                 let Ok(img) = image::load_from_memory(&embedded) else {
                     return;
                 };
-                let color_type = img.color();
                 let dl_bytes = cook.http_bytes_fetched();
                 let img = pre_scale_to_target(
                     img,
@@ -1076,7 +1120,9 @@ async fn try_webp_exif_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
                 cook.render_handler = RenderHandler::Builtin;
                 cook.out_download_bytes = dl_bytes;
                 if prop_w > 0 && prop_h > 0 {
-                    cook.media.properties = Some(image_properties(prop_w, prop_h, color_type));
+                    let props = cook.media.properties.get_or_insert_with(|| serde_json::json!({}));
+                    props["width"] = prop_w.into();
+                    props["height"] = prop_h.into();
                 }
                 cook.render_image = Some(img);
                 return;
@@ -1562,39 +1608,36 @@ async fn try_audio_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     // With ID3: starts 10 + tag_size bytes in.  Without: starts at byte 0.
     let audio_body_offset = id3.as_ref().map(|h| 10usize + h.tag_size).unwrap_or(0);
 
-    let (channel_count, duration_secs) = if tag_bytes.len() > audio_body_offset + 4 {
-        parse_first_mp3_frame(&tag_bytes[audio_body_offset..])
-            .map(|frame| {
-                let chan = frame.channel_count() as u32;
-                let dur = if frame.bitrate > 0 {
-                    let audio_bytes = file_size.saturating_sub(audio_body_offset as u64);
-                    Some((audio_bytes * 8) as f64 / frame.bitrate as f64)
-                } else {
-                    None
-                };
-                (chan, dur)
-            })
-            .unwrap_or((0, None))
+    let remaining = file_size.checked_sub(audio_body_offset as u64);
+    let (audio_bytes, complete_audio) = if tag_bytes.len() > audio_body_offset + 4 {
+        (tag_bytes[audio_body_offset..].to_vec(), tag_bytes.len() as u64 == file_size)
+    } else if (audio_body_offset as u64) < file_size {
+        let length = remaining.filter(|size| *size <= fetch_limit).unwrap_or(4096) as usize;
+        let bytes = cook.http_read_at(audio_body_offset as u64, length).await.unwrap_or_default();
+        let complete = remaining == Some(bytes.len() as u64);
+        (bytes, complete)
     } else {
-        (0, None)
+        (Vec::new(), false)
     };
-
-    let mut props = serde_json::json!({});
-    if channel_count > 0 {
-        props["channel_count"] = serde_json::json!(channel_count);
-    }
-    if let Some(d) = duration_secs {
-        props["duration_seconds"] = serde_json::json!(d);
+    if let Some((offset, frame)) = parse_first_mp3_frame(&audio_bytes) {
+        let props = cook.media.properties.get_or_insert_with(|| serde_json::json!({}));
+        props["channels"] = serde_json::json!(frame.channel_count());
+        let duration = mp3_duration(&audio_bytes[offset..], &frame).or_else(|| {
+            if complete_audio {
+                mp3_complete_duration(&audio_bytes[offset..])
+            } else {
+                None
+            }
+        });
+        if let Some(duration) = duration {
+            props["duration"] = serde_json::json!(duration);
+        }
     }
 
     //  Scan ID3v2 frames for APIC cover art
     let image_bytes = id3.and_then(|h| find_id3_apic(&tag_bytes, h.version_major));
 
     let Some(image_bytes) = image_bytes else {
-        // No cover art, but we still have audio metadata.
-        if channel_count > 0 || duration_secs.is_some() {
-            cook.media.properties = Some(props);
-        }
         return;
     };
 
@@ -1605,8 +1648,6 @@ async fn try_audio_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
         return;
     };
     let img = pre_scale_to_target(img, config.exact_width, config.exact_height);
-
-    cook.media.properties = Some(props);
 
     cook.render_renderer = Some("shortcut/audio".into());
     cook.render_handler = RenderHandler::Builtin;
@@ -1949,7 +1990,6 @@ async fn shortcut_inner<S: HttpStream>(cook: &mut ThumbCook<S>) {
             && let Ok(img) = image::load_from_memory(&data)
         {
             let (src_w, src_h) = (img.width(), img.height());
-            let color_type = img.color();
             let dl_bytes = cook.http_bytes_fetched();
 
             cook.http_close().await;
@@ -1960,7 +2000,8 @@ async fn shortcut_inner<S: HttpStream>(cook: &mut ThumbCook<S>) {
             cook.render_handler = RenderHandler::Builtin;
             cook.out_download_bytes = dl_bytes;
             if src_w > 0 && src_h > 0 {
-                cook.media.properties = Some(image_properties(src_w, src_h, color_type));
+                let props = cook.media.properties.get_or_insert_with(|| serde_json::json!({}));
+                super::inspect::inspect_image_properties(&data, props);
             }
             cook.render_image = Some(img);
             return;
@@ -2164,11 +2205,11 @@ fn pdf_dict_int(stream: &lopdf::Stream, key: &[u8]) -> Option<u32> {
 /// Parsed first MPEG audio frame header (4 bytes after sync).
 #[derive(Debug)]
 struct Mp3FrameInfo {
-    /// Bitrate in bits per second.
     bitrate: u32,
-    /// Sample rate in Hz.
-    #[allow(dead_code)]
     sample_rate: u32,
+    version: u8,
+    has_crc: bool,
+    padding: bool,
     /// Channel mode: 0=stereo, 1=joint, 2=dual, 3=mono.
     channel_mode: u8,
 }
@@ -2187,7 +2228,7 @@ impl Mp3FrameInfo {
 ///
 /// Returns `None` if no valid MPEG frame header is found within the first
 /// 2 KiB (should be immediate for standard MP3 files).
-fn parse_first_mp3_frame(bytes: &[u8]) -> Option<Mp3FrameInfo> {
+fn parse_first_mp3_frame(bytes: &[u8]) -> Option<(usize, Mp3FrameInfo)> {
     // Search for a sync word within the first 2 KiB.
     let limit = bytes.len().min(2048);
     for i in 0..limit.saturating_sub(1) {
@@ -2195,7 +2236,7 @@ fn parse_first_mp3_frame(bytes: &[u8]) -> Option<Mp3FrameInfo> {
             && (bytes[i + 1] & 0xE0) == 0xE0
             && let Some(info) = parse_mp3_frame_header(&bytes[i..])
         {
-            return Some(info);
+            return Some((i, info));
         }
     }
     None
@@ -2221,7 +2262,7 @@ fn parse_mp3_frame_header(bytes: &[u8]) -> Option<Mp3FrameInfo> {
     let channel_mode = ((hdr >> 6) & 0x3) as u8;
 
     // Only Layer III is common for MP3 files.
-    if layer != 0x01 {
+    if layer != 0x01 || version == 1 {
         return None;
     }
 
@@ -2236,15 +2277,65 @@ fn parse_mp3_frame_header(bytes: &[u8]) -> Option<Mp3FrameInfo> {
         _ => MPEG25_SAMPLE_RATE.get(sample_rate_idx).copied()?,
     };
 
-    if bitrate == 0 {
+    if bitrate == 0 || sample_rate == 0 {
         return None;
     } // "free" bitrate - can't estimate
 
     Some(Mp3FrameInfo {
         bitrate: bitrate * 1000,
         sample_rate,
+        version: version as u8,
+        has_crc: ((hdr >> 16) & 1) == 0,
+        padding: ((hdr >> 9) & 1) != 0,
         channel_mode,
     })
+}
+
+fn mp3_duration(bytes: &[u8], frame: &Mp3FrameInfo) -> Option<f64> {
+    let side_info = match (frame.version == 3, frame.channel_mode == 3) {
+        (true, false) => 32,
+        (true, true) => 17,
+        (false, false) => 17,
+        (false, true) => 9,
+    };
+    let xing = 4 + usize::from(frame.has_crc) * 2 + side_info;
+    let frame_count = if matches!(bytes.get(xing..xing + 4), Some(b"Xing" | b"Info")) {
+        let flags = u32::from_be_bytes(bytes.get(xing + 4..xing + 8)?.try_into().ok()?);
+        if flags & 1 == 0 {
+            return None;
+        }
+        u32::from_be_bytes(bytes.get(xing + 8..xing + 12)?.try_into().ok()?)
+    } else if bytes.get(36..40) == Some(b"VBRI") {
+        u32::from_be_bytes(bytes.get(50..54)?.try_into().ok()?)
+    } else {
+        return None;
+    };
+    if frame_count == 0 {
+        return None;
+    }
+    let samples_per_frame = if frame.version == 3 { 1152 } else { 576 };
+    Some(frame_count as f64 * samples_per_frame as f64 / frame.sample_rate as f64)
+}
+
+fn mp3_complete_duration(mut bytes: &[u8]) -> Option<f64> {
+    let mut duration = 0.0;
+    let mut frames = 0u32;
+    while !bytes.is_empty() {
+        if bytes.len() == 128 && bytes.starts_with(b"TAG") {
+            break;
+        }
+        let frame = parse_mp3_frame_header(bytes)?;
+        let coefficient = if frame.version == 3 { 144 } else { 72 };
+        let length = (coefficient * frame.bitrate / frame.sample_rate) as usize
+            + usize::from(frame.padding);
+        if length < 4 || length > bytes.len() {
+            return None;
+        }
+        duration += if frame.version == 3 { 1152.0 } else { 576.0 } / frame.sample_rate as f64;
+        frames += 1;
+        bytes = &bytes[length..];
+    }
+    (frames > 0).then_some(duration)
 }
 
 // Bitrate tables in kbps, index 0 = free (invalid for estimation).
@@ -2264,3 +2355,47 @@ const MPEG25_LAYER3_BITRATE: [u32; 16] = [
 const MPEG1_SAMPLE_RATE: [u32; 4] = [44100, 48000, 32000, 0];
 const MPEG2_SAMPLE_RATE: [u32; 4] = [22050, 24000, 16000, 0];
 const MPEG25_SAMPLE_RATE: [u32; 4] = [11025, 12000, 8000, 0];
+
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+
+    #[test]
+    fn mp3_xing_duration_and_channels() {
+        let mut frame = vec![0; 100];
+        frame[..4].copy_from_slice(&[0xff, 0xfb, 0x90, 0x00]);
+        frame[36..40].copy_from_slice(b"Xing");
+        frame[40..44].copy_from_slice(&1u32.to_be_bytes());
+        frame[44..48].copy_from_slice(&100u32.to_be_bytes());
+        let (offset, info) = parse_first_mp3_frame(&frame).unwrap();
+        assert_eq!(offset, 0);
+        assert_eq!(info.channel_count(), 2);
+        assert!((mp3_duration(&frame, &info).unwrap() - 115200.0 / 44100.0).abs() < 0.0001);
+        frame[40..44].copy_from_slice(&0u32.to_be_bytes());
+        assert!(mp3_duration(&frame, &info).is_none());
+        frame[36..40].copy_from_slice(b"none");
+        assert!(mp3_duration(&frame, &info).is_none());
+    }
+
+    #[test]
+    fn mp3_duration_requires_complete_frames() {
+        let mut frame = vec![0; 417];
+        frame[..4].copy_from_slice(&[0xff, 0xfb, 0x90, 0x00]);
+        let mut bytes = frame.repeat(3);
+        bytes.extend_from_slice(&[b'T', b'A', b'G']);
+        bytes.resize(bytes.len() + 125, 0);
+        assert!((mp3_complete_duration(&bytes).unwrap() - 3456.0 / 44100.0).abs() < 0.0001);
+        assert!(mp3_complete_duration(&frame[..416]).is_none());
+    }
+
+    #[test]
+    fn document_counts_are_namespaced_and_positive() {
+        let odf = br#"<x:document xmlns:x="urn:oasis:names:tc:opendocument:xmlns:meta:1.0"><x:document-statistic x:page-count='12'/></x:document>"#;
+        let ooxml = br#"<p:Properties xmlns:p="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><p:Pages> 7 </p:Pages><p:Slides>4</p:Slides></p:Properties>"#;
+        assert_eq!(document_metadata_pages(odf, "odt"), Some(12));
+        assert_eq!(document_metadata_pages(ooxml, "docx"), Some(7));
+        assert_eq!(document_metadata_pages(ooxml, "pptx"), Some(4));
+        assert_eq!(document_metadata_pages(b"<x><Pages>7</Pages></x>", "docx"), None);
+        assert_eq!(document_metadata_pages(b"not xml", "odt"), None);
+    }
+}
