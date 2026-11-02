@@ -71,16 +71,15 @@ this for Windows and Linux. Read more details in the
 
 The server is organized into three tiers of increasing capability:
 
-- `tier1/` — Core data structures and basic format handling. Compiles to
-  WASM for Cloudflare Workers deployment. Handles cache, routing, and
-  light decode work.
-- `tier2/` — Adds formats with native dependencies: video keyframes,
-  audio waveforms, HDR images, SVG rendering, and camera raw formats.
-  Links a minimal static FFmpeg with no external dependencies.
-- `tier3/` — The fully functional server. Adds subprocess-based renderers
-  for 3D geometry (F3D), USDZ extraction, advanced document formats
-  (libreoffice, pdfium), and arithmetic JPEG support (ImageMagick).
-  Backends are discovered at startup and compiled-in Python scripts
+- `tier1/` — Core data structures and basic format handling. Compiles to WASM
+  for Cloudflare Workers deployment. Handles cache, routing, and light decode
+  work.
+- `tier2/` — Adds formats with native dependencies: video keyframes, audio
+  waveforms, HDR images, SVG rendering, and camera raw formats. Links a minimal
+  static FFmpeg with no external dependencies.
+- `tier3/` — The fully functional server. Adds subprocess-based renderers for 3D
+  geometry (F3D), USDZ, advanced document formats (libreoffice, pdfium), and
+  others. Backends are discovered at startup and compiled-in Python scripts
   handle data sanitization.
 
 The [developer documentation](https://thumbrella.dev/docs/development/)

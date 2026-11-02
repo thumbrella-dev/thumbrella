@@ -863,7 +863,7 @@ fn run_formats(json: bool) {
                         let available = match e.tier {
                             1 => true,
                             2 => tier2_available,
-                            3 => tier3_available,
+                            3 => tier3_available && crate::dispatch::tier3_can_handle(e.extension),
                             _ => false,
                         };
                         ExtEntry {

@@ -14,6 +14,10 @@ import os
 sys.path.insert(0, "/home/thumbrella/.local/lib/python3.12/site-packages")
 from pxr import Usd, UsdGeom, Vt, Gf
 
+MAX_PRIMS = 100
+MAX_TRIANGLES = 100_000
+MAX_VERTICES = 300_000
+
 
 def extract_mesh(stage, output_path):
     """Walk the stage, collect mesh data, write OBJ."""
@@ -37,7 +41,9 @@ def extract_mesh(stage, output_path):
         up_rotation = Gf.Matrix4d().SetRotate(Gf.Rotation(Gf.Vec3d(1, 0, 0), 90.0))
     # Unknown: leave as-is.
 
-    for prim in stage.TraverseAll():
+    for prim_count, prim in enumerate(stage.TraverseAll(), 1):
+        if prim_count > MAX_PRIMS:
+            raise RuntimeError(f"USD stage exceeds {MAX_PRIMS} prims")
         if not prim.IsA(UsdGeom.Mesh):
             continue
 
@@ -55,6 +61,11 @@ def extract_mesh(stage, output_path):
 
         indices = fvi_attr.Get()
         counts = fvc_attr.Get()
+        if len(all_vertices) + len(points) > MAX_VERTICES:
+            raise RuntimeError(f"USD geometry exceeds {MAX_VERTICES} vertices")
+        triangle_count = sum(max(0, count - 2) for count in counts)
+        if len(all_faces) + triangle_count > MAX_TRIANGLES:
+            raise RuntimeError(f"USD geometry exceeds {MAX_TRIANGLES} triangulated polygons")
 
         # UVs - skip entirely. Without an MTL they serve no purpose
         # and F3D may interpret them as vertex attributes causing
@@ -155,11 +166,6 @@ def main():
     num_verts, num_faces = extract_mesh(stage, output_path)
     output_dir = os.path.dirname(output_path) or "."
     print(f"Extracted {num_verts} vertices, {num_faces} faces to {output_dir}/")
-
-
-if __name__ == "__main__":
-    main()
-
 
 
 if __name__ == "__main__":

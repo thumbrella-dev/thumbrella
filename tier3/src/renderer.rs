@@ -46,6 +46,7 @@ const USD_EXTRACT_PY: &str = include_str!("usd_extract.py");
 
 /// Embedded `sanitize_glb.py` - strips images/textures/materials from GLB.
 const SANITIZE_GLB_PY: &str = include_str!("sanitize_glb.py");
+const BLENDER_RENDER_PY: &str = include_str!("blender_render.py");
 use tier1::media::FileKind;
 use tier1::renderer::{RenderOutput, apply_render_output};
 use tier2::Tier2Renderer;
@@ -151,6 +152,10 @@ impl InProcessRenderer for Tier3Renderer {
                     if tier2_ok { true } else { render_image_ffmpeg_fallback(cook, &ext).await }
                 }
                 Some(FileKind::Video) => {
+                    // The linked libav may lack the FLV1 decoder.
+                    if ext == "flv" && render_video_ffmpeg_fallback(cook, &ext).await {
+                        return true;
+                    }
                     // Tier 3 is a superset of tier 2.  Always try the builtin
                     // libav path first - even on a handoff, since the lower
                     // tier may not have had libav (e.g. tier 1 routing
@@ -889,6 +894,12 @@ async fn render_video_ffmpeg_fallback(cook: &mut dyn RenderCook, ext: &str) -> b
         cook.note("external tool unavailable (ffmpeg)");
         return false;
     }
+    let has_ffprobe =
+        report.as_ref().and_then(|r| r.backends.get("ffprobe")).is_some_and(|b| b.available);
+    if !has_ffprobe {
+        cook.note("external tool unavailable (ffprobe)");
+        return false;
+    }
 
     let Some(mut reader) = cook.take_reader() else {
         return false;
@@ -1172,112 +1183,132 @@ fn pdfinfo_page_count(input_path: &std::path::Path) -> Option<u32> {
 /// extensions it handles.  Unrecognised extensions fall through to a
 /// placeholder.
 ///
-/// Dispatch order:
-/// 1. Walk registered handlers, find first matching extension, invoke it.
 async fn render_geometry_tier3(cook: &mut dyn RenderCook, ext: &str) -> bool {
-    // USDZ/USDC/USDA: extract mesh to OBJ via usd-core Python script,
-    // then render the OBJ through the existing F3D handler (which provides
-    // tone mapping, camera orbit, and delivery identical to STL/OBJ).
-    if matches!(ext, "usdz" | "usdc" | "usda") {
-        if let Some(mut reader) = cook.take_reader() {
-            let result =
-                tokio::task::spawn_blocking(move || run_usdz_via_obj_handler(&mut *reader)).await;
-
-            match result {
-                Ok(Ok(out)) => {
-                    apply_render_output(cook, out);
-                    return true;
-                }
-                Ok(Err(msg)) => {
-                    tbr_debug!("[tier3] usdz: {msg}");
-                    cook.fail_cook(&format!("usdz: {msg}"));
-                    return true;
-                }
-                Err(_) => {
-                    cook.fail_cook("usdz: panicked");
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    // Find the first registered handler that claims this extension.
-    let handlers = crate::env_check::registered_handlers();
-    let Some(handler) = handlers.iter().find(|h| h.extensions.contains(&ext)) else {
+    let Some(report) = crate::env_check::cached_report() else {
         return false;
     };
-
-    // Check that the handler passed its availability probe.
-    let report = crate::env_check::cached_report();
-    let available = report
-        .as_ref()
-        .and_then(|r| r.backends.get(handler.name))
-        .map(|b| b.available)
-        .unwrap_or(false);
-
-    if !available {
-        cook.note(&format!("external tool unavailable ({})", handler.name));
+    let handlers = crate::env_check::available_handlers(&report, ext);
+    if handlers.is_empty() {
+        cook.note(&format!("no geometry backend available for {ext}"));
         return false;
     }
-
-    // Use direct F3D invocation for the common geometry path.
-    if handler.command == "f3d" {
-        if let Some(mut reader) = cook.take_reader() {
-            let ext_owned = ext.to_string();
-            let result =
-                tokio::task::spawn_blocking(move || run_f3d_geometry_handler(&mut *reader, &ext_owned))
-                    .await;
-
-            match result {
-                Ok(Ok(out)) => {
-                    apply_render_output(cook, out);
-                    return true;
-                }
-                Ok(Err(msg)) => {
-                    tbr_debug!("[tier3] {}: {msg}", handler.name);
-                    cook.fail_cook(&format!("{}: {msg}", handler.name));
-                    return true;
-                }
-                Err(_) => {
-                    cook.fail_cook(&format!("{}: panicked", handler.name));
-                    return true;
-                }
-            }
-        }
-
+    let Some(mut reader) = cook.take_reader() else {
         return false;
+    };
+    let ext = ext.to_string();
+    let result = tokio::task::spawn_blocking(move || {
+        try_geometry_handlers(&handlers, |handler| match handler.name {
+            "blender" => run_blender_geometry_handler(&mut *reader, &ext),
+            "f3d" => run_f3d_geometry_handler(&mut *reader, &ext),
+            "usdz" => run_usdz_via_obj_handler(&mut *reader, &ext),
+            _ => run_subprocess_handler(&mut *reader, &ext, handler.command),
+        })
+    })
+    .await;
+    match result {
+        Ok(Ok(output)) => apply_render_output(cook, output),
+        Ok(Err(error)) => cook.fail_cook(&error),
+        Err(error) => cook.fail_cook(&format!("geometry renderer task failed: {error}")),
     }
+    true
+}
 
-    // Try the subprocess backend.
-    if let Some(mut reader) = cook.take_reader() {
-        let cmd = handler.command.to_string();
-        let name = handler.name.to_string();
-        let ext_owned = ext.to_string();
-        let result =
-            tokio::task::spawn_blocking(move || run_subprocess_handler(&mut *reader, &ext_owned, &cmd))
-                .await;
-
-        match result {
-            Ok(Ok(out)) => {
-                apply_render_output(cook, out);
-                return true;
-            }
-            Ok(Err(msg)) => {
-                // Renderer ran but failed - log the message, fall through
-                // to placeholder.
-                tbr_debug!("[tier3] {name}: {msg}");
-                cook.fail_cook(&format!("{name}: {msg}"));
-                return true;
-            }
-            Err(_) => {
-                cook.fail_cook(&format!("{name}: panicked"));
-                return true;
+fn try_geometry_handlers(
+    handlers: &[crate::env_check::HandlerDecl],
+    mut run: impl FnMut(&crate::env_check::HandlerDecl) -> Result<RenderOutput, String>,
+) -> Result<RenderOutput, String> {
+    let mut errors = Vec::new();
+    for handler in handlers {
+        match run(handler) {
+            Ok(output) => return Ok(output),
+            Err(error) => {
+                tbr_debug!("[tier3] {}: {error}", handler.name);
+                errors.push(format!("{}: {error}", handler.name));
             }
         }
     }
+    Err(errors.join("; "))
+}
 
-    false
+fn run_blender_geometry_handler(
+    reader: &mut dyn tier1::ReadSeek,
+    ext: &str,
+) -> Result<RenderOutput, String> {
+    use std::process::{Command, Stdio};
+
+    reader.seek(std::io::SeekFrom::Start(0)).map_err(|e| format!("rewind input: {e}"))?;
+    let arena = ScratchArena::new(100 * 1024 * 1024).map_err(|e| format!("scratch arena: {e}"))?;
+    let input = arena
+        .stage_reader(reader, &format!("input.{ext}"))
+        .map_err(|e| format!("stage input: {e}"))?;
+    let script = arena
+        .stage_bytes(BLENDER_RENDER_PY.as_bytes(), "blender_render.py")
+        .map_err(|e| format!("stage Blender script: {e}"))?;
+    let image = arena.output_path("png");
+    let mut cmd = if std::env::var_os("DISPLAY").is_some() {
+        Command::new("blender")
+    } else {
+        let mut cmd = Command::new("xvfb-run");
+        cmd.args(["-a", "-s", "-screen 0 1600x1200x24", "blender"]);
+        cmd
+    };
+    cmd.args([
+        "--background", "--factory-startup", "--disable-autoexec", "--threads", "8",
+        "--python-exit-code", "1", "--python",
+    ])
+    .arg(script)
+    .args(["--", "render"])
+    .arg(input)
+    .arg(&image)
+    .arg(ext)
+    .env("LIBGL_ALWAYS_SOFTWARE", "1")
+    .env("MESA_LOADER_DRIVER_OVERRIDE", "llvmpipe")
+    .env("GALLIUM_DRIVER", "llvmpipe")
+    .env("LP_NUM_THREADS", "8")
+    .env("CUDA_VISIBLE_DEVICES", "")
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    let output = crate::sandbox::output(&mut cmd, &crate::sandbox::default_strict())
+        .map_err(|e| format!("run Blender: {e}"))?;
+    dump_subprocess("blender", &output.status, &output.stdout, &output.stderr);
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(format!("Blender exited {}: {} {}", output.status, stderr.trim(), stdout.trim()));
+    }
+    let has_appearance = parse_blender_appearance(&output.stdout)?;
+    let bytes = arena.read_output(&image).map_err(|e| format!("read Blender output: {e}"))?;
+    let img = image::load_from_memory(&bytes).map_err(|e| format!("decode Blender PNG: {e}"))?;
+    let img = apply_blender_appearance(img, has_appearance);
+    Ok(RenderOutput {
+        image: autocrop_transparent(img),
+        renderer: Some("blender".into()),
+        codec: None,
+        video_seek_secs: None,
+        properties: None,
+    })
+}
+
+fn apply_blender_appearance(img: image::DynamicImage, has_appearance: bool) -> image::DynamicImage {
+    if has_appearance {
+        return img;
+    }
+    let graded = stylize_geometry_image(img).into_rgba8();
+    let mut contrasted = image::imageops::contrast(&graded, 14.0);
+    for (pixel, original) in contrasted.pixels_mut().zip(graded.pixels()) {
+        pixel[3] = original[3];
+    }
+    image::DynamicImage::ImageRgba8(contrasted)
+}
+
+fn parse_blender_appearance(stdout: &[u8]) -> Result<bool, String> {
+    let text = std::str::from_utf8(stdout).map_err(|e| format!("invalid Blender output: {e}"))?;
+    let mut markers = text.lines().filter_map(|line| line.strip_prefix("THUMBRELLA_HAS_APPEARANCE="));
+    let value = markers.next().ok_or("missing Blender appearance report")?;
+    if markers.next().is_some() {
+        return Err("duplicate Blender appearance report".into());
+    }
+    serde_json::from_str(value).map_err(|e| format!("invalid Blender appearance report: {e}"))
 }
 
 /// Run a generic subprocess handler: stage input, invoke command, decode output.
@@ -1352,19 +1383,17 @@ fn run_subprocess_handler(
 
 /// Extract mesh from USDZ/USDC/USDA to OBJ, then render via the existing
 /// F3D handler (which applies tone mapping, camera orbit, and delivery).
-fn run_usdz_via_obj_handler(reader: &mut dyn tier1::ReadSeek) -> Result<RenderOutput, String> {
+fn run_usdz_via_obj_handler(
+    reader: &mut dyn tier1::ReadSeek,
+    ext: &str,
+) -> Result<RenderOutput, String> {
     use std::process::Command;
 
-    // Read the full USDZ data.
     reader.seek(std::io::SeekFrom::Start(0)).map_err(|e| format!("rewind usdz: {e}"))?;
-    let mut usdz_bytes = Vec::new();
-    reader.read_to_end(&mut usdz_bytes).map_err(|e| format!("read usdz: {e}"))?;
-
     let arena = ScratchArena::new(100 * 1024 * 1024).map_err(|e| format!("scratch arena: {e}"))?;
-
-    // Stage the USDZ to a temp file so the Python script can open it.
-    let usdz_path =
-        arena.stage_bytes(&usdz_bytes, "input.usdz").map_err(|e| format!("stage usdz: {e}"))?;
+    let usdz_path = arena
+        .stage_reader(reader, &format!("input.{ext}"))
+        .map_err(|e| format!("stage USD: {e}"))?;
 
     let obj_path = arena.output_path("obj");
 
@@ -1374,17 +1403,21 @@ fn run_usdz_via_obj_handler(reader: &mut dyn tier1::ReadSeek) -> Result<RenderOu
         .map_err(|e| format!("stage usd_extract script: {e}"))?;
 
     // Run usd_extract.py (embedded) to convert USDZ → OBJ.
-    let extract_status = Command::new("python3")
+    let mut command = Command::new("python3");
+    command
         .arg(&script_path)
         .arg(&usdz_path)
         .arg(&obj_path)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .status()
-        .map_err(|e| format!("spawn usd_extract: {e}"))?;
-
-    if !extract_status.success() {
-        return Err(format!("usd_extract exited with {extract_status}"));
+        .stderr(std::process::Stdio::piped());
+    let output = crate::sandbox::output(&mut command, &crate::sandbox::default_strict())
+        .map_err(|e| format!("run usd_extract: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "usd_extract exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
     }
 
     // Read the extracted OBJ.
@@ -1532,7 +1565,7 @@ fn run_f3d_geometry_handler(
     // For textured/material-rich formats (for example FBX/glTF/USD), preserve
     // source colors by skipping this remap.
     let img = if should_apply_geometry_tonemap(ext) {
-        stylize_f3d_image(img).adjust_contrast(14.0)
+        stylize_geometry_image(img).adjust_contrast(14.0)
     } else {
         img
     };
@@ -1553,11 +1586,11 @@ fn run_f3d_geometry_handler(
     })
 }
 
-/// Apply a purple→gold gradient map to F3D output while preserving alpha.
+/// Apply a purple→gold gradient map to geometry output while preserving alpha.
 ///
 /// This gives low-contrast geometry renders a stronger visual identity before
 /// tier1 composites them onto the canonical background.
-fn stylize_f3d_image(img: image::DynamicImage) -> image::DynamicImage {
+fn stylize_geometry_image(img: image::DynamicImage) -> image::DynamicImage {
     let mut rgba = img.to_rgba8();
 
     // Purple is restricted to the deepest tones; mids/highs stay warm gold.
@@ -1719,6 +1752,73 @@ fn autocrop_transparent(img: image::DynamicImage) -> image::DynamicImage {
 #[cfg(test)]
 mod tests {
     use super::{build_video_properties, is_oiio_format, jp2_lowres, parse_jp2_header};
+
+    #[test]
+    fn blender_appearance_report_is_strict() {
+        assert!(super::parse_blender_appearance(b"Blender\nTHUMBRELLA_HAS_APPEARANCE=true\n").unwrap());
+        assert!(!super::parse_blender_appearance(b"THUMBRELLA_HAS_APPEARANCE=false\n").unwrap());
+        assert!(super::parse_blender_appearance(b"no report").is_err());
+        assert!(super::parse_blender_appearance(b"THUMBRELLA_HAS_APPEARANCE=null").is_err());
+        assert!(
+            super::parse_blender_appearance(
+                b"THUMBRELLA_HAS_APPEARANCE=true\nTHUMBRELLA_HAS_APPEARANCE=false\n"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn blender_appearance_preserves_colors_or_applies_the_geometry_grade() {
+        let pixels =
+            image::RgbaImage::from_raw(3, 1, vec![80, 100, 120, 255, 25, 30, 40, 0, 100, 90, 80, 127])
+                .unwrap();
+        let img = image::DynamicImage::ImageRgba8(pixels.clone());
+        assert_eq!(super::apply_blender_appearance(img.clone(), true).to_rgba8(), pixels);
+        let graded = super::apply_blender_appearance(img, false).to_rgba8();
+        assert_ne!(graded.get_pixel(0, 0), pixels.get_pixel(0, 0));
+        assert_eq!(graded.get_pixel(0, 0)[3], 255);
+        assert_eq!(graded.get_pixel(1, 0)[3], 0);
+        assert_eq!(graded.get_pixel(2, 0)[3], 127);
+    }
+
+    #[test]
+    fn geometry_dispatch_falls_back_and_reports_all_errors() {
+        use crate::env_check::HandlerDecl;
+        tier1::ux::init();
+        let handlers: Vec<_> = ["blender", "f3d"]
+            .into_iter()
+            .map(|name| HandlerDecl {
+                name,
+                category: "geometry",
+                command: name,
+                extensions: &["stl"],
+                description: "",
+            })
+            .collect();
+        let mut calls = Vec::new();
+        let result = super::try_geometry_handlers(&handlers, |handler| {
+            calls.push(handler.name);
+            if handler.name == "blender" {
+                Err("import failed".into())
+            } else {
+                Ok(tier1::renderer::RenderOutput {
+                    image: image::DynamicImage::new_rgba8(1, 1),
+                    renderer: Some("f3d".into()),
+                    codec: None,
+                    video_seek_secs: None,
+                    properties: None,
+                })
+            }
+        })
+        .unwrap();
+        assert_eq!(calls, ["blender", "f3d"]);
+        assert_eq!(result.renderer.as_deref(), Some("f3d"));
+        let error = super::try_geometry_handlers(&handlers, |h| Err(format!("{} failed", h.name)))
+            .err()
+            .unwrap();
+        assert!(error.contains("blender: blender failed"));
+        assert!(error.contains("f3d: f3d failed"));
+    }
 
     #[test]
     fn properties_follow_media_kind() {

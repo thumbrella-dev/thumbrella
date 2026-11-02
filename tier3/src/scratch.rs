@@ -33,6 +33,7 @@
 //! portable and sufficient for all targets.
 
 use std::io;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -219,8 +220,8 @@ impl ScratchArena {
 
     /// Drain a reader to a file in the arena and return its path.
     ///
-    /// Reads the entire reader into a buffer first (to check size against the
-    /// limit), then writes to disk.  For large files, prefer
+    /// Buffers at most the remaining limit plus one byte, then writes to disk.
+    /// For large files, prefer
     /// [`ScratchArena::stage_url`].
     pub fn stage_reader(
         &self,
@@ -228,7 +229,12 @@ impl ScratchArena {
         hint_name: &str,
     ) -> Result<PathBuf, ArenaError> {
         let mut buf = Vec::new();
-        reader.read_to_end(&mut buf).map_err(ArenaError::Io)?;
+        if self.max_bytes == 0 {
+            reader.read_to_end(&mut buf).map_err(ArenaError::Io)?;
+        } else {
+            let remaining = self.max_bytes.saturating_sub(self.current_usage());
+            reader.take(remaining.saturating_add(1)).read_to_end(&mut buf).map_err(ArenaError::Io)?;
+        }
         self.stage_bytes(&buf, hint_name)
     }
 
@@ -370,6 +376,20 @@ mod tests {
         arena.remove(&path);
         assert!(!path.exists());
         assert_eq!(arena.current_usage(), 0);
+    }
+
+    #[test]
+    fn stage_reader_stops_after_limit() {
+        let arena = ScratchArena::new(5).unwrap();
+        let mut reader = std::io::repeat(0);
+        assert!(matches!(
+            arena.stage_reader(&mut reader, "input.stl"),
+            Err(ArenaError::LimitExceeded {
+                current: 0,
+                needed: 6,
+                max: 5
+            })
+        ));
     }
 
     #[test]

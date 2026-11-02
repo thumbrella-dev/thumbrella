@@ -28,6 +28,17 @@ async fn main() {
     // executable are marked available in the env report.
 
     tier3::env_check::register_handler(tier3::env_check::HandlerDecl {
+        name: "blender",
+        category: "geometry",
+        command: "blender",
+        extensions: &[
+            "abc", "blend", "dae", "fbx", "glb", "gltf", "obj", "ply", "stl", "usd", "usda", "usdc",
+            "usdz",
+        ],
+        description: "Blender Workbench software renderer",
+    });
+
+    tier3::env_check::register_handler(tier3::env_check::HandlerDecl {
         name: "f3d",
         category: "geometry",
         command: "f3d",
@@ -48,7 +59,7 @@ async fn main() {
         // USDZ/USDC/USDA are extracted to OBJ via Python usd-core, then
         // rendered through the F3D handler.  Availability depends on both
         // python3+usd-core and f3d being present at runtime.
-        extensions: &["usdz", "usdc", "usda"],
+        extensions: &["usd", "usdz", "usdc", "usda"],
         description: "USDZ/USD geometry (usd-core extract → F3D render)",
     });
 
@@ -58,6 +69,14 @@ async fn main() {
         command: "pdftoppm",
         extensions: &["pdf"],
         description: "PDF renderer (poppler pdftoppm)",
+    });
+
+    tier3::env_check::register_handler(tier3::env_check::HandlerDecl {
+        name: "ffmpeg_cli",
+        category: "video",
+        command: "ffmpeg",
+        extensions: &["flv"],
+        description: "Flash video renderer (FFmpeg CLI)",
     });
 
     //  Probe the environment
@@ -72,29 +91,11 @@ async fn main() {
     // it can handle; tier3_can_handle() returns true for all extensions when
     // the registry is unpopulated.
     if tier3_env.is_none() {
-        let handlers = tier3::env_check::registered_handlers();
         let mut available: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for h in &handlers {
-            let backend_ok = env_report.backends.get(h.name).map(|b| b.available).unwrap_or(false);
-            if backend_ok {
-                for ext in h.extensions {
+        for h in tier3::env_check::registered_handlers() {
+            for ext in h.extensions {
+                if !tier3::env_check::available_handlers(&env_report, ext).is_empty() {
                     available.insert(ext.to_string());
-                }
-            }
-            // usdz handler: also depends on python3 + usd-core + f3d
-            if h.name == "usdz" {
-                let f3d_ok = env_report.backends.get("f3d").map(|b| b.available).unwrap_or(false);
-                let py_ok = env_report.backends.get("python3").map(|b| b.available).unwrap_or(false);
-                let usd_ok = env_report
-                    .backends
-                    .get("python3")
-                    .and_then(|b| b.details.as_deref())
-                    .map(|d| d.contains("usd-core available"))
-                    .unwrap_or(false);
-                if f3d_ok && py_ok && usd_ok {
-                    for ext in h.extensions {
-                        available.insert(ext.to_string());
-                    }
                 }
             }
         }
@@ -219,58 +220,25 @@ fn register_tier3_check(env: &tier3::env_check::EnvReport) {
         let entries: Vec<tier1::check::CheckEntry> = tier3_formats
             .iter()
             .map(|f| {
-                // Find the handler for this format.
-                let handler = tier3::env_check::registered_handlers()
-                    .into_iter()
-                    .find(|h| h.extensions.contains(&f.extension));
-                let (status, detail) = match handler {
-                    Some(ref h) => {
-                        // The usdz handler depends on both f3d and python3+usd-core.
-                        // Check both before reporting as available.
-                        if h.name == "usdz" {
-                            let f3d_ok = env.backends.get("f3d").map(|b| b.available).unwrap_or(false);
-                            let py_ok =
-                                env.backends.get("python3").map(|b| b.available).unwrap_or(false);
-                            let usd_ok = env
-                                .backends
-                                .get("python3")
-                                .and_then(|b| b.details.as_deref())
-                                .map(|d| d.contains("usd-core available"))
-                                .unwrap_or(false);
-                            if f3d_ok && py_ok && usd_ok {
-                                ("available".into(), "f3d + python3/usd-core".to_string())
-                            } else {
-                                let mut missing = Vec::new();
-                                if !f3d_ok {
-                                    missing.push("f3d");
-                                }
-                                if !py_ok {
-                                    missing.push("python3");
-                                } else if !usd_ok {
-                                    missing.push("usd-core");
-                                }
-                                ("missing".into(), format!("requires: {}", missing.join(", ")))
-                            }
-                        } else {
-                            let available =
-                                env.backends.get(h.name).map(|b| b.available).unwrap_or(false);
-                            if available {
-                                ("available".into(), h.command.to_string())
-                            } else {
-                                let reason = env
-                                    .backends
-                                    .get(h.name)
-                                    .and_then(|b| b.unavailable_reason.clone())
-                                    .unwrap_or_else(|| "not found".into());
-                                ("missing".into(), reason)
-                            }
-                        }
+                let handlers = tier3::env_check::registered_handlers();
+                let available = tier3::env_check::available_handlers(env, f.extension);
+                let (status, detail) = if !available.is_empty() {
+                    ("available", available.iter().map(|h| h.name).collect::<Vec<_>>().join(" -> "))
+                } else {
+                    let candidates: Vec<_> = handlers
+                        .iter()
+                        .filter(|h| h.extensions.contains(&f.extension))
+                        .map(|h| h.name)
+                        .collect();
+                    if candidates.is_empty() {
+                        ("unregistered", String::new())
+                    } else {
+                        ("missing", format!("requires: {}", candidates.join(" or ")))
                     }
-                    None => ("unregistered".into(), String::new()),
                 };
                 tier1::check::CheckEntry {
                     label: format!("{:<6} {}", f.extension, f.label),
-                    status,
+                    status: status.into(),
                     detail: if detail.is_empty() { None } else { Some(detail) },
                 }
             })
@@ -284,7 +252,8 @@ fn register_tier3_check(env: &tier3::env_check::EnvReport) {
     // General tools section - backends not tied to specific extensions.
     {
         let general: &[&str] = &[
-            "f3d", "python3", "ffmpeg_cli", "magick", "oiiotool", "display_server",
+            "blender", "f3d", "python3", "ffmpeg_cli", "ffprobe", "magick", "oiiotool",
+            "display_server",
         ];
         let entries: Vec<tier1::check::CheckEntry> = general
             .iter()

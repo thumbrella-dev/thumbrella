@@ -60,6 +60,8 @@ pub fn default_strict() -> SandboxConfig {
 /// Captured stdout and stderr are drained concurrently so a noisy renderer
 /// cannot block on a full pipe before its deadline is reached.
 pub fn output(cmd: &mut Command, config: &SandboxConfig) -> std::io::Result<Output> {
+    #[cfg(unix)]
+    cmd.process_group(0);
     apply(cmd, config);
     let mut child = cmd.spawn()?;
     let stdout = child.stdout.take().map(drain_pipe);
@@ -71,6 +73,10 @@ pub fn output(cmd: &mut Command, config: &SandboxConfig) -> std::io::Result<Outp
         match child.wait_timeout(config.timeout)? {
             Some(status) => status,
             None => {
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(-(child.id() as i32), libc::SIGKILL);
+                }
                 let _ = child.kill();
                 let _ = child.wait();
                 join_pipe(stdout)?;
@@ -242,5 +248,18 @@ mod tests {
 
         let err = output(&mut cmd, &config).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn timeout_also_terminates_descendants_holding_output_pipes() {
+        let config = SandboxConfig {
+            timeout: Duration::from_millis(50),
+            ..SandboxConfig::default()
+        };
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("sleep 10 & wait").stdout(std::process::Stdio::piped());
+        let start = std::time::Instant::now();
+        assert_eq!(output(&mut cmd, &config).unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+        assert!(start.elapsed() < Duration::from_secs(2));
     }
 }

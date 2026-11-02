@@ -18,6 +18,7 @@
 //! - ZIP containers (ODT, DOCX, …): tail Range fetch to read the Central
 //!   Directory; a near-end embedded thumbnail is extracted inline, otherwise
 //!   its bytes are fetched via a targeted `read_at` on the open connection
+//! - Blender: bounded prefix read of the embedded file preview
 
 use std::collections::{HashSet, VecDeque};
 use web_time::Instant;
@@ -1896,9 +1897,9 @@ fn extract_apic_image(apic_data: &[u8]) -> Option<Vec<u8>> {
 ///
 /// The shortcut hands back an extracted thumbnail; it must never redefine the
 /// upstream media.  `kind`, `extension`, `mime`, and `file_size` all describe
-/// the source file, so they are snapshotted here and restored afterwards.  No
-/// current path mutates them, but this makes the guarantee structural rather
-/// than incidental.  The same rule applies to properties: a shortcut may
+/// the source file, so they are snapshotted here and restored afterwards.
+/// A source length discovered while reading the shortcut is retained if it
+/// was not already known. The same rule applies to properties: a shortcut may
 /// report source-derived metadata only (e.g. EXIF sensor resolution, audio
 /// channels), never the extracted thumbnail's own pixel dimensions.
 pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
@@ -1912,12 +1913,12 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
     cook.media.kind = upstream_kind;
     cook.media.extension = upstream_extension;
     cook.media.mime = upstream_mime;
-    cook.media.file_size = upstream_file_size;
+    cook.media.file_size = upstream_file_size.or(cook.media.file_size);
 }
 
 /// Try to produce a thumbnail without a full upstream decode.
 ///
-/// Six active paths, in priority order:
+/// Main paths include:
 ///
 /// 1. **Small image** (any `image`-supported format ≤ `SMALL_FILE_THRESHOLD`) -
 ///    read all bytes, full decode, pre-scale, set `cook.render_image`.
@@ -1928,6 +1929,7 @@ pub async fn shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
 /// 4. **Camera-raw preview** (DNG, CR2, NEF, ARW, …) - 32 KiB header scan,
 ///    full IFD traversal, targeted Range for the largest embedded JPEG.
 /// 5. **ZIP container** (ODT, DOCX, …) - single tail Range fetch.
+/// 6. **Blender** - bounded prefix extraction from raw, gzip, or Zstandard files.
 ///
 /// Sets `cook.render_image = Some(img)` and closes the HTTP connection on success.
 /// Leaves both untouched on any failure so the caller can fall through to
@@ -1937,6 +1939,13 @@ async fn shortcut_inner<S: HttpStream>(cook: &mut ThumbCook<S>) {
 
     let ext_owned = cook.media.extension.clone().unwrap_or_default();
     let ext = ext_owned.as_str();
+
+    if ext == "blend" && cook.media.kind == Some(FileKind::Geometry) {
+        try_blend_shortcut(cook).await;
+        if !cook.http_is_open() {
+            return;
+        }
+    }
 
     //  EXIF embedded thumbnail (JPEG EXIF IFD1 / TIFF IFD chain)
     //
@@ -2054,6 +2063,42 @@ async fn shortcut_inner<S: HttpStream>(cook: &mut ThumbCook<S>) {
         && matches!(cook.media.extension.as_deref(), Some("mp3"));
     if is_audio {
         try_audio_shortcut(cook).await;
+    }
+}
+
+async fn try_blend_shortcut<S: HttpStream>(cook: &mut ThumbCook<S>) {
+    const MAX_FETCH: usize = 512 * 1024;
+    let mut fetch = HEADER_SCAN;
+    loop {
+        let data = match cook.http_read_at(0, fetch).await {
+            Ok(data) => data,
+            Err(error) => {
+                tracing::debug!("Blender preview read failed: {error}");
+                cook.http_rewind();
+                return;
+            }
+        };
+        match super::blend_preview::extract(&data) {
+            super::blend_preview::Preview::Image(img) => {
+                let bytes = cook.http_bytes_fetched();
+                let config = &ThumbnailConfig::CANONICAL;
+                let img = pre_scale_to_target(img, config.exact_width, config.exact_height);
+                cook.http_close().await;
+                cook.render_renderer = Some("shortcut/blend".into());
+                cook.render_handler = RenderHandler::Builtin;
+                cook.out_download_bytes = bytes;
+                cook.render_image = Some(img);
+                return;
+            }
+            super::blend_preview::Preview::Absent => return,
+            super::blend_preview::Preview::NeedMore if data.len() == fetch && fetch < MAX_FETCH => {
+                fetch = (fetch * 4).min(MAX_FETCH);
+            }
+            super::blend_preview::Preview::NeedMore => {
+                tracing::debug!("Blender preview unavailable within shortcut read budget");
+                return;
+            }
+        }
     }
 }
 

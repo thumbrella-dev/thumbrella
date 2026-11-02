@@ -369,7 +369,7 @@ impl ProcessBuffer {
     /// right/bottom band rather than on top of the cover artwork.
     pub(super) fn draw_page_edges(&mut self, thickness: u32) {
         // Gold = warm highlight, purple = shadow colour from tier3's
-        // stylize_f3d_image tone map.  The purple is a pale lavender, darkened
+        // geometry tone map.  The purple is a pale lavender, darkened
         // and saturated enough to read as a soft page shadow, not ink.
         const GOLD: [u8; 3] = [236, 212, 155];
         const PURPLE: [u8; 3] = [130, 115, 163];

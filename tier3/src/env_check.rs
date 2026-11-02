@@ -29,7 +29,7 @@
 //! | Runtime service | Check env var or socket | `DISPLAY` for xvfb |
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::RwLock;
 
 //  Handler registry
@@ -107,6 +107,9 @@ pub enum ProbeMethod {
 pub struct EnvReport {
     /// Backend status for every known renderer, keyed by backend name.
     pub backends: BTreeMap<String, BackendInfo>,
+    /// Extensions whose Blender import operators passed the startup probe.
+    #[serde(default)]
+    pub blender_formats: BTreeSet<String>,
     /// Human-readable summary of the environment.
     pub summary: String,
 }
@@ -128,6 +131,7 @@ pub fn probe_environment() -> EnvReport {
 
     let mut report = EnvReport {
         backends: BTreeMap::new(),
+        blender_formats: BTreeSet::new(),
         summary: String::new(),
     };
 
@@ -142,9 +146,17 @@ pub fn probe_environment() -> EnvReport {
 
     //  F3D (geometry renderer with X11 dependency)
     probe_f3d(&mut report);
+    probe_blender(&mut report);
 
     //  Python + usd-core (USDZ geometry pipeline)
     probe_python_usd(&mut report);
+    let usd_available = usd_fallback_available(&report);
+    if let Some(backend) = report.backends.get_mut("usdz") {
+        backend.available = usd_available;
+        if !usd_available {
+            backend.unavailable_reason = Some("requires f3d and python3 with usd-core".into());
+        }
+    }
 
     //  Runtime service backends
     probe_runtime_services(&mut report);
@@ -167,6 +179,164 @@ pub fn probe_environment() -> EnvReport {
     *ENV_REPORT.write().unwrap() = Some(report.clone());
 
     report
+}
+
+/// Available handlers for an extension in registration order.
+pub fn available_handlers(report: &EnvReport, ext: &str) -> Vec<HandlerDecl> {
+    select_available_handlers(report, ext, registered_handlers())
+}
+
+fn select_available_handlers(
+    report: &EnvReport,
+    ext: &str,
+    handlers: Vec<HandlerDecl>,
+) -> Vec<HandlerDecl> {
+    handlers
+        .into_iter()
+        .filter(|h| h.extensions.contains(&ext))
+        .filter(|h| {
+            let available = |name: &str| report.backends.get(name).is_some_and(|b| b.available);
+            match h.name {
+                "blender" => available("blender") && report.blender_formats.contains(ext),
+                "usdz" => usd_fallback_available(report),
+                "ffmpeg_cli" => available("ffmpeg_cli") && available("ffprobe"),
+                _ => available(h.name),
+            }
+        })
+        .collect()
+}
+
+fn usd_fallback_available(report: &EnvReport) -> bool {
+    report.backends.get("f3d").is_some_and(|b| b.available)
+        && report.backends.get("python3").is_some_and(|b| {
+            b.available && b.details.as_deref().is_some_and(|d| d.contains("usd-core available"))
+        })
+}
+
+#[cfg(test)]
+mod blender_tests {
+    use super::*;
+
+    fn handler(name: &'static str, extensions: &'static [&'static str]) -> HandlerDecl {
+        HandlerDecl {
+            name,
+            category: "geometry",
+            command: name,
+            extensions,
+            description: "",
+        }
+    }
+
+    fn backend(name: &str, available: bool, details: Option<&str>) -> BackendInfo {
+        BackendInfo {
+            name: name.into(),
+            category: "geometry".into(),
+            method: ProbeMethod::Builtin,
+            available,
+            details: details.map(str::to_string),
+            unavailable_reason: None,
+        }
+    }
+
+    #[test]
+    fn parses_only_marked_valid_probe_output() {
+        assert_eq!(
+            parse_blender_formats(b"Blender\nTHUMBRELLA_FORMATS=[\"fbx\",\"stl\"]\n").unwrap(),
+            BTreeSet::from(["fbx".into(), "stl".into()])
+        );
+        assert!(parse_blender_formats(b"Blender").is_err());
+        assert!(parse_blender_formats(b"THUMBRELLA_FORMATS=not-json").is_err());
+    }
+
+    #[test]
+    fn selects_capable_handlers_in_priority_order() {
+        let handlers = vec![
+            handler("blender", &["fbx", "usd"]),
+            handler("f3d", &["fbx"]),
+            handler("usdz", &["usd"]),
+        ];
+        let mut report = EnvReport {
+            backends: BTreeMap::from([
+                ("blender".into(), backend("blender", true, None)),
+                ("f3d".into(), backend("f3d", true, None)),
+                ("python3".into(), backend("python3", true, Some("usd-core available"))),
+            ]),
+            blender_formats: BTreeSet::from(["fbx".into()]),
+            summary: String::new(),
+        };
+        let names = |ext| {
+            select_available_handlers(&report, ext, handlers.clone())
+                .into_iter()
+                .map(|h| h.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names("fbx"), vec!["blender", "f3d"]);
+        assert_eq!(names("usd"), vec!["usdz"]);
+        report.backends.get_mut("f3d").unwrap().available = false;
+        assert!(select_available_handlers(&report, "usd", handlers).is_empty());
+    }
+}
+
+fn parse_blender_formats(stdout: &[u8]) -> Result<BTreeSet<String>, String> {
+    let text = std::str::from_utf8(stdout).map_err(|e| format!("invalid probe output: {e}"))?;
+    let json = text
+        .lines()
+        .find_map(|line| line.strip_prefix("THUMBRELLA_FORMATS="))
+        .ok_or("missing Blender format probe output")?;
+    serde_json::from_str(json).map_err(|e| format!("invalid Blender format probe output: {e}"))
+}
+
+fn probe_blender(report: &mut EnvReport) {
+    let method = ProbeMethod::Executable {
+        binary: "blender".into(),
+        check_arg: "format probe".into(),
+    };
+    let result = (|| -> Result<(String, BTreeSet<String>), String> {
+        let path = which::which("blender").map_err(|e| format!("blender not found: {e}"))?;
+        let arena = crate::scratch::ScratchArena::new(1024 * 1024)
+            .map_err(|e| format!("probe scratch: {e}"))?;
+        let script = arena
+            .stage_bytes(include_str!("blender_render.py").as_bytes(), "blender_render.py")
+            .map_err(|e| format!("stage probe: {e}"))?;
+        let mut cmd = std::process::Command::new(&path);
+        cmd.args([
+            "--background", "--factory-startup", "--disable-autoexec", "--python-exit-code", "1",
+            "--python",
+        ])
+        .arg(script)
+        .args(["--", "probe"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+        let output = crate::sandbox::output(&mut cmd, &crate::sandbox::default_strict())
+            .map_err(|e| format!("Blender probe: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "Blender probe exited {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok((path.display().to_string(), parse_blender_formats(&output.stdout)?))
+    })();
+    let (available, details, unavailable_reason) = match result {
+        Ok((path, formats)) => {
+            let detail = format!("{path}: {}", formats.iter().cloned().collect::<Vec<_>>().join(", "));
+            report.blender_formats = formats;
+            (true, Some(detail), None)
+        }
+        Err(error) => (false, None, Some(error)),
+    };
+    report.backends.insert(
+        "blender".into(),
+        BackendInfo {
+            name: "blender".into(),
+            category: "geometry".into(),
+            method,
+            available,
+            details,
+            unavailable_reason,
+        },
+    );
 }
 
 /// Return the cached environment report, or `None` if not yet probed.
@@ -237,6 +407,7 @@ fn probe_executables(report: &mut EnvReport) {
     // Tier 3 runs them with input on stdin and captures stdout.
     let candidates: &[(&str, &str, &str, &str, &str)] = &[
         ("ffmpeg_cli", "image", "ffmpeg", "-version", "FFmpeg CLI (JPEG fallback / transcoding)"),
+        ("ffprobe", "video", "ffprobe", "-version", "FFmpeg media probe"),
         ("magick", "image", "gm", "version", "GraphicsMagick (arithmetic JPEG, resize)"),
         (
             "oiiotool",

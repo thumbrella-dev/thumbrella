@@ -51,6 +51,7 @@
 //! is generic over `S: HttpStream`.
 
 mod connect;
+mod blend_preview;
 pub mod deliver;
 mod inspect;
 mod shortcut;

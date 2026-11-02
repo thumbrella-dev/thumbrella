@@ -299,6 +299,66 @@ fn capability_renderer(available: bool) -> Arc<CapabilityRenderer> {
 }
 
 #[tokio::test]
+async fn blend_preview_shortcut_and_render_fallback() {
+    use std::io::Write;
+
+    let mut blend = b"BLENDER-v450".to_vec();
+    let mut block = [0; 24];
+    block[..4].copy_from_slice(b"TEST");
+    block[4..8].copy_from_slice(&(8u32 + 64 * 64 * 4).to_le_bytes());
+    blend.extend_from_slice(&block);
+    blend.extend_from_slice(&64u32.to_le_bytes());
+    blend.extend_from_slice(&64u32.to_le_bytes());
+    blend.extend(std::iter::repeat_n([12, 100, 180, 255], 64 * 64).flatten());
+    let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gzip.write_all(&blend).unwrap();
+    let zstd = ruzstd::encoding::compress_to_vec(blend.as_slice(), ruzstd::encoding::CompressionLevel::Fastest);
+
+    for (name, body) in [("plain", blend.clone()), ("gzip", gzip.finish().unwrap()), ("zstd", zstd)] {
+        let mut response = reply(200, &[("content-type", "application/octet-stream")]);
+        response.body = body.clone();
+        let url = register_path(&format!("blend-preview-{name}"), "model.blend", vec![response]);
+        let renderer = capability_renderer(true);
+        let mut rt = runtime(CacheStore::none());
+        Arc::make_mut(&mut rt).renderer = Some(renderer.clone());
+        let result = run(&url, rt, None).await;
+        assert_eq!(result.status, ResultStatus::Success);
+        assert_eq!(result.source, Some(ResultSource::Shortcut));
+        let media = result.media.unwrap();
+        assert_eq!((media.kind, media.extension.as_str()), (FileKind::Geometry, "blend"));
+        assert_eq!(media.file_size, body.len() as u64);
+        let jpeg = image::load_from_memory(&media.thumbnail).unwrap();
+        assert_eq!((jpeg.width(), jpeg.height()), (250, 200));
+        assert_eq!(renderer.calls.load(Ordering::Relaxed), 0);
+    }
+
+    blend[12..16].copy_from_slice(b"GLOB");
+    let mut response = reply(200, &[]);
+    response.body = blend.clone();
+    let url = register_path("blend-preview-rewind", "model.blend", vec![response]);
+    let mut cook = ThumbCook::<MockStream>::new(url, runtime(CacheStore::none()));
+    pipeline::connect(&mut cook).await;
+    pipeline::inspect(&mut cook).await;
+    pipeline::shortcut(&mut cook).await;
+    assert!(cook.http_is_open());
+    assert!(cook.render_image.is_none());
+    let mut start = [0; 12];
+    assert_eq!(cook.http_read(&mut start).await.unwrap(), start.len());
+    assert_eq!(&start, b"BLENDER-v450");
+
+    let mut response = reply(200, &[]);
+    response.body = blend;
+    let url = register_path("blend-preview-missing", "model.blend", vec![response]);
+    let renderer = capability_renderer(true);
+    let mut rt = runtime(CacheStore::none());
+    Arc::make_mut(&mut rt).renderer = Some(renderer.clone());
+    let result = run(&url, rt, None).await;
+    assert_eq!(result.status, ResultStatus::Success);
+    assert_eq!(result.source, Some(ResultSource::Render));
+    assert_eq!(renderer.calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
 async fn result_url_preserves_request_across_render_cache_and_debounce() {
     let first_url =
         register_path("url-identity", "image.svg?signature=first#one", vec![vector_reply()]);

@@ -88,6 +88,14 @@ fn sniff(bytes: &[u8], url: &str, content_type: Option<&str>) -> (FileKind, Stri
     if bytes.starts_with(b"DDS ") {
         return (FileKind::Image, "image/vnd-ms.dds".into(), "dds".into());
     }
+    if bytes.starts_with(b"BLENDER")
+        || ((bytes.starts_with(b"\x1f\x8b") || super::blend_preview::is_zstd(bytes))
+            && content_type.is_some_and(|ct| {
+                ct.split(';').next().unwrap_or(ct).trim().eq_ignore_ascii_case("application/x-blender")
+            }))
+    {
+        return (FileKind::Geometry, "application/x-blender".into(), "blend".into());
+    }
     let extra_magic = if bytes.starts_with(b"icns") {
         Some("icns")
     } else if bytes.len() >= 4
@@ -203,6 +211,47 @@ fn sniff(bytes: &[u8], url: &str, content_type: Option<&str>) -> (FileKind, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blender_geometry_extensions_keep_their_format() {
+        for (extension, bytes) in [
+            ("usda", b"#usda 1.0\n".as_slice()),
+            ("usdc", b"PXR-USDC".as_slice()),
+            ("blend", b"BLENDER-v450".as_slice()),
+            ("abc", b"Ogawa".as_slice()),
+        ] {
+            let url = format!("https://example.com/model.{extension}");
+            let (kind, _, detected) = sniff(bytes, &url, Some("application/octet-stream"));
+            assert_eq!((kind, detected.as_str()), (FileKind::Geometry, extension));
+            assert_eq!(dispatch::route(kind, Some(&detected)).tier, 3);
+        }
+        for bytes in [
+            b"\x1f\x8b\x08\x00\x00\x00\x00\x00".as_slice(),
+            b"\x28\xb5\x2f\xfd\x00\x00".as_slice(),
+            b"\x50\x2a\x4d\x18\x00\x00".as_slice(),
+        ] {
+            let (kind, _, extension) = sniff(bytes, "https://example.com/model.blend", None);
+            assert_eq!((kind, extension.as_str()), (FileKind::Geometry, "blend"));
+            let (kind, _, extension) = sniff(bytes, "https://example.com/model", Some("application/x-blender"));
+            assert_eq!((kind, extension.as_str()), (FileKind::Geometry, "blend"));
+        }
+        let (kind, _, extension) = sniff(b"BLENDER-v450", "https://example.com/model", None);
+        assert_eq!((kind, extension.as_str()), (FileKind::Geometry, "blend"));
+    }
+
+    #[test]
+    fn alembic_mime_classifies_and_reports_geometry() {
+        for (url, content_type) in [
+            ("https://example.com/model.abc", Some("application/octet-stream")),
+            ("https://example.com/model", Some("model/alembic")),
+            ("https://example.com/model", Some("Model/Alembic; charset=binary")),
+        ] {
+            let (kind, mime, extension) = sniff(b"Ogawa", url, content_type);
+            assert_eq!((kind, mime.as_str(), extension.as_str()),
+                       (FileKind::Geometry, "model/alembic", "abc"));
+            assert_eq!(dispatch::route(kind, Some(&extension)).tier, 3);
+        }
+    }
 
     #[test]
     fn proprietary_camera_raw_formats_have_no_alpha() {
@@ -326,6 +375,20 @@ mod tests {
                 .iter()
                 .filter(|entry| entry.extension == "exr")
                 .all(|entry| entry.tier == 2 && !entry.shortcut)
+        );
+    }
+
+    #[test]
+    fn flv_is_routed_to_tier3_ffmpeg() {
+        let (kind, _, extension) = sniff(b"", "https://example.com/video.flv", None);
+        assert_eq!((kind, extension.as_str()), (FileKind::Video, "flv"));
+        assert_eq!(dispatch::route(kind, Some(&extension)).tier, 3);
+        let entries: Vec<_> =
+            dispatch::format_manifest().iter().filter(|entry| entry.extension == "flv").collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            (entries[0].tier, entries[0].renderer, entries[0].shortcut),
+            (3, "ffmpeg_cli", false)
         );
     }
 
@@ -698,7 +761,6 @@ pub fn canonical_extension(raw: &str) -> String {
         "stp" | "stpnc" | "p21" | "210" => "step",
         "igs" => "iges",
         "ex2" | "e" => "exo",
-        "usda" | "usdc" => "usd",
         // camera raw - uncommon aliases
         "crw" => "cr2",
         // web
@@ -780,6 +842,7 @@ fn mime_to_kind(mime: &str, ext: &str) -> FileKind {
         "model/vnd.usdz+zip"
         | "model/gltf-binary"
         | "model/gltf+json"
+        | "model/alembic"
         | "application/vnd.fbx"
         | "model/vnd.collada+xml"
         | "model/obj"
@@ -807,9 +870,9 @@ fn ext_to_kind(ext: &str) -> FileKind {
         | "aiff" => FileKind::Audio,
         "pdf" | "docx" | "xlsx" | "pptx" | "odt" | "doc" | "xls" | "ppt" | "odp" | "ods" | "epub"
         | "rtf" | "html" | "xhtml" => FileKind::Document,
-        "usdz" | "usd" | "glb" | "gltf" | "obj" | "stl" | "fbx" | "dae" | "dxf" | "off" | "3ds"
-        | "gml" | "ply" | "pts" | "vrml" | "vtk" | "vtu" | "vtp" | "vti" | "vtr" | "vts" | "vtm"
-        | "step" | "iges" | "brep" | "exo" => FileKind::Geometry,
+        "usdz" | "usd" | "usda" | "usdc" | "abc" | "blend" | "glb" | "gltf" | "obj" | "stl" | "fbx"
+        | "dae" | "dxf" | "off" | "3ds" | "gml" | "ply" | "pts" | "vrml" | "vtk" | "vtu" | "vtp"
+        | "vti" | "vtr" | "vts" | "vtm" | "step" | "iges" | "brep" | "exo" => FileKind::Geometry,
         "zip" | "tar" | "gz" | "bz2" | "xz" | "rar" | "7z" => FileKind::Archive,
         "xml" | "json" | "txt" | "csv" | "md" => FileKind::Text,
         _ => FileKind::Unknown,
@@ -881,9 +944,11 @@ fn mime_to_extension(mime: &str) -> &'static str {
         "application/vnd.ms-powerpoint" => "ppt",
         "application/epub+zip" => "epub",
         "application/rtf" => "rtf",
+        "application/x-blender" => "blend",
         "model/vnd.usdz+zip" => "usdz",
         "model/gltf-binary" => "glb",
         "model/gltf+json" => "gltf",
+        "model/alembic" => "abc",
         "model/obj" => "obj",
         "application/vnd.fbx" => "fbx",
         "model/vnd.collada+xml" => "dae",
@@ -988,6 +1053,7 @@ fn ext_to_mime(ext: &str) -> &'static str {
         "ppt" => "application/vnd.ms-powerpoint",
         "epub" => "application/epub+zip",
         "rtf" => "application/rtf",
+        "blend" => "application/x-blender",
         "html" => "text/html",
         "xhtml" => "application/xhtml+xml",
         "zip" => "application/zip",
@@ -1001,9 +1067,10 @@ fn ext_to_mime(ext: &str) -> &'static str {
         "csv" => "text/csv",
         "md" => "text/markdown",
         "usdz" => "model/vnd.usdz+zip",
-        "usd" => "model/vnd.usdz+zip",
+        "usd" | "usda" | "usdc" => "model/vnd.usd",
         "glb" => "model/gltf-binary",
         "gltf" => "model/gltf+json",
+        "abc" => "model/alembic",
         "obj" => "model/obj",
         "fbx" => "application/vnd.fbx",
         "dae" => "model/vnd.collada+xml",
