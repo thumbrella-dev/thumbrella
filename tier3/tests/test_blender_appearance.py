@@ -51,31 +51,16 @@ class BlenderAppearance(unittest.TestCase):
         obj.data.color_attributes.active_color = colors
         self.assertTrue(self.has_appearance([obj]))
 
-    def test_alembic_frame_and_single_camera(self):
+    def test_alembic_frame_ignores_authored_camera(self):
         scene = bpy.context.scene
         scene.frame_start = 10
         scene.frame_end = 110
         camera = bpy.data.objects.new("authored", bpy.data.cameras.new("authored"))
         scene.collection.objects.link(camera)
-        self.assertEqual(renderer.prepare_alembic_scene(scene), camera)
+        self.assertIsNone(renderer.prepare_alembic_scene(scene))
         self.assertEqual(scene.frame_current, 20)
 
-    def test_alembic_camera_selection_is_unambiguous(self):
-        scene = bpy.context.scene
-        scene.frame_start = 3
-        scene.frame_end = 3
-        self.assertIsNone(renderer.prepare_alembic_scene(scene))
-        self.assertEqual(scene.frame_current, 3)
-        cameras = []
-        for name in ("first", "second"):
-            camera = bpy.data.objects.new(name, bpy.data.cameras.new(name))
-            scene.collection.objects.link(camera)
-            cameras.append(camera)
-        self.assertIsNone(renderer.prepare_alembic_scene(scene))
-        scene.camera = cameras[1]
-        self.assertEqual(renderer.prepare_alembic_scene(scene), cameras[1])
-
-    def test_imported_alembic_animation_and_camera(self):
+    def test_imported_alembic_animation_ignores_camera(self):
         if "abc" not in renderer.supported_formats():
             self.skipTest("Blender has no Alembic importer")
         scene = bpy.context.scene
@@ -95,8 +80,9 @@ class BlenderAppearance(unittest.TestCase):
             self.assertEqual(bpy.ops.wm.alembic_import(filepath=path), {"FINISHED"})
             scene = bpy.context.scene
             self.assertEqual((scene.frame_start, scene.frame_end), (1, 11))
-            camera = renderer.prepare_alembic_scene(scene)
-            self.assertEqual(camera.type, "CAMERA")
+            # The export carried a camera through, but thumbnails must ignore it.
+            self.assertTrue(any(obj.type == "CAMERA" for obj in scene.objects))
+            self.assertIsNone(renderer.prepare_alembic_scene(scene))
             self.assertEqual(scene.frame_current, 2)
             imported = next(obj for obj in scene.objects if obj.type == "MESH")
             evaluated = imported.evaluated_get(bpy.context.evaluated_depsgraph_get())

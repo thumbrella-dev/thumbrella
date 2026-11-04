@@ -15,7 +15,7 @@
 //! | Video | libav | (same as tier 2) |
 //! | Vector | resvg | (same as tier 2) + optional inkscape subprocess |
 //! | Document | (none) | subprocess: pdftoppm (PDF first page) |
-//! | Geometry | (none) | subprocess: blender (USD/ABC/BLEND), f3d (mesh/glTF/OBJ/FBX) |
+//! | Geometry | (none) | subprocess: blender (glTF/GLB, USD/ABC/BLEND), f3d (mesh/OBJ/FBX) |
 //!
 //! # Dispatch order
 //!

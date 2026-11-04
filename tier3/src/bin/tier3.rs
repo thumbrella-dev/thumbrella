@@ -27,17 +27,18 @@ async fn main() {
     // These are probed at startup.  Only handlers whose command exists and is
     // executable are marked available in the env report.
 
-    // Blender is kept for self-contained scenes (blend, abc), USD, and the
-    // remaining interchange formats whose importers we want Blender to own
-    // (dae, ply).  F3D reads materials from glTF/GLB, OBJ, and FBX just fine
-    // and starts in a fraction of the time, so those stay on F3D along with
-    // material-less meshes (STL).  OBJ has no staged .mtl sidecar today, but
-    // F3D handles the missing-material case cleanly.
+    // Blender is preferred for self-contained scenes (blend, abc), USD,
+    // glTF/GLB (best material fidelity), and the remaining interchange formats
+    // whose importers we want Blender to own (dae, ply).  F3D stays registered
+    // as the fallback for every extension it supports.  OBJ, STL, and FBX skip
+    // Blender because F3D renders their materials well and starts far faster.
     tier3::env_check::register_handler(tier3::env_check::HandlerDecl {
         name: "blender",
         category: "geometry",
         command: "blender",
-        extensions: &["abc", "blend", "dae", "ply", "usd", "usda", "usdc", "usdz"],
+        extensions: &[
+            "abc", "blend", "dae", "glb", "gltf", "ply", "usd", "usda", "usdc", "usdz",
+        ],
         description: "Blender Workbench software renderer",
     });
 
@@ -46,10 +47,9 @@ async fn main() {
         category: "geometry",
         command: "f3d",
         // F3D readers available in this runtime (mesh/CAD/simulation formats).
-        // Preferred for material-less meshes (STL) and for glTF/GLB/OBJ/FBX,
-        // where F3D already renders materials without Blender's startup cost.
-        // USDZ is NOT in this list - it is handled separately via ZIP
-        // extraction, and USD/ABC/BLEND go to Blender above.
+        // Also the fallback for any Blender-handled format when Blender is
+        // unavailable or cannot render it.  USDZ is NOT in this list - it is
+        // handled separately via ZIP extraction.
         extensions: &[
             "3ds", "brep", "dae", "dxf", "e", "exo", "ex2", "fbx", "glb", "gltf", "gml", "iges", "igs",
             "obj", "off", "p21", "ply", "pts", "step", "stl", "stp", "stpnc", "vtk", "vtm", "vti",

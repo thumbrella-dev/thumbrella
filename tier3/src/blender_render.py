@@ -65,12 +65,13 @@ def has_authored_appearance(objects):
 
 
 def prepare_alembic_scene(scene):
+    """Step to a representative frame for an animated Alembic scene.
+
+    Alembic has no active/render-camera concept.  Camera objects in the
+    archive are ignored; thumbnails always use the generated framing camera.
+    """
     frame = scene.frame_start + round((scene.frame_end - scene.frame_start) * 0.1)
     scene.frame_set(frame)
-    if scene.camera is not None:
-        return scene.camera
-    cameras = [obj for obj in scene.objects if obj.type == "CAMERA"]
-    return cameras[0] if len(cameras) == 1 else None
 
 
 def render(source, output, extension):
@@ -94,7 +95,14 @@ def render(source, output, extension):
     if "FINISHED" not in result:
         raise RuntimeError(f"Import failed: {result}")
     scene = bpy.context.scene
-    camera = prepare_alembic_scene(scene) if extension == "abc" else None
+    # Set the output size before framing: the camera frustum aspect depends on
+    # it.  Thumbnails deliver on a 250x200 canvas, so 384 still supersamples
+    # ~1.9x after the deliver downscale.
+    scene.render.resolution_x = 384
+    scene.render.resolution_y = 384
+    scene.render.resolution_percentage = 100
+    if extension == "abc":
+        prepare_alembic_scene(scene)
     bpy.context.view_layer.update()
 
     objects = [obj for obj in bpy.context.scene.objects
@@ -116,20 +124,25 @@ def render(source, output, extension):
     if not math.isfinite(radius) or radius <= 0:
         raise RuntimeError("Geometry has empty or invalid bounds")
 
-    if camera is None:
-        angle = math.radians(20)
-        direction = Vector((math.sin(angle) * math.cos(angle),
-                            -math.cos(angle) * math.cos(angle), math.sin(angle)))
-        distance = radius / math.sin(math.radians(45 / 2)) * 1.2
-        camera_data = bpy.data.cameras.new("ThumbnailCamera")
-        camera = bpy.data.objects.new("ThumbnailCamera", camera_data)
-        scene.collection.objects.link(camera)
-        camera.location = center + direction * distance
-        camera.rotation_euler = (center - camera.location).to_track_quat("-Z", "Y").to_euler()
-        camera_data.sensor_fit = "HORIZONTAL"
-        camera_data.lens = camera_data.sensor_width / (2 * math.tan(math.radians(45 / 2)))
-        camera_data.clip_start = max(distance / 1000, 0.00001)
-        camera_data.clip_end = distance + radius * 2
+    # Always frame the geometry ourselves.  Alembic cameras are ignored: the
+    # format has no active/render-camera selection, and exported scenes often
+    # include a default or projection camera that frames the model badly.
+    angle = math.radians(20)
+    direction = Vector((math.sin(angle) * math.cos(angle),
+                        -math.cos(angle) * math.cos(angle), math.sin(angle)))
+    # Conservative bounding-sphere fit.  The deliver step autocrops the empty
+    # margins, so err on the side of rendering too much rather than risk
+    # clipping tall, wide, or sparse geometry.
+    distance = radius / math.sin(math.radians(45 / 2)) * 1.3
+    camera_data = bpy.data.cameras.new("ThumbnailCamera")
+    camera = bpy.data.objects.new("ThumbnailCamera", camera_data)
+    scene.collection.objects.link(camera)
+    camera.location = center + direction * distance
+    camera.rotation_euler = (center - camera.location).to_track_quat("-Z", "Y").to_euler()
+    camera_data.sensor_fit = "HORIZONTAL"
+    camera_data.lens = camera_data.sensor_width / (2 * math.tan(math.radians(45 / 2)))
+    camera_data.clip_start = max(distance / 1000, 0.00001)
+    camera_data.clip_end = distance + radius * 2
 
     scene.camera = camera
     scene.render.engine = "BLENDER_WORKBENCH"
@@ -138,12 +151,6 @@ def render(source, output, extension):
     scene.display.shading.color_type = "TEXTURE"
     scene.display.shading.show_shadows = False
     scene.display.shading.show_cavity = False
-    # Thumbnails are delivered on a 250x200 canvas, so a 384 square render
-    # still supersamples ~1.9x after the deliver-step downscale.  512 cost 78%
-    # more pixels for a barely visible difference at thumbnail size.
-    scene.render.resolution_x = 384
-    scene.render.resolution_y = 384
-    scene.render.resolution_percentage = 100
     scene.render.film_transparent = True
     scene.render.use_compositing = False
     scene.render.use_sequencer = False
