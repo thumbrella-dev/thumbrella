@@ -2,6 +2,11 @@
 
 ## Development
 
+
+## 2.3.0 - 2026/11/04
+
+More cache control and Blender for some 3d geometry formats
+
 - Support geometry renders through Blender in tier3
 - Add support for .abc and .blend geometry files
 - User defined 'key' for each requested url
