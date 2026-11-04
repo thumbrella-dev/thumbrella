@@ -23,6 +23,23 @@ struct Scenario {
 static SCENARIOS: LazyLock<Mutex<HashMap<String, Scenario>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+#[test]
+fn cache_identity_prefers_caller_key_over_canonical_url() {
+    let mut spec = InputSpec::new("https://EXAMPLE.com/A.jpg?token=x#frag");
+    assert_eq!(spec.cache_identity(), "https://example.com/A.jpg");
+
+    spec.key = Some("custom-identity".into());
+    assert_eq!(spec.cache_identity(), "custom-identity");
+
+    // An empty key is treated as absent.
+    spec.key = Some(String::new());
+    assert_eq!(spec.cache_identity(), "https://example.com/A.jpg");
+
+    // Non-URL inputs fall back to the raw string.
+    let local = InputSpec::new("/tmp/a b.jpg");
+    assert_eq!(local.cache_identity(), "/tmp/a b.jpg");
+}
+
 struct MockStream {
     reply: Reply,
 }
@@ -146,6 +163,7 @@ async fn run(url: &str, runtime: Arc<Runtime>, client: Option<CacheHints>) -> Th
             url: url.to_string(),
             cache: client,
             allow_local: false,
+            key: None,
         },
         runtime,
     );
@@ -1026,6 +1044,7 @@ async fn debounce_precedes_client_and_durable_checks_and_does_not_slide() {
             url: url.clone(),
             cache: Some(hints(Some("\"client\""), true)),
             allow_local: false,
+            key: None,
         },
         rt.clone(),
     );

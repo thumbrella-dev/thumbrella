@@ -239,6 +239,13 @@ pub struct InputSpec {
     pub cache: Option<CacheHints>,
     /// Allow `file://` URLs.  Only the CLI sets this to `true`.
     pub allow_local: bool,
+    /// Optional caller-supplied cache identity.
+    ///
+    /// When set, this replaces the canonical source URL as the identity used
+    /// for cache and debounce lookups.  This lets callers address the same
+    /// source under multiple independent cache entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 impl InputSpec {
@@ -246,6 +253,18 @@ impl InputSpec {
         Self {
             url: url.into(),
             ..Self::default()
+        }
+    }
+
+    /// Effective cache identity for this input.
+    ///
+    /// The caller-supplied [`key`](Self::key) wins when present; otherwise the
+    /// canonical (query-stripped, lowercased) form of [`url`](Self::url) is
+    /// used, falling back to the raw URL when it is not a parseable URL.
+    pub fn cache_identity(&self) -> String {
+        match self.key.as_deref() {
+            Some(key) if !key.is_empty() => key.to_owned(),
+            _ => crate::source::canonical_url(&self.url).unwrap_or_else(|| self.url.clone()),
         }
     }
 }
@@ -696,8 +715,10 @@ impl<S: HttpStream> ThumbCook<S> {
 
     /// Materialise the client-facing [`ThumbResult`].  Called once at end of `run()`.
     pub fn to_result(&self) -> ThumbResult {
+        let key = self.input.cache_identity();
         if let Some(ref cached) = self.debounce_result {
             let mut result = cached.clone();
+            result.key = key;
             result.url = self.input.url.clone();
             result.duration = self.out_duration;
             return result;
@@ -710,6 +731,7 @@ impl<S: HttpStream> ThumbCook<S> {
             CookStatus::Intermediate => ResultStatus::Intermediate,
         };
         ThumbResult {
+            key: key.clone(),
             url: self.input.url.clone(),
             status,
             duration: self.out_duration,
@@ -731,8 +753,7 @@ impl<S: HttpStream> ThumbCook<S> {
                 Some(ResultSource::Render)
             },
             media: Some(ThumbMedia {
-                url: crate::source::canonical_url(&self.input.url)
-                    .unwrap_or_else(|| self.input.url.clone()),
+                url: key,
                 thumbnail: self.out_thumbnail.clone(),
                 mime: self.media.mime.clone().unwrap_or_default(),
                 file_size: self.media.file_size.unwrap_or(0),
@@ -760,6 +781,7 @@ impl<S: HttpStream> ThumbCook<S> {
         let kind = self.media.kind.unwrap_or(FileKind::Unknown);
         let slug = kind_slug(kind);
         ThumbResult {
+            key: self.input.cache_identity(),
             url: self.input.url.clone(),
             status: ResultStatus::Intermediate,
             duration,
@@ -943,8 +965,7 @@ impl<S: HttpStream> ThumbCook<S> {
     {
         self.cache_resolved = true;
 
-        let identity =
-            crate::source::canonical_url(&self.input.url).unwrap_or_else(|| self.input.url.clone());
+        let identity = self.input.cache_identity();
         let cache_key = self.ctx_cache_key.clone().unwrap_or(identity);
         if !self.ctx_handoff {
             self.src.cache_key = Some(cache_key.clone());

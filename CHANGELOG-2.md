@@ -4,6 +4,8 @@
 
 - Support geometry renders through Blender in tier3
 - Add support for .abc and .blend geometry files
+- User defined 'key' for each requested url
+- Return key for each request, optionally generated from url
 
 ## 2.2.0 - 2026/10/28
 

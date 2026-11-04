@@ -555,6 +555,42 @@ mod pin_tests {
         }
     }
 
+    #[tokio::test]
+    async fn batch_uses_caller_keys_for_identical_urls() {
+        ux::init();
+        let mut rt = runtime(CacheStore::none(), 0);
+        Arc::make_mut(&mut rt).allow_local = true;
+        let requested = format!("/nonexistent-tbr-key-test-{}/page.htm#section", std::process::id());
+        let req: CallRequest = serde_json::from_value(json!({
+            "items": [
+                {"url": requested.clone(), "key": "identity-one"},
+                {"url": requested.clone(), "key": "identity-two"},
+                {"url": requested.clone()},
+            ],
+        }))
+        .unwrap();
+        let response = batch(
+            State(rt),
+            HeaderMap::new(),
+            ConnectInfo("127.0.0.1:12345".parse().unwrap()),
+            Json(req),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let items: Vec<ThumbResult> = serde_json::from_value(body["items"].clone()).unwrap();
+        assert_eq!(items.len(), 3);
+        assert!(items.iter().all(|result| result.url == requested));
+        let keys: Vec<&str> = items.iter().map(|result| result.key.as_str()).collect();
+        assert!(keys.contains(&"identity-one"));
+        assert!(keys.contains(&"identity-two"));
+        // The item without a caller key falls back to the canonical source
+        // identity, which is never one of the caller-supplied keys.
+        assert_eq!(keys.iter().filter(|key| **key == "identity-one").count(), 1);
+        assert_eq!(keys.iter().filter(|key| **key == "identity-two").count(), 1);
+    }
+
     async fn start_server(runtime: Arc<Runtime>) -> (String, tokio::task::JoinHandle<()>) {
         ux::init();
         let app = axum::Router::new()
@@ -1116,6 +1152,7 @@ pub async fn thumb(
         url: url.clone(),
         cache: None,
         allow_local: runtime.allow_local,
+        key: None,
     };
     let (result, _trace, mut after) =
         ThumbCook::<PlatformStream>::from_input(input, runtime).run().await;
@@ -1173,7 +1210,7 @@ pub async fn batch(
 
     let mut jobs = Vec::with_capacity(req.items.len());
     for (idx, input) in req.items.into_iter().enumerate() {
-        let (requested_url, cache) = input.into_parts();
+        let (requested_url, cache, key) = input.into_parts();
         let url = match normalize_url(requested_url.clone(), runtime.allow_local) {
             Ok(u) => u,
             Err(msg) => {
@@ -1194,6 +1231,7 @@ pub async fn batch(
                 url: url.clone(),
                 cache,
                 allow_local: runtime.allow_local,
+                key,
             },
         ));
     }
@@ -1203,7 +1241,11 @@ pub async fn batch(
     let overflow: Vec<ThumbResult> = if jobs.len() > BATCH_MAX_ITEMS {
         jobs.split_off(BATCH_MAX_ITEMS)
             .into_iter()
-            .map(|(_, requested_url, _)| ThumbResult::batch_limit(requested_url, BATCH_MAX_ITEMS))
+            .map(|(_, requested_url, spec)| {
+                let mut result = ThumbResult::batch_limit(requested_url, BATCH_MAX_ITEMS);
+                result.key = spec.cache_identity();
+                result
+            })
             .collect()
     } else {
         Vec::new()

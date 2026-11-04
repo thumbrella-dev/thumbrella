@@ -146,6 +146,14 @@ impl Default for ThumbMedia {
 /// for the same file share the same `media`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThumbResult {
+    /// Canonical cache identity used for lookups.
+    ///
+    /// This is the caller-supplied `key` when one was provided on the input,
+    /// otherwise the canonical source URL: scheme and host lowercased,
+    /// query/fragment stripped.  Two requests for the same resource with
+    /// different signing parameters share the same key.  Falls back to
+    /// [`url`](Self::url) when the input is not a parseable `scheme://` URL.
+    pub key: String,
     /// The exact source URL requested by this caller, not the canonical cache identity.
     pub url: String,
     /// High-level outcome.
@@ -175,6 +183,7 @@ pub struct ThumbResult {
 impl Default for ThumbResult {
     fn default() -> Self {
         Self {
+            key: String::new(),
             url: String::new(),
             status: ResultStatus::Failed,
             message: None,
@@ -191,7 +200,9 @@ impl Default for ThumbResult {
 impl ThumbResult {
     /// Create a `batchlimit` result for an item that exceeded the per-request limit.
     pub fn batch_limit(url: String, limit: usize) -> Self {
+        let key = crate::source::canonical_url(&url).unwrap_or_else(|| url.clone());
         Self {
+            key,
             url,
             status: ResultStatus::BatchLimit,
             message: Some(format!("batch limited to {limit} items per request")),

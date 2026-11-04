@@ -54,6 +54,12 @@ enum Command {
         /// Output file path for the JPEG thumbnail.
         #[arg(value_name = "OUTPUT")]
         output: String,
+
+        /// Override the cache identity for this request.
+        ///
+        /// When omitted, the canonical form of the source URL is used.
+        #[arg(long, value_name = "KEY")]
+        key: Option<String>,
     },
 
     /// Thumbnail one or more URLs and print result metadata as JSON.
@@ -77,6 +83,13 @@ enum Command {
         /// the default pretty output.
         #[arg(long)]
         raw: bool,
+
+        /// Override the cache identity for these requests.
+        ///
+        /// When omitted, the canonical form of each source URL is used.  A
+        /// single key applies to every URL in the invocation.
+        #[arg(long, value_name = "KEY")]
+        key: Option<String>,
     },
 
     /// Print server configuration and validate connected services.
@@ -193,8 +206,12 @@ where
 
     match cli.command {
         Command::Serve => run_server(runtime.unwrap()).await,
-        Command::Thumb { input, output } => run_thumb(input, output, runtime.unwrap()).await,
-        Command::Result { urls, cache, raw } => run_result(urls, cache, raw, runtime.unwrap()).await,
+        Command::Thumb { input, output, key } => {
+            run_thumb(input, output, key, runtime.unwrap()).await;
+        }
+        Command::Result { urls, cache, raw, key } => {
+            run_result(urls, cache, raw, key, runtime.unwrap()).await;
+        }
         Command::Check { json } => run_check(json, tier).await,
         Command::Formats { json } => run_formats(json),
         Command::Service { alias, write } => run_service(alias, write),
@@ -573,12 +590,25 @@ pub fn promote_url(raw: &str) -> String {
     }
 }
 
-async fn run_result(urls: Vec<String>, cache_str: Option<String>, raw: bool, runtime: Arc<Runtime>) {
+/// Normalise a `--key` value: trim whitespace and treat an empty result as
+/// absent, matching the server's handling of request-level keys.
+fn normalize_cli_key(key: Option<String>) -> Option<String> {
+    key.map(|k| k.trim().to_owned()).filter(|k| !k.is_empty())
+}
+
+async fn run_result(
+    urls: Vec<String>,
+    cache_str: Option<String>,
+    raw: bool,
+    key: Option<String>,
+    runtime: Arc<Runtime>,
+) {
     use crate::source::CacheHints;
     use crate::{ThumbCook, cook::InputSpec};
     use futures::stream::{FuturesUnordered, StreamExt};
 
     let cache = cache_str.as_deref().and_then(CacheHints::decode);
+    let key = normalize_cli_key(key);
 
     let mut pool = FuturesUnordered::new();
     for url_arg in urls {
@@ -588,6 +618,7 @@ async fn run_result(urls: Vec<String>, cache_str: Option<String>, raw: bool, run
             url,
             cache: cache.clone(),
             allow_local: is_local,
+            key: key.clone(),
         };
         pool.push(ThumbCook::from_input(input, Arc::clone(&runtime)).run());
     }
@@ -627,7 +658,7 @@ async fn run_result(urls: Vec<String>, cache_str: Option<String>, raw: bool, run
 /// `input` is a URL or a local filesystem path (promoted to a `file://` URL).
 /// Exits non-zero when no thumbnail can be produced or the output cannot be
 /// written.  Placeholder results (no real thumbnail) are treated as failures.
-async fn run_thumb(input: String, output: String, runtime: Arc<Runtime>) {
+async fn run_thumb(input: String, output: String, key: Option<String>, runtime: Arc<Runtime>) {
     use crate::{ThumbCook, cook::InputSpec};
 
     let is_local = !input.contains("://") || input.starts_with("file://");
@@ -635,6 +666,7 @@ async fn run_thumb(input: String, output: String, runtime: Arc<Runtime>) {
         url: promote_url(&input),
         cache: None,
         allow_local: is_local,
+        key: normalize_cli_key(key),
     };
 
     let cook = ThumbCook::from_input(input_spec, Arc::clone(&runtime));
@@ -645,7 +677,7 @@ async fn run_thumb(input: String, output: String, runtime: Arc<Runtime>) {
 
     let Some(media) = result.media.as_ref() else {
         ux.fatal(
-            &format!("no result for {}", result.url),
+            &format!("no result for {} (key: {})", result.url, result.key),
             "the source could not be fetched or recognised",
         );
     };
@@ -659,7 +691,7 @@ async fn run_thumb(input: String, output: String, runtime: Arc<Runtime>) {
             String::new()
         };
         ux.fatal(
-            &format!("no thumbnail for {}{}", result.url, reason),
+            &format!("no thumbnail for {}{} (key: {})", result.url, reason, result.key),
             "the source may be unsupported, or the server could not render it",
         );
     }
@@ -669,7 +701,7 @@ async fn run_thumb(input: String, output: String, runtime: Arc<Runtime>) {
         ux.fatal(&format!("could not write {output}"), &msg);
     }
 
-    println!("wrote {output}  ({} bytes)", media.thumbnail.len());
+    println!("wrote {output}  ({} bytes)  key: {}", media.thumbnail.len(), result.key);
 }
 
 //  check
