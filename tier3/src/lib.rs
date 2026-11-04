@@ -26,6 +26,7 @@
 
 pub use tier1::*;
 
+mod blender;
 pub mod env_check;
 pub mod renderer;
 pub mod sandbox;

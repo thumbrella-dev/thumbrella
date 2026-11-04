@@ -168,6 +168,8 @@ pub fn show_raw_logs() -> bool {
 /// True when running inside a Docker/Podman container.
 pub fn in_container() -> bool {
     std::path::Path::new("/.dockerenv").exists()
+        || std::path::Path::new("/.containerenv").exists()
+        || std::path::Path::new("/run/.containerenv").exists()
         || std::fs::read_to_string("/proc/1/cgroup")
             .map(|s| s.contains("docker") || s.contains("containerd") || s.contains("libpod"))
             .unwrap_or(false)

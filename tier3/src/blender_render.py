@@ -3,6 +3,7 @@ import json
 import math
 import os
 import sys
+from array import array
 
 import bpy
 from mathutils import Vector
@@ -50,7 +51,13 @@ def has_authored_appearance(objects):
             colors = getattr(mesh, "color_attributes", None)
             if colors and colors.active_color and len(colors.active_color.data):
                 return True
-            if materials and any(face.material_index in materials for face in mesh.polygons):
+            # No material slots: nothing can be assigned, and this avoids a
+            # full polygon scan on formats like STL with millions of faces.
+            if not materials or not len(mesh.polygons):
+                continue
+            indices = array("i", [0]) * len(mesh.polygons)
+            mesh.polygons.foreach_get("material_index", indices)
+            if not materials.isdisjoint(indices):
                 return True
         elif materials:
             return True
@@ -77,6 +84,9 @@ def render(source, output, extension):
         options = {"filepath": source}
         if extension == "fbx":
             options["use_anim"] = False
+            # Do not probe the filesystem for missing texture paths.  Embedded
+            # textures still load; this only skips external image search.
+            options["use_image_search"] = False
         elif extension in ("usd", "usda", "usdc", "usdz"):
             options.update(import_cameras=False, import_lights=False,
                            import_usd_preview=True, import_textures_mode="IMPORT_PACK")
@@ -128,14 +138,20 @@ def render(source, output, extension):
     scene.display.shading.color_type = "TEXTURE"
     scene.display.shading.show_shadows = False
     scene.display.shading.show_cavity = False
-    scene.render.resolution_x = 512
-    scene.render.resolution_y = 512
+    # Thumbnails are delivered on a 250x200 canvas, so a 384 square render
+    # still supersamples ~1.9x after the deliver-step downscale.  512 cost 78%
+    # more pixels for a barely visible difference at thumbnail size.
+    scene.render.resolution_x = 384
+    scene.render.resolution_y = 384
     scene.render.resolution_percentage = 100
     scene.render.film_transparent = True
     scene.render.use_compositing = False
     scene.render.use_sequencer = False
     scene.render.image_settings.file_format = "PNG"
     scene.render.image_settings.color_mode = "RGBA"
+    # The PNG is a temporary hand-off to tier 1.  Skip compression so Blender
+    # spends less CPU encoding it; the larger temp file is short-lived.
+    scene.render.image_settings.compression = 0
     scene.render.filepath = output
     scene.view_settings.view_transform = "Standard"
     scene.view_settings.exposure = 1.0 if has_appearance else 0.0
@@ -148,6 +164,10 @@ def main():
     args = sys.argv[sys.argv.index("--") + 1:]
     if args == ["probe"]:
         print("THUMBRELLA_FORMATS=" + json.dumps(supported_formats()), flush=True)
+        # Report the bundled addon set that factory startup actually enabled.
+        # This is audit information for `tier3 check`, not used for rendering.
+        print("THUMBRELLA_ADDONS=" + json.dumps(sorted(bpy.context.preferences.addons.keys())),
+              flush=True)
     elif len(args) == 4 and args[0] == "render":
         render(*args[1:])
     else:

@@ -603,11 +603,10 @@ async fn run_result(
     key: Option<String>,
     runtime: Arc<Runtime>,
 ) {
-    use crate::source::CacheHints;
     use crate::{ThumbCook, cook::InputSpec};
     use futures::stream::{FuturesUnordered, StreamExt};
 
-    let cache = cache_str.as_deref().and_then(CacheHints::decode);
+    let (cache, cache_disabled) = crate::request::decode_cache_field(cache_str.as_deref());
     let key = normalize_cli_key(key);
 
     let mut pool = FuturesUnordered::new();
@@ -619,6 +618,7 @@ async fn run_result(
             cache: cache.clone(),
             allow_local: is_local,
             key: key.clone(),
+            cache_disabled,
         };
         pool.push(ThumbCook::from_input(input, Arc::clone(&runtime)).run());
     }
@@ -667,6 +667,7 @@ async fn run_thumb(input: String, output: String, key: Option<String>, runtime: 
         cache: None,
         allow_local: is_local,
         key: normalize_cli_key(key),
+        cache_disabled: false,
     };
 
     let cook = ThumbCook::from_input(input_spec, Arc::clone(&runtime));

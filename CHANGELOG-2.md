@@ -6,6 +6,7 @@
 - Add support for .abc and .blend geometry files
 - User defined 'key' for each requested url
 - Return key for each request, optionally generated from url
+- Cache value of 'uncached' to disable cache per request
 
 ## 2.2.0 - 2026/10/28
 

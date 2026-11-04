@@ -1153,6 +1153,7 @@ pub async fn thumb(
         cache: None,
         allow_local: runtime.allow_local,
         key: None,
+        cache_disabled: false,
     };
     let (result, _trace, mut after) =
         ThumbCook::<PlatformStream>::from_input(input, runtime).run().await;
@@ -1210,7 +1211,7 @@ pub async fn batch(
 
     let mut jobs = Vec::with_capacity(req.items.len());
     for (idx, input) in req.items.into_iter().enumerate() {
-        let (requested_url, cache, key) = input.into_parts();
+        let (requested_url, cache, key, cache_disabled) = input.into_parts();
         let url = match normalize_url(requested_url.clone(), runtime.allow_local) {
             Ok(u) => u,
             Err(msg) => {
@@ -1232,6 +1233,7 @@ pub async fn batch(
                 cache,
                 allow_local: runtime.allow_local,
                 key,
+                cache_disabled,
             },
         ));
     }

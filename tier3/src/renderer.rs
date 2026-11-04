@@ -15,7 +15,7 @@
 //! | Video | libav | (same as tier 2) |
 //! | Vector | resvg | (same as tier 2) + optional inkscape subprocess |
 //! | Document | (none) | subprocess: pdftoppm (PDF first page) |
-//! | Geometry | (none) | subprocess: f3d / usdrecord |
+//! | Geometry | (none) | subprocess: blender (USD/ABC/BLEND), f3d (mesh/glTF/OBJ/FBX) |
 //!
 //! # Dispatch order
 //!
@@ -1234,7 +1234,7 @@ fn run_blender_geometry_handler(
     reader: &mut dyn tier1::ReadSeek,
     ext: &str,
 ) -> Result<RenderOutput, String> {
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
     reader.seek(std::io::SeekFrom::Start(0)).map_err(|e| format!("rewind input: {e}"))?;
     let arena = ScratchArena::new(100 * 1024 * 1024).map_err(|e| format!("scratch arena: {e}"))?;
@@ -1245,30 +1245,21 @@ fn run_blender_geometry_handler(
         .stage_bytes(BLENDER_RENDER_PY.as_bytes(), "blender_render.py")
         .map_err(|e| format!("stage Blender script: {e}"))?;
     let image = arena.output_path("png");
-    let mut cmd = if std::env::var_os("DISPLAY").is_some() {
-        Command::new("blender")
-    } else {
-        let mut cmd = Command::new("xvfb-run");
-        cmd.args(["-a", "-s", "-screen 0 1600x1200x24", "blender"]);
-        cmd
-    };
-    cmd.args([
-        "--background", "--factory-startup", "--disable-autoexec", "--threads", "8",
-        "--python-exit-code", "1", "--python",
-    ])
-    .arg(script)
-    .args(["--", "render"])
-    .arg(input)
-    .arg(&image)
-    .arg(ext)
-    .env("LIBGL_ALWAYS_SOFTWARE", "1")
-    .env("MESA_LOADER_DRIVER_OVERRIDE", "llvmpipe")
-    .env("GALLIUM_DRIVER", "llvmpipe")
-    .env("LP_NUM_THREADS", "8")
-    .env("CUDA_VISIBLE_DEVICES", "")
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
-    let output = crate::sandbox::output(&mut cmd, &crate::sandbox::default_strict())
+
+    // Shared command builder applies the security flags, environment
+    // containment, and software-rendering settings used by the probe too.
+    let mut cmd = crate::blender::command(&script, &arena)
+        .map_err(|e| format!("prepare Blender command: {e}"))?;
+    cmd.args(["--", "render"])
+        .arg(input)
+        .arg(&image)
+        .arg(ext)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    // Same privilege restrictions as other subprocess renderers, with a
+    // longer wall-clock budget for Blender startup and llvmpipe rendering.
+    let output = crate::sandbox::output(&mut cmd, &crate::sandbox::blender())
         .map_err(|e| format!("run Blender: {e}"))?;
     dump_subprocess("blender", &output.status, &output.stdout, &output.stderr);
     if !output.status.success() {
@@ -1279,9 +1270,12 @@ fn run_blender_geometry_handler(
     let has_appearance = parse_blender_appearance(&output.stdout)?;
     let bytes = arena.read_output(&image).map_err(|e| format!("read Blender output: {e}"))?;
     let img = image::load_from_memory(&bytes).map_err(|e| format!("decode Blender PNG: {e}"))?;
+    // Crop before grading: the grade is position-independent, so this avoids
+    // a full-frame pass over transparent padding.
+    let img = autocrop_transparent(img);
     let img = apply_blender_appearance(img, has_appearance);
     Ok(RenderOutput {
-        image: autocrop_transparent(img),
+        image: img,
         renderer: Some("blender".into()),
         codec: None,
         video_seek_secs: None,
@@ -1514,7 +1508,8 @@ fn run_f3d_geometry_handler(
         #[allow(clippy::suspicious_command_arg_space)]
         c.arg("-a")
             .arg("-s")
-            .arg("-screen 0 1600x1200x24")
+            // 512x512 render; keep the shadow framebuffer small.
+            .arg("-screen 0 800x600x24")
             .arg("f3d")
             .arg(&input_path)
             .arg(format!("--output={}", output_path.display()))

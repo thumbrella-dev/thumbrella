@@ -55,6 +55,30 @@ pub fn default_strict() -> SandboxConfig {
     SandboxConfig::default()
 }
 
+/// Limits tailored to Blender renders.
+///
+/// Blender needs a longer startup/render budget than the generic 20 s
+/// subprocess default (cold llvmpipe shader compilation is slow), and it
+/// keeps more descriptors open than a simple CLI tool (X11 client, GL,
+/// staging files).  Every privilege restriction from [`default_strict`]
+/// still applies: `NO_NEW_PRIVS`, capability drop, core dumps disabled, and
+/// a hard file-descriptor cap.
+///
+/// The 30 s ceiling matches the tier-1 handoff client's read timeout.  A
+/// thumbnail taking longer is already too slow to deliver, so the cap stays
+/// a ceiling rather than something worth waiting past.
+///
+/// Address-space limiting is intentionally left off (`max_memory: 0`) because
+/// llvmpipe and imported scenes can spike unpredictably.  Operators who want
+/// a cap should set one explicitly via a container memory limit.
+pub fn blender() -> SandboxConfig {
+    SandboxConfig {
+        timeout: Duration::from_secs(30),
+        max_fds: 256,
+        ..SandboxConfig::default()
+    }
+}
+
 /// Run a configured command and enforce its wall-clock deadline.
 ///
 /// Captured stdout and stderr are drained concurrently so a noisy renderer

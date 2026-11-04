@@ -246,6 +246,16 @@ pub struct InputSpec {
     /// source under multiple independent cache entries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// When true, bypass all cache activity for this request: no debounce or
+    /// durable lookups, no freshness short-circuit, and no result storage,
+    /// pin creation, or debounce publication.
+    ///
+    /// Set by the intake layer when the caller sends the `uncached` sentinel in
+    /// the `cache` field.  Named to distinguish it from
+    /// [`CacheHints::no_cache`](crate::source::CacheHints::no_cache), which is
+    /// an upstream `Cache-Control: no-cache` directive (revalidate before reuse).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cache_disabled: bool,
 }
 
 impl InputSpec {
@@ -763,12 +773,15 @@ impl<S: HttpStream> ThumbCook<S> {
                 ),
                 properties: self.client_properties(),
                 placeholder: self.out_placeholder.clone().unwrap_or_default(),
-                cache: self
-                    .src
-                    .cache_hints
-                    .as_ref()
-                    .map(|h| h.encode(self.runtime.cache_default_ttl_secs))
-                    .unwrap_or_default(),
+                cache: if self.input.cache_disabled {
+                    String::new()
+                } else {
+                    self.src
+                        .cache_hints
+                        .as_ref()
+                        .map(|h| h.encode(self.runtime.cache_default_ttl_secs))
+                        .unwrap_or_default()
+                },
             }),
         }
     }
@@ -801,12 +814,15 @@ impl<S: HttpStream> ThumbCook<S> {
                 ),
                 properties: self.client_properties(),
                 placeholder: slug.to_string(),
-                cache: self
-                    .src
-                    .cache_hints
-                    .as_ref()
-                    .map(|h| h.encode(self.runtime.cache_default_ttl_secs))
-                    .unwrap_or_default(),
+                cache: if self.input.cache_disabled {
+                    String::new()
+                } else {
+                    self.src
+                        .cache_hints
+                        .as_ref()
+                        .map(|h| h.encode(self.runtime.cache_default_ttl_secs))
+                        .unwrap_or_default()
+                },
             }),
         }
     }
@@ -969,6 +985,11 @@ impl<S: HttpStream> ThumbCook<S> {
         let cache_key = self.ctx_cache_key.clone().unwrap_or(identity);
         if !self.ctx_handoff {
             self.src.cache_key = Some(cache_key.clone());
+        }
+
+        // A caller that disabled caching skips every lookup.  The source is
+        // still fetched below; only the cache fast paths are bypassed.
+        if !self.ctx_handoff && !self.input.cache_disabled {
             let debounce_key = self.ctx_debounce_key.as_deref().unwrap_or(&cache_key);
             let (result, leader) =
                 self.runtime.cache.debounce_lookup(debounce_key, self.input.cache.as_ref()).await;
@@ -987,16 +1008,16 @@ impl<S: HttpStream> ThumbCook<S> {
                 self.out_duration = t0.elapsed().as_secs_f64();
                 return true;
             }
+
+            if self.input.cache.as_ref().is_some_and(|h| h.is_fresh()) {
+                self.src.cache_hints = self.input.cache.clone();
+                self.status = CookStatus::Fresh;
+                self.out_duration = t0.elapsed().as_secs_f64();
+                return true;
+            }
         }
 
-        if self.input.cache.as_ref().is_some_and(|h| h.is_fresh()) {
-            self.src.cache_hints = self.input.cache.clone();
-            self.status = CookStatus::Fresh;
-            self.out_duration = t0.elapsed().as_secs_f64();
-            return true;
-        }
-
-        let pre_cached = if self.ctx_handoff {
+        let pre_cached = if self.ctx_handoff || self.input.cache_disabled {
             None
         } else {
             self.runtime.cache.check_entry(&cache_key, self.default_pin_ttl).await
@@ -1115,6 +1136,7 @@ impl<S: HttpStream> ThumbCook<S> {
             if self.status == CookStatus::Complete {
                 self.out_duration = t0.elapsed().as_secs_f64();
                 if !self.ctx_handoff
+                    && !self.input.cache_disabled
                     && let Some(ref key) = self.src.cache_key.clone()
                 {
                     // Override freshness so the client knows to retry
@@ -1154,6 +1176,7 @@ impl<S: HttpStream> ThumbCook<S> {
             self.tel_deliver_secs = t_step.elapsed().as_secs_f64();
             self.out_duration = t0.elapsed().as_secs_f64();
             if !self.ctx_handoff
+                && !self.input.cache_disabled
                 && self.status == CookStatus::Complete
                 && let Some(ref key) = self.src.cache_key.clone()
             {
@@ -1216,6 +1239,7 @@ impl<S: HttpStream> ThumbCook<S> {
                     self.tel_deliver_secs = t_step.elapsed().as_secs_f64();
                     self.out_duration = t0.elapsed().as_secs_f64();
                     if !self.ctx_handoff
+                        && !self.input.cache_disabled
                         && self.status == CookStatus::Complete
                         && let Some(ref key) = self.src.cache_key.clone()
                     {
@@ -1357,6 +1381,7 @@ impl<S: HttpStream> ThumbCook<S> {
                             // cache authority; handoffs from a higher tier are
                             // skipped (ctx_handoff = true).
                             if !self.ctx_handoff
+                                && !self.input.cache_disabled
                                 && let Some(ref key) = self.src.cache_key.clone()
                             {
                                 let result = self.to_result();
@@ -1477,6 +1502,7 @@ impl<S: HttpStream> ThumbCook<S> {
         #[cfg(feature = "native")]
         if self.debounce_result.is_none()
             && !self.ctx_handoff
+            && !self.input.cache_disabled
             && self.default_pin_ttl > 0
             && result.status == ResultStatus::Success
             && let Some(key) = self.src.cache_key.as_deref()
@@ -1494,6 +1520,7 @@ impl<S: HttpStream> ThumbCook<S> {
         }
         if self.debounce_result.is_none()
             && !self.ctx_defer_debounce
+            && !self.input.cache_disabled
             && let Some(ref key) = self.src.cache_key
         {
             if self.ctx_handoff {

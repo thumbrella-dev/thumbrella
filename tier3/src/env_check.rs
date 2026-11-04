@@ -246,6 +246,11 @@ mod blender_tests {
         );
         assert!(parse_blender_formats(b"Blender").is_err());
         assert!(parse_blender_formats(b"THUMBRELLA_FORMATS=not-json").is_err());
+        assert_eq!(
+            parse_blender_addons(b"THUMBRELLA_ADDONS=[\"cycles\",\"pose_library\"]\n").unwrap(),
+            vec!["cycles".to_string(), "pose_library".to_string()]
+        );
+        assert!(parse_blender_addons(b"Blender").is_err());
     }
 
     #[test]
@@ -286,28 +291,36 @@ fn parse_blender_formats(stdout: &[u8]) -> Result<BTreeSet<String>, String> {
     serde_json::from_str(json).map_err(|e| format!("invalid Blender format probe output: {e}"))
 }
 
+fn parse_blender_addons(stdout: &[u8]) -> Result<Vec<String>, String> {
+    let text = std::str::from_utf8(stdout).map_err(|e| format!("invalid probe output: {e}"))?;
+    let json = text
+        .lines()
+        .find_map(|line| line.strip_prefix("THUMBRELLA_ADDONS="))
+        .ok_or("missing Blender addon probe output")?;
+    serde_json::from_str(json).map_err(|e| format!("invalid Blender addon probe output: {e}"))
+}
+
 fn probe_blender(report: &mut EnvReport) {
     let method = ProbeMethod::Executable {
         binary: "blender".into(),
         check_arg: "format probe".into(),
     };
-    let result = (|| -> Result<(String, BTreeSet<String>), String> {
+    let result = (|| -> Result<(String, BTreeSet<String>, Vec<String>), String> {
         let path = which::which("blender").map_err(|e| format!("blender not found: {e}"))?;
         let arena = crate::scratch::ScratchArena::new(1024 * 1024)
             .map_err(|e| format!("probe scratch: {e}"))?;
         let script = arena
             .stage_bytes(include_str!("blender_render.py").as_bytes(), "blender_render.py")
             .map_err(|e| format!("stage probe: {e}"))?;
-        let mut cmd = std::process::Command::new(&path);
-        cmd.args([
-            "--background", "--factory-startup", "--disable-autoexec", "--python-exit-code", "1",
-            "--python",
-        ])
-        .arg(script)
-        .args(["--", "probe"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-        let output = crate::sandbox::output(&mut cmd, &crate::sandbox::default_strict())
+        // Shared builder keeps the probe's security flags and environment
+        // containment identical to the render path.  The probe does not need
+        // an X display, so it runs Blender directly instead of via xvfb-run.
+        let mut cmd = crate::blender::probe_command(&script, &arena)
+            .map_err(|e| format!("prepare Blender probe: {e}"))?;
+        cmd.args(["--", "probe"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let output = crate::sandbox::output(&mut cmd, &crate::sandbox::blender())
             .map_err(|e| format!("Blender probe: {e}"))?;
         if !output.status.success() {
             return Err(format!(
@@ -316,10 +329,19 @@ fn probe_blender(report: &mut EnvReport) {
                 String::from_utf8_lossy(&output.stderr).trim()
             ));
         }
-        Ok((path.display().to_string(), parse_blender_formats(&output.stdout)?))
+        Ok((
+            path.display().to_string(),
+            parse_blender_formats(&output.stdout)?,
+            parse_blender_addons(&output.stdout)?,
+        ))
     })();
     let (available, details, unavailable_reason) = match result {
-        Ok((path, formats)) => {
+        Ok((path, formats, addons)) => {
+            // Addon names are diagnostic noise for `check`/`formats`; keep them
+            // out of the backend details and only emit them in raw log mode.
+            if matches!(std::env::var("TBR_LOG").as_deref(), Ok("full")) {
+                eprintln!("[tier3] blender addons: {}", addons.join(", "));
+            }
             let detail = format!("{path}: {}", formats.iter().cloned().collect::<Vec<_>>().join(", "));
             report.blender_formats = formats;
             (true, Some(detail), None)

@@ -164,6 +164,7 @@ async fn run(url: &str, runtime: Arc<Runtime>, client: Option<CacheHints>) -> Th
             cache: client,
             allow_local: false,
             key: None,
+            cache_disabled: false,
         },
         runtime,
     );
@@ -1045,6 +1046,7 @@ async fn debounce_precedes_client_and_durable_checks_and_does_not_slide() {
             cache: Some(hints(Some("\"client\""), true)),
             allow_local: false,
             key: None,
+            cache_disabled: false,
         },
         rt.clone(),
     );

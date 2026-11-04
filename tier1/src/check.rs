@@ -604,8 +604,12 @@ fn detect_container_image() -> Option<String> {
     }
 
     // 3. Check container presence heuristics.
+    //    Docker creates `/.dockerenv`; Podman creates `/run/.containerenv`.
+    //    On cgroup v2 `/proc/1/cgroup` is just `0::/`, so the marker files are
+    //    the only reliable signal.
     let dockerenv = std::path::Path::new("/.dockerenv").exists();
-    let containerenv = std::path::Path::new("/.containerenv").exists();
+    let containerenv = std::path::Path::new("/.containerenv").exists()
+        || std::path::Path::new("/run/.containerenv").exists();
     let in_cgroup = std::fs::read_to_string("/proc/1/cgroup")
         .map(|s| {
             s.contains("docker")
