@@ -60,6 +60,11 @@ enum Command {
         /// When omitted, the canonical form of the source URL is used.
         #[arg(long, value_name = "KEY")]
         key: Option<String>,
+
+        /// Optionally provide an encoded cache string from a previous request.
+        /// Send `uncached` to bypass the cache for this request.
+        #[arg(long, value_name = "CACHE")]
+        cache: Option<String>,
     },
 
     /// Thumbnail one or more URLs and print result metadata as JSON.
@@ -72,10 +77,8 @@ enum Command {
         #[arg(required = true)]
         urls: Vec<String>,
 
-        /// Previously returned cache hints JSON (from `ThumbResult.cache`).
-        ///
-        /// When supplied, enables conditional fetch and client-side freshness
-        /// checks.  Pass the value of the `cache` field from a prior result.
+        /// Optionally provide an encoded cache string from a previous request.
+        /// Send `uncached` to bypass the cache for this request.
         #[arg(long)]
         cache: Option<String>,
 
@@ -206,8 +209,8 @@ where
 
     match cli.command {
         Command::Serve => run_server(runtime.unwrap()).await,
-        Command::Thumb { input, output, key } => {
-            run_thumb(input, output, key, runtime.unwrap()).await;
+        Command::Thumb { input, output, key, cache } => {
+            run_thumb(input, output, key, cache, runtime.unwrap()).await;
         }
         Command::Result { urls, cache, raw, key } => {
             run_result(urls, cache, raw, key, runtime.unwrap()).await;
@@ -658,16 +661,23 @@ async fn run_result(
 /// `input` is a URL or a local filesystem path (promoted to a `file://` URL).
 /// Exits non-zero when no thumbnail can be produced or the output cannot be
 /// written.  Placeholder results (no real thumbnail) are treated as failures.
-async fn run_thumb(input: String, output: String, key: Option<String>, runtime: Arc<Runtime>) {
+async fn run_thumb(
+    input: String,
+    output: String,
+    key: Option<String>,
+    cache_str: Option<String>,
+    runtime: Arc<Runtime>,
+) {
     use crate::{ThumbCook, cook::InputSpec};
 
+    let (cache, cache_disabled) = crate::request::decode_cache_field(cache_str.as_deref());
     let is_local = !input.contains("://") || input.starts_with("file://");
     let input_spec = InputSpec {
         url: promote_url(&input),
-        cache: None,
+        cache,
         allow_local: is_local,
         key: normalize_cli_key(key),
-        cache_disabled: false,
+        cache_disabled,
     };
 
     let cook = ThumbCook::from_input(input_spec, Arc::clone(&runtime));
