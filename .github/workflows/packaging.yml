@@ -89,6 +89,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      - name: Compute image metadata
+        id: meta
+        run: |
+          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       - name: Build and push Docker image
         id: build
         uses: docker/build-push-action@v7
@@ -98,7 +104,10 @@ jobs:
           provenance: true
           context: docker-context
           file: release/dockerhub/Dockerfile
-          build-args: VERSION=${{ needs.version.outputs.version }}
+          build-args: |
+            VERSION=${{ needs.version.outputs.version }}
+            REVISION=${{ steps.meta.outputs.revision }}
+            BUILD_DATE=${{ steps.meta.outputs.build_date }}
           tags: |
             ${{ env.IMAGE_NAME }}:${{ needs.version.outputs.version }}
             ${{ inputs.latest && format('{0}:latest', env.IMAGE_NAME) || '' }}

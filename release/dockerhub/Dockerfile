@@ -4,13 +4,41 @@
 FROM lscr.io/linuxserver/ffmpeg:latest
 
 ARG VERSION=dev
+ARG REVISION=unknown
+ARG BUILD_DATE=unknown
 
-LABEL org.opencontainers.image.title="Thumbrella"
-LABEL org.opencontainers.image.description="Self-hosted online thumbnailer"
-LABEL org.opencontainers.image.url="https://thumbrella.dev"
-LABEL org.opencontainers.image.source="https://github.com/thumbrella-dev/thumbrella"
-LABEL org.opencontainers.image.version="${VERSION}"
-LABEL org.opencontainers.image.licenses="Apache-2.0"
+# Labels: this image derives from lscr.io/linuxserver/ffmpeg, whose labels are
+# inherited and CANNOT be removed in a child Dockerfile, only overridden. We
+# override the ones that should describe Thumbrella and deliberately leave
+# build_version untouched so the upstream linuxserver version/build date is
+# still visible. base.name records the upstream this image is built on.
+LABEL org.opencontainers.image.title="Thumbrella" \
+      org.opencontainers.image.description="Self-hosted online thumbnailer" \
+      org.opencontainers.image.url="https://thumbrella.dev" \
+      org.opencontainers.image.documentation="https://thumbrella.dev/docs/" \
+      org.opencontainers.image.source="https://github.com/thumbrella-dev/thumbrella" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}" \
+      org.opencontainers.image.ref.name="${REVISION}" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.authors="Thumbrella" \
+      org.opencontainers.image.vendor="Thumbrella" \
+      org.opencontainers.image.base.name="lscr.io/linuxserver/ffmpeg:latest" \
+      maintainer="Thumbrella <pete@thumbrella.dev>"
+
+# Optional external renderers used by tier3. Install only the two CLI packages
+# and their hard dependencies. --no-install-recommends keeps out the heavy
+# optional pull-ins (ghostscript, dbus, cups, avahi, X libs, fonts, poppler-data)
+# that nearly double the package count. Then drop the apt indexes and cached
+# .debs so this layer stays small and does not pollute the image.
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        --no-install-recommends --no-install-suggests \
+        graphicsmagick \
+        poppler-utils && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /root
 

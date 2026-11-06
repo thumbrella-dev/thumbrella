@@ -2,6 +2,8 @@
 
 ## Development
 
+- Docker hub container gets more formats, like pdf, jp2, and more
+
 ## 2.3.1 - 2026/11/04
 
 Quick fixes for improved 3d geometry thumbnails

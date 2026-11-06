@@ -6,15 +6,6 @@
 online gallery. Supporting 100+ formats: photos, video, documents, 3D
 models, and other media.
 
-Run the server with one command and zero config. The open-source server
-comes with all the features and functionality. Then connect with 
-[client packages](https://thumbrella.dev/docs/client/) for the browser or any 
-of the other supported languages. 
-
-Also check out the [Thumbrella Cloud](https://thumbrella.dev/docs/cloud/) for a
-distributed server and caching system. This genuine free tier is built for real
-every day projects; connected in two clicks.
-
 
 ## Quickstart
 
@@ -51,8 +42,8 @@ by default.
 (macOS still in development)
 
 - npx `npx @thumbrella/server serve`
-
-Or fetch the Rust source and build your own server.
+- winget `winget Thumbrella.Server`
+- cargo `cargo binstall thumbrella --git https://github.com/thumbrella-dev/thumbrella` 
 
 ### Cloud Server
 

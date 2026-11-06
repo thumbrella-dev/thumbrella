@@ -36,6 +36,8 @@ fi
 
 WORKSPACE=".."
 VERSION="${VERSION:-$(sed -n 's/^version = "\(.*\)".*/\1/p' "${WORKSPACE}/Cargo.toml" | head -1)}"
+REVISION="${REVISION:-$(git -C "${WORKSPACE}" rev-parse HEAD 2>/dev/null || echo unknown)}"
+BUILD_DATE="${BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 
 DOCKPATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -54,7 +56,11 @@ cp "${BINARY}" "${DOCKPATH}/thumbrella"
 # Create image
 #
 
-${DOCKER} build --format docker --pull --build-arg "VERSION=${VERSION}" -t "${DEVIMAGE}" "${DOCKPATH}"
+${DOCKER} build --format docker --pull \
+    --build-arg "VERSION=${VERSION}" \
+    --build-arg "REVISION=${REVISION}" \
+    --build-arg "BUILD_DATE=${BUILD_DATE}" \
+    -t "${DEVIMAGE}" "${DOCKPATH}"
 
 
 # Push versioned image

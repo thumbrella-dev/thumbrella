@@ -117,11 +117,16 @@ tar -xzf "$archive_path" -C "$stage_dir"
 [[ -f "$stage_dir/README.md" ]] || die "release archive did not contain README.md"
 [[ -f "$stage_dir/LICENSE" ]] || die "release archive did not contain LICENSE"
 
+revision="$(git -C "$release_repo" rev-parse HEAD 2>/dev/null || printf 'unknown')"
+build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
 build_args=(
   podman build
   --format docker
   --pull
   --build-arg "VERSION=$version"
+  --build-arg "REVISION=$revision"
+  --build-arg "BUILD_DATE=$build_date"
   -t "$image:$version"
 )
 if [[ "$publish_channel" -eq 1 ]]; then
