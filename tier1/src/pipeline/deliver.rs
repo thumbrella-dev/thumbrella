@@ -46,6 +46,7 @@ pub async fn deliver<S: HttpStream>(cook: &mut ThumbCook<S>) {
         config.fill_budget,
         pixel_art,
     );
+    buf.apply_brightness(config.brightness_gain);
     if cook.page_edge_thickness >= 2 {
         buf.draw_page_edges(cook.page_edge_thickness);
     }
@@ -153,6 +154,27 @@ impl ProcessBuffer {
             }
         };
         Self { inner }
+    }
+
+    /// Brighten source colours without changing alpha or the canvas background.
+    pub(super) fn apply_brightness(&mut self, gain: f32) {
+        let brighten = |channels: &mut [u8]| {
+            for channel in channels {
+                *channel = (*channel as f32 * gain).round().clamp(0.0, 255.0) as u8;
+            }
+        };
+        match &mut self.inner {
+            BufInner::Rgb(img) => {
+                for pixel in img.pixels_mut() {
+                    brighten(&mut pixel.0);
+                }
+            }
+            BufInner::Rgba(img) => {
+                for pixel in img.pixels_mut() {
+                    brighten(&mut pixel.0[..3]);
+                }
+            }
+        }
     }
 
     fn dimensions(&self) -> (u32, u32) {
@@ -709,6 +731,41 @@ fn composite_rgba_onto(rgba: &image::RgbaImage, dst: &mut image::RgbImage, ox: u
 mod tests {
     use super::{BufInner, ProcessBuffer};
     use image::{DynamicImage, Rgb, RgbImage, Rgba, RgbaImage};
+
+    #[test]
+    fn brightness_boost_preserves_alpha_and_clamps_highlights() {
+        let mut rgb = ProcessBuffer::from_dynamic(DynamicImage::ImageRgb8(
+            RgbImage::from_pixel(1, 1, Rgb([0, 100, 250])),
+        ));
+        rgb.apply_brightness(1.05);
+        let BufInner::Rgb(rgb) = rgb.inner else {
+            panic!("expected RGB");
+        };
+        assert_eq!(rgb.get_pixel(0, 0).0, [0, 105, 255]);
+
+        let mut rgba = ProcessBuffer::from_dynamic(DynamicImage::ImageRgba8(
+            RgbaImage::from_pixel(1, 1, Rgba([100, 200, 255, 128])),
+        ));
+        rgba.apply_brightness(1.05);
+        let BufInner::Rgba(rgba) = rgba.inner else {
+            panic!("expected RGBA");
+        };
+        assert_eq!(rgba.get_pixel(0, 0).0, [105, 210, 255, 128]);
+    }
+
+    #[test]
+    fn brightness_boost_does_not_change_canvas_background() {
+        let mut buf = ProcessBuffer::from_dynamic(DynamicImage::ImageRgb8(
+            RgbImage::from_pixel(1, 1, Rgb([100, 100, 100])),
+        ));
+        buf.apply_brightness(1.05);
+        buf.place_on_canvas(3, 3, [80, 90, 100], None);
+        let BufInner::Rgb(img) = buf.inner else {
+            panic!("expected RGB");
+        };
+        assert_eq!(img.get_pixel(0, 0).0, [80, 90, 100]);
+        assert_eq!(img.get_pixel(1, 1).0, [105, 105, 105]);
+    }
 
     /// Canvas dimensions after the canonical fit.
     fn fitted(img: RgbaImage) -> (u32, u32) {

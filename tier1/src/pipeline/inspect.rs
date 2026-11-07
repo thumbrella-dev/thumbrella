@@ -126,10 +126,32 @@ fn sniff(bytes: &[u8], url: &str, content_type: Option<&str>) -> (FileKind, Stri
     {
         return (FileKind::Image, "image/openraster".into(), "ora".into());
     }
+    if bytes.starts_with(b"PK\x03\x04")
+        && (bytes.get(30..38) == Some(b"mimetype")
+            && bytes.get(38..81) == Some(b"application/vnd.oasis.opendocument.graphics")
+            || content_type.is_some_and(|ct| {
+                ct.split(';').next().unwrap_or(ct).trim()
+                    .eq_ignore_ascii_case("application/vnd.oasis.opendocument.graphics")
+            }))
+    {
+        return (FileKind::Vector, "application/vnd.oasis.opendocument.graphics".into(), "odg".into());
+    }
 
     if let Some(t) = infer::get(bytes) {
         let infer_ext = canonical_extension(t.extension());
         let mut infer_kind = infer_matcher_to_kind(t.matcher_type());
+        if matches!(infer_ext.as_str(), "emf" | "wmf") {
+            infer_kind = FileKind::Vector;
+        }
+
+        // The XLS/XLSX signatures do not distinguish spreadsheet templates,
+        // macro-enabled files, or Excel's binary workbook variants.
+        if infer_ext == "xlsx"
+            && let Some(ext) = &url_ext
+            && matches!(ext.as_str(), "xlsm" | "xlsb" | "xltx" | "xltm" | "xlt" | "xlm" | "xlw")
+        {
+            return (FileKind::Document, ext_to_mime(ext).to_string(), ext.clone());
+        }
 
         // infer classifies HTML as MatcherType::Text, but HTML is a document.
         if matches!(t.mime_type(), "text/html" | "application/xhtml+xml") {
@@ -211,6 +233,69 @@ fn sniff(bytes: &[u8], url: &str, content_type: Option<&str>) -> (FileKind, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn odg_is_a_vector_by_signature_extension_or_mime() {
+        let mime = "application/vnd.oasis.opendocument.graphics";
+        let mut signature = b"PK\x03\x04".to_vec();
+        signature.resize(30, 0);
+        signature.extend_from_slice(b"mimetype");
+        signature.extend_from_slice(mime.as_bytes());
+        for (bytes, url, content_type) in [
+            (signature.as_slice(), "https://example.com/drawing", None),
+            (b"PK\x03\x04".as_slice(), "https://example.com/drawing.odg", None),
+            (b"PK\x03\x04".as_slice(), "https://example.com/drawing", Some(mime)),
+            (b"unknown".as_slice(), "https://example.com/drawing", Some(mime)),
+        ] {
+            let (kind, detected_mime, ext) = sniff(bytes, url, content_type);
+            assert_eq!((kind, detected_mime.as_str(), ext.as_str()), (FileKind::Vector, mime, "odg"));
+            assert_eq!(dispatch::route(kind, Some(&ext)).tier, 3);
+        }
+    }
+
+    #[test]
+    fn new_office_and_vector_formats_detect_and_route() {
+        let zip = b"PK\x03\x04\0\0\0\0";
+        let ole = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1\0\0\0\0";
+        for (ext, bytes) in [
+            ("pages", zip.as_slice()), ("numbers", zip.as_slice()), ("key", zip.as_slice()),
+            ("xlsm", zip.as_slice()), ("xlsb", zip.as_slice()), ("xltx", zip.as_slice()),
+            ("xltm", zip.as_slice()), ("xlt", ole.as_slice()), ("xlm", ole.as_slice()),
+            ("xlw", ole.as_slice()),
+        ] {
+            let (kind, _, detected) = sniff(bytes, &format!("https://example.com/file.{ext}"), None);
+            assert_eq!((kind, detected.as_str()), (FileKind::Document, ext), "{ext}");
+            assert_eq!(dispatch::route(kind, Some(&detected)).tier, 3, "{ext}");
+        }
+        let mut xlsx_signature = vec![0; 128];
+        xlsx_signature[..4].copy_from_slice(b"PK\x03\x04");
+        xlsx_signature[30..33].copy_from_slice(b"xl/");
+        for ext in ["xlsm", "xlsb", "xltx", "xltm"] {
+            let (kind, _, detected) =
+                sniff(&xlsx_signature, &format!("https://example.com/file.{ext}"), None);
+            assert_eq!((kind, detected.as_str()), (FileKind::Document, ext), "{ext}");
+        }
+        for (mime, ext) in [
+            ("image/emf", "emf"), ("image/x-emf", "emf"),
+            ("image/wmf", "wmf"), ("image/x-wmf", "wmf"),
+        ] {
+            let (kind, _, detected) = sniff(b"unrecognized", "https://example.com/file", Some(mime));
+            assert_eq!((kind, detected.as_str()), (FileKind::Vector, ext));
+            assert_eq!(dispatch::route(kind, Some(&detected)).tier, 3);
+        }
+        for (mime, ext) in [
+            ("application/vnd.apple.pages", "pages"),
+            ("application/vnd.apple.numbers", "numbers"),
+            ("application/vnd.apple.keynote", "key"),
+            ("application/vnd.ms-excel.sheet.macroenabled.12", "xlsm"),
+            ("application/vnd.ms-excel.sheet.binary.macroenabled.12", "xlsb"),
+            ("application/vnd.ms-excel.template.macroenabled.12", "xltm"),
+            ("application/vnd.openxmlformats-officedocument.spreadsheetml.template", "xltx"),
+        ] {
+            let (kind, _, detected) = sniff(b"unrecognized", "https://example.com/file", Some(mime));
+            assert_eq!((kind, detected.as_str()), (FileKind::Document, ext), "{mime}");
+        }
+    }
 
     #[test]
     fn blender_geometry_extensions_keep_their_format() {
@@ -752,7 +837,6 @@ pub fn canonical_extension(raw: &str) -> String {
         // documents
         "doc" => "docx",
         "xls" => "xlsx",
-        "xlsm" => "xlsx",
         "ppt" => "pptx",
         // vector
         "svg" | "svgz" => "svg",
@@ -804,7 +888,11 @@ fn infer_matcher_to_kind(mt: infer::MatcherType) -> FileKind {
 
 fn mime_to_kind(mime: &str, ext: &str) -> FileKind {
     if mime.starts_with("image/") {
-        return if ext == "svg" { FileKind::Vector } else { FileKind::Image };
+        return if matches!(ext, "svg" | "emf" | "wmf") {
+            FileKind::Vector
+        } else {
+            FileKind::Image
+        };
     }
     if mime.starts_with("video/") {
         return FileKind::Video;
@@ -863,13 +951,14 @@ fn ext_to_kind(ext: &str) -> FileKind {
         // Camera-raw formats (TIFF-based containers).
         "dng" | "cr2" | "nef" | "arw" | "orf" | "rw2" | "pef" | "srw" | "3fr" | "mef" | "rwl"
         | "raf" | "fff" | "iiq" | "raw" => FileKind::Image,
-        "svg" | "emf" | "wmf" => FileKind::Vector,
+        "svg" | "emf" | "wmf" | "odg" => FileKind::Vector,
         "mp4" | "mov" | "mkv" | "avi" | "webm" | "mpeg" | "ogv" | "flv" | "ts" | "3gp" | "wmv"
         | "m2ts" | "mxf" | "av1" => FileKind::Video,
         "mp3" | "ogg" | "flac" | "wav" | "m4a" | "aac" | "midi" | "opus" | "oga" | "weba" | "wma"
         | "aiff" => FileKind::Audio,
-        "pdf" | "docx" | "xlsx" | "pptx" | "odt" | "doc" | "xls" | "ppt" | "odp" | "ods" | "epub"
-        | "rtf" | "html" | "xhtml" => FileKind::Document,
+        "pdf" | "docx" | "xlsx" | "pptx" | "odt" | "doc" | "xls" | "ppt" | "odp" | "ods"
+        | "pages" | "numbers" | "key" | "xlsm" | "xlsb" | "xltx" | "xltm" | "xlt" | "xlm"
+        | "xlw" | "epub" | "rtf" | "html" | "xhtml" => FileKind::Document,
         "usdz" | "usd" | "usda" | "usdc" | "abc" | "blend" | "glb" | "gltf" | "obj" | "stl" | "fbx"
         | "dae" | "dxf" | "off" | "3ds" | "gml" | "ply" | "pts" | "vrml" | "vtk" | "vtu" | "vtp"
         | "vti" | "vtr" | "vts" | "vtm" | "step" | "iges" | "brep" | "exo" => FileKind::Geometry,
@@ -893,7 +982,8 @@ fn mime_to_extension(mime: &str) -> &'static str {
         "image/heic" => "heic",
         "image/heif" => "heic",
         "image/svg+xml" => "svg",
-        "image/emf" => "emf",
+        "image/emf" | "image/x-emf" => "emf",
+        "image/wmf" | "image/x-wmf" => "wmf",
         "image/x-xcf" => "xcf",
         "image/apng" => "apng",
         "image/vnd.microsoft.icon" => "ico",
@@ -935,9 +1025,17 @@ fn mime_to_extension(mime: &str) -> &'static str {
         "application/gzip" => "gz",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
+        "application/vnd.ms-excel.sheet.macroenabled.12" => "xlsm",
+        "application/vnd.ms-excel.sheet.binary.macroenabled.12" => "xlsb",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.template" => "xltx",
+        "application/vnd.ms-excel.template.macroenabled.12" => "xltm",
+        "application/vnd.apple.pages" | "application/x-iwork-pages-sffpages" => "pages",
+        "application/vnd.apple.numbers" | "application/x-iwork-numbers-sffnumbers" => "numbers",
+        "application/vnd.apple.keynote" | "application/x-iwork-keynote-sffkey" => "key",
         "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
         "application/vnd.oasis.opendocument.text" => "odt",
         "application/vnd.oasis.opendocument.presentation" => "odp",
+        "application/vnd.oasis.opendocument.graphics" => "odg",
         "application/vnd.oasis.opendocument.spreadsheet" => "ods",
         "application/msword" => "doc",
         "application/vnd.ms-excel" => "xls",
@@ -1044,9 +1142,18 @@ fn ext_to_mime(ext: &str) -> &'static str {
         "pdf" => "application/pdf",
         "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "xlsm" => "application/vnd.ms-excel.sheet.macroEnabled.12",
+        "xlsb" => "application/vnd.ms-excel.sheet.binary.macroEnabled.12",
+        "xltx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.template",
+        "xltm" => "application/vnd.ms-excel.template.macroEnabled.12",
+        "xlt" | "xlm" | "xlw" => "application/vnd.ms-excel",
+        "pages" => "application/vnd.apple.pages",
+        "numbers" => "application/vnd.apple.numbers",
+        "key" => "application/vnd.apple.keynote",
         "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         "odt" => "application/vnd.oasis.opendocument.text",
         "odp" => "application/vnd.oasis.opendocument.presentation",
+        "odg" => "application/vnd.oasis.opendocument.graphics",
         "ods" => "application/vnd.oasis.opendocument.spreadsheet",
         "doc" => "application/msword",
         "xls" => "application/vnd.ms-excel",

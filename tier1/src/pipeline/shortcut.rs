@@ -520,7 +520,7 @@ async fn zip_extract<S: HttpStream>(cook: &mut ThumbCook<S>) -> Option<(Vec<u8>,
     let extension = extension.as_str();
     let metadata = if matches!(extension, "odt" | "ods" | "odp") {
         dir.meta_xml.as_ref()
-    } else if matches!(extension, "docx" | "pptx") {
+    } else if matches!(extension, "docx" | "pptx" | "xlsx" | "xlsm" | "xlsb" | "xltx" | "xltm") {
         dir.app_xml.as_ref()
     } else {
         None
@@ -551,7 +551,7 @@ async fn zip_extract<S: HttpStream>(cook: &mut ThumbCook<S>) -> Option<(Vec<u8>,
 
     if let Some(pages) = exact_pages {
         record_exact_page_count(cook, pages);
-    } else if let Some(cx) = dir.content_xml_uncomp {
+    } else if extension != "odg" && let Some(cx) = dir.content_xml_uncomp {
         // Estimate from content.xml (uncompressed) size.  Powers-of-2 accuracy
         // only - this drives the page-edge border, never media properties.
         let est_pages = (cx / ODT_CONTENT_BYTES_PER_PAGE).clamp(1, u32::MAX as u64) as u32;
@@ -605,14 +605,32 @@ fn record_exact_page_count<S: HttpStream>(cook: &mut ThumbCook<S>, pages: u32) {
 fn document_metadata_pages(xml: &[u8], extension: &str) -> Option<u32> {
     let document = roxmltree::Document::parse(std::str::from_utf8(xml).ok()?).ok()?;
     let count = if matches!(extension, "odt" | "ods" | "odp") {
+        // Spreadsheets report their sheet count instead of pages.
+        let attr = if extension == "ods" { "table-count" } else { "page-count" };
         document.descendants().find(|node| {
             node.has_tag_name(("urn:oasis:names:tc:opendocument:xmlns:meta:1.0", "document-statistic"))
-        })?.attribute(("urn:oasis:names:tc:opendocument:xmlns:meta:1.0", "page-count"))?
+        })?.attribute(("urn:oasis:names:tc:opendocument:xmlns:meta:1.0", attr))?.to_string()
+    } else if matches!(extension, "xlsx" | "xlsm" | "xlsb" | "xltx" | "xltm") {
+        // HeadingPairs alternates a label variant with an i4 count variant.
+        let pairs = document.descendants().find(|n| n.tag_name().name() == "HeadingPairs")?;
+        let mut values = pairs.descendants().filter(|n| n.tag_name().name() == "variant");
+        let text = |n: roxmltree::Node| {
+            n.descendants().find(|c| c.is_text()).and_then(|c| c.text()).map(|t| t.trim().to_string())
+        };
+        let mut found = None;
+        while let Some(label) = values.next() {
+            let value = values.next()?;
+            if text(label).as_deref() == Some("Worksheets") {
+                found = text(value);
+                break;
+            }
+        }
+        found?
     } else {
         let name = if extension == "pptx" { "Slides" } else { "Pages" };
         document.descendants().find(|node| {
             node.has_tag_name(("http://schemas.openxmlformats.org/officeDocument/2006/extended-properties", name))
-        })?.text()?
+        })?.text()?.to_string()
     };
     count.trim().parse::<u32>().ok().filter(|count| *count > 0)
 }
@@ -2045,8 +2063,9 @@ async fn shortcut_inner<S: HttpStream>(cook: &mut ThumbCook<S>) {
     let is_zip_doc = cook.media.kind == Some(FileKind::Document)
         && matches!(
             cook.media.extension.as_deref(),
-            Some("docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp")
-        );
+            Some("docx" | "xlsx" | "xlsm" | "xlsb" | "xltx" | "xltm" | "pptx" | "odt" | "ods" | "odp")
+        )
+        || cook.media.kind == Some(FileKind::Vector) && cook.media.extension.as_deref() == Some("odg");
     if is_zip_doc {
         try_zip_shortcut(cook).await;
     }

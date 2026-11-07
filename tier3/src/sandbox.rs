@@ -79,6 +79,21 @@ pub fn blender() -> SandboxConfig {
     }
 }
 
+/// Limits tailored to LibreOffice (`soffice`) conversions.
+///
+/// A fresh user profile is created for every run, so startup is far slower
+/// than a typical CLI tool, and soffice keeps many descriptors open (shared
+/// libraries, UNO pipes, fonts).  Same 30 s ceiling as Blender, matching the
+/// tier-1 handoff read timeout.  Address-space limiting stays off because the
+/// JVM-free office core still maps large font and resource caches.
+pub fn office() -> SandboxConfig {
+    SandboxConfig {
+        timeout: Duration::from_secs(30),
+        max_fds: 1024,
+        ..SandboxConfig::default()
+    }
+}
+
 /// Run a configured command and enforce its wall-clock deadline.
 ///
 /// Captured stdout and stderr are drained concurrently so a noisy renderer

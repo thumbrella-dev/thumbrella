@@ -56,6 +56,8 @@ pub struct ThumbnailConfig {
     pub pixel_art_quality: u8,
     /// Background colour used when flattening transparency (RGB).
     pub background_rgb: [u8; 3],
+    /// Multiplier applied to source RGB channels before compositing.
+    pub brightness_gain: f32,
     /// Vignette darkening strength at image edges, 0.0 (none) to 1.0 (full).
     pub vignette_strength: f32,
     /// Maximum source dimension (in pixels) in *both* width and height for
@@ -69,9 +71,12 @@ pub struct ThumbnailConfig {
 /// Powers-of-two granularity so a rough page estimate is good enough: 2 px for
 /// 2-3 pages, 3 px for 4-7, and so on, capped at 10 px.  Produced by the
 /// shortcut/render paths before `deliver`, which just consumes the finished
-/// thickness.  `0` pages maps to 2 px (the minimum border) and is treated by
-/// the caller as "no border" via the separate 0-means-none cook field.
+/// thickness.  Single-page (or unknown, 0) documents get `0`, meaning no
+/// border is drawn.
 pub(crate) fn page_edge_thickness(pages: u32) -> u32 {
+    if pages < 2 {
+        return 0;
+    }
     (pages.ilog2() + 1).clamp(2, 10)
 }
 
@@ -84,7 +89,7 @@ impl Default for ThumbnailConfig {
 impl ThumbnailConfig {
     /// The one canonical config.  Update `version` whenever any value changes.
     pub const CANONICAL: Self = Self {
-        version: 7,
+        version: 8,
         exact_width: 250,
         exact_height: 200,
         min_fill_ratio: 0.6,
@@ -92,6 +97,7 @@ impl ThumbnailConfig {
         jpeg_quality: 64,
         pixel_art_quality: 18,
         background_rgb: [255, 255, 255],
+        brightness_gain: 1.05,
         vignette_strength: 0.25,
         pixel_art_max_px: 100,
     };
@@ -176,4 +182,17 @@ impl ShortcutLimits {
         audio_cover_max_fetch: 512 * 1024, // 512 KiB
         pdf_max_fetch: 16 * 1024 * 1024,   // 16 MiB
     };
+}
+
+#[cfg(test)]
+mod page_edge_tests {
+    use super::page_edge_thickness;
+
+    #[test]
+    fn single_page_or_unknown_has_no_border() {
+        assert_eq!(page_edge_thickness(0), 0);
+        assert_eq!(page_edge_thickness(1), 0);
+        assert_eq!(page_edge_thickness(2), 2);
+        assert_eq!(page_edge_thickness(4), 3);
+    }
 }

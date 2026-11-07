@@ -130,6 +130,8 @@ impl InProcessRenderer for Tier3Renderer {
 
             match kind {
                 Some(FileKind::Document) => render_document_tier3(cook, &ext).await,
+                Some(FileKind::Vector) if matches!(ext.as_str(), "odg" | "emf" | "wmf") =>
+                    render_document_tier3(cook, &ext).await,
                 Some(FileKind::Geometry) => render_geometry_tier3(cook, &ext).await,
                 Some(FileKind::Image) if matches!(ext.as_str(), "jpeg" | "jpg") => {
                     if is_arithmetic_jpeg_peek(cook) {
@@ -1036,19 +1038,24 @@ fn run_oiiotool_decode(bytes: &[u8], ext: &str) -> Result<RenderOutput, String> 
 }
 /// Render a document via tier-3-specific backends.
 ///
-/// Dispatch is extension-based, mirroring the geometry path.  Today only PDF
-/// is rendered in tier 3, via the standalone `pdftoppm` subprocess (no dlopen,
-/// no C linkage).  Office documents (docx/odt/...) never reach this path -
-/// their embedded thumbnails are extracted by the tier 1 shortcut.
+/// Dispatch is extension-based, mirroring the geometry path.  PDF is rendered
+/// by the standalone `pdftoppm` subprocess; office documents (OpenDocument,
+/// OOXML, legacy binary formats, rtf) by `soffice --headless`.  Embedded
+/// thumbnails are normally extracted earlier by the tier 1 shortcut; office
+/// files only get here when that failed (no raster preview, or an EMF/WMF
+/// preview only soffice can draw).
 async fn render_document_tier3(cook: &mut dyn RenderCook, ext: &str) -> bool {
-    if ext != "pdf" {
+    let is_office = crate::office::is_office_extension(ext);
+    if ext != "pdf" && !is_office {
         return false;
     }
+    let tool = if is_office { crate::office::HANDLER_NAME } else { "pdftoppm" };
 
     // Find the registered handler and confirm it passed the availability
-    // probe at startup (pdftoppm found on PATH).
+    // probe at startup (the tool was found on PATH).
     let handlers = crate::env_check::registered_handlers();
-    let Some(handler) = handlers.iter().find(|h| h.extensions.contains(&"pdf")) else {
+    let Some(handler) = handlers.iter().find(|h| h.name == tool && h.extensions.contains(&ext))
+    else {
         return false;
     };
     let report = crate::env_check::cached_report();
@@ -1058,7 +1065,7 @@ async fn render_document_tier3(cook: &mut dyn RenderCook, ext: &str) -> bool {
         .map(|b| b.available)
         .unwrap_or(false);
     if !available {
-        cook.note("external tool unavailable (pdftoppm)");
+        cook.note(&format!("external tool unavailable ({tool})"));
         return false;
     }
 
@@ -1066,7 +1073,15 @@ async fn render_document_tier3(cook: &mut dyn RenderCook, ext: &str) -> bool {
         return false;
     };
 
-    let result = tokio::task::spawn_blocking(move || run_pdftoppm_handler(&mut *reader)).await;
+    let ext_owned = ext.to_string();
+    let result = tokio::task::spawn_blocking(move || {
+        if is_office {
+            crate::office::run_office_handler(&mut *reader, &ext_owned)
+        } else {
+            run_pdftoppm_handler(&mut *reader)
+        }
+    })
+    .await;
 
     match result {
         Ok(Ok(out)) => {
@@ -1074,12 +1089,12 @@ async fn render_document_tier3(cook: &mut dyn RenderCook, ext: &str) -> bool {
             true
         }
         Ok(Err(msg)) => {
-            tbr_debug!("[tier3] pdftoppm: {msg}");
-            cook.fail_cook(&format!("pdftoppm: {msg}"));
+            tbr_debug!("[tier3] {tool}: {msg}");
+            cook.fail_cook(&format!("{tool}: {msg}"));
             true
         }
         Err(_) => {
-            cook.fail_cook("pdftoppm: panicked");
+            cook.fail_cook(&format!("{tool}: panicked"));
             true
         }
     }

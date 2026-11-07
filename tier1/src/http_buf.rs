@@ -665,8 +665,14 @@ impl<S: HttpStream> HttpBuffer<S> {
                 offset += skip as u64;
                 continue;
             }
+            // A page can only be extended contiguously.  Padding the gap with
+            // zeros would make a partially covered page look complete, so skip
+            // to the next page boundary and leave this page to be streamed.
             if page.len() < in_page {
-                page.resize(in_page, 0);
+                let skip = (PAGE_SIZE - in_page).min(bytes.len() - cursor);
+                cursor += skip;
+                offset += skip as u64;
+                continue;
             }
             let space = PAGE_SIZE - page.len();
             let take = space.min(bytes.len() - cursor);
@@ -1080,6 +1086,26 @@ mod sparse_range_tests {
         );
         assert!(!buffer.accepts_ranges);
         assert!(buffer.bytes_fetched() > 300 * 1024);
+    }
+
+    #[tokio::test]
+    async fn unaligned_range_fetch_does_not_zero_fill_pages() {
+        let mut buffer =
+            HttpBuffer::<MockStream>::open("valid".into(), ConnectOptions::default()).await.unwrap();
+        let start = 64 * 1024 + 1536;
+        buffer.fetch_range(start, 200 * 1024).await.unwrap();
+        buffer.seek(0);
+        let mut all = Vec::new();
+        let mut chunk = vec![0u8; 8192];
+        loop {
+            let n = buffer.read(&mut chunk).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            all.extend_from_slice(&chunk[..n]);
+        }
+        let expected: Vec<u8> = (0..512 * 1024).map(|index| (index % 251) as u8).collect();
+        assert_eq!(all, expected);
     }
 
     #[tokio::test]

@@ -38,6 +38,13 @@ libc = "0.2"
 # wait-timeout: enforce wall-clock deadlines for external renderer processes.
 wait-timeout = "0.2"
 
+# zip / cfb / roxmltree: office document container inspection.  OOXML and ODF
+# files are ZIPs, legacy .doc/.xls/.ppt are OLE compound files.  Used to find
+# embedded thumbnails (including EMF/WMF previews) and scrape page counts.
+zip = { version = "5.1.1", default-features = false, features = ["deflate"] }
+cfb = "0.16"
+roxmltree = "0.21"
+
 # serde: serialization for env_check reports.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

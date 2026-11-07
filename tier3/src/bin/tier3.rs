@@ -78,6 +78,14 @@ async fn main() {
     });
 
     tier3::env_check::register_handler(tier3::env_check::HandlerDecl {
+        name: tier3::office::HANDLER_NAME,
+        category: "document",
+        command: "soffice",
+        extensions: tier3::office::OFFICE_EXTENSIONS,
+        description: "Office document renderer (LibreOffice headless)",
+    });
+
+    tier3::env_check::register_handler(tier3::env_check::HandlerDecl {
         name: "ffmpeg_cli",
         category: "video",
         command: "ffmpeg",

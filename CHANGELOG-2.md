@@ -2,6 +2,7 @@
 
 ## Development
 
+- Support for MS Office and other document formats
 - Docker hub container gets more formats, like pdf, jp2, and more
 
 ## 2.3.1 - 2026/11/04
