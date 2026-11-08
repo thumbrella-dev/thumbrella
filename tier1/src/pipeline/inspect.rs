@@ -85,6 +85,17 @@ pub async fn inspect<S: HttpStream>(cook: &mut ThumbCook<S>) {
 fn sniff(bytes: &[u8], url: &str, content_type: Option<&str>) -> (FileKind, String, String) {
     let url_ext = url_extension(url);
 
+    // MHTML web archives have no binary magic: they are RFC 2557 MIME
+    // containers, so the header block is the signature.
+    let mhtml_content_type = content_type.is_some_and(|ct| {
+        let ct = ct.split(';').next().unwrap_or(ct).trim();
+        ct.eq_ignore_ascii_case("application/x-mimearchive")
+            || ct.eq_ignore_ascii_case("multipart/related")
+    });
+    if mhtml_content_type || sniff_mhtml(bytes) {
+        return (FileKind::Document, "application/x-mimearchive".into(), "mhtml".into());
+    }
+
     if bytes.starts_with(b"DDS ") {
         return (FileKind::Image, "image/vnd-ms.dds".into(), "dds".into());
     }
@@ -449,6 +460,30 @@ mod tests {
     }
 
     #[test]
+    fn mhtml_archives_are_documents_routed_to_tier3() {
+        // `mht` is the legacy alias; the header block is the signature, and
+        // the media type is honoured when the server sends one.
+        assert_eq!(canonical_extension("mht"), "mhtml");
+        for (bytes, content_type, url) in [
+            (b"MIME-Version: 1.0\r\nContent-Type: multipart/related\r\n".as_slice(), None, "https://example.com/page"),
+            (b"From: <Saved by Blink>\r\nContent-Type: multipart/related\r\n".as_slice(), None, "https://example.com/page"),
+            (b"".as_slice(), Some("application/x-mimearchive"), "https://example.com/page"),
+            (b"".as_slice(), None, "https://example.com/archive.MHT"),
+        ] {
+            let (kind, mime, extension) = sniff(bytes, url, content_type);
+            assert_eq!(kind, FileKind::Document);
+            assert_eq!(mime, "application/x-mimearchive");
+            assert_eq!(extension, "mhtml");
+            assert_eq!(dispatch::route(kind, Some(&extension)).tier, 3);
+        }
+        // A plain page still goes through the HTML path.
+        assert_eq!(
+            sniff(b"<!DOCTYPE html><html></html>", "https://example.com/page", None),
+            (FileKind::Document, "text/html".into(), "html".into())
+        );
+    }
+
+    #[test]
     fn exr_is_routed_to_tier2_without_a_shortcut() {
         let (kind, _, extension) =
             sniff(&[0x76, 0x2f, 0x31, 0x01], "https://example.com/image.exr", None);
@@ -773,6 +808,18 @@ pub(super) fn find_sof_in_bytes(bytes: &[u8]) -> Option<(u32, u32, u32)> {
 
 /// Return `true` if `bytes` contain an `<svg` opening tag (case-insensitive),
 /// indicating the content is an SVG document regardless of the MIME label.
+fn sniff_mhtml(bytes: &[u8]) -> bool {
+    // RFC 2557 archives open with MIME headers.  A bare `From:` line is too
+    // weak a signal (mail archives, chat logs), so it only counts when the
+    // multipart type follows in the same header block.
+    let head = &bytes[..bytes.len().min(1024)];
+    if head.starts_with(b"MIME-Version:") {
+        return true;
+    }
+    head.starts_with(b"From:")
+        && String::from_utf8_lossy(head).to_ascii_lowercase().contains("multipart/related")
+}
+
 fn sniff_svg(bytes: &[u8]) -> bool {
     // Match `<svg` followed by whitespace, '>', or '/' to avoid false positives
     // on longer element names like `<svgfoo`.
@@ -849,6 +896,7 @@ pub fn canonical_extension(raw: &str) -> String {
         "crw" => "cr2",
         // web
         "htm" => "html",
+        "mht" => "mhtml",
         other => other,
     }
     .to_string()
@@ -958,7 +1006,7 @@ fn ext_to_kind(ext: &str) -> FileKind {
         | "aiff" => FileKind::Audio,
         "pdf" | "docx" | "xlsx" | "pptx" | "odt" | "doc" | "xls" | "ppt" | "odp" | "ods"
         | "pages" | "numbers" | "key" | "xlsm" | "xlsb" | "xltx" | "xltm" | "xlt" | "xlm"
-        | "xlw" | "epub" | "rtf" | "html" | "xhtml" => FileKind::Document,
+        | "xlw" | "epub" | "rtf" | "html" | "xhtml" | "mhtml" => FileKind::Document,
         "usdz" | "usd" | "usda" | "usdc" | "abc" | "blend" | "glb" | "gltf" | "obj" | "stl" | "fbx"
         | "dae" | "dxf" | "off" | "3ds" | "gml" | "ply" | "pts" | "vrml" | "vtk" | "vtu" | "vtp"
         | "vti" | "vtr" | "vts" | "vtm" | "step" | "iges" | "brep" | "exo" => FileKind::Geometry,
@@ -1053,6 +1101,7 @@ fn mime_to_extension(mime: &str) -> &'static str {
         "model/stl" => "stl",
         "text/html" => "html",
         "application/xhtml+xml" => "xhtml",
+        "application/x-mimearchive" => "mhtml",
         "text/xml" => "xml",
         "text/plain" => "txt",
         "text/csv" => "csv",
@@ -1163,6 +1212,7 @@ fn ext_to_mime(ext: &str) -> &'static str {
         "blend" => "application/x-blender",
         "html" => "text/html",
         "xhtml" => "application/xhtml+xml",
+        "mhtml" => "application/x-mimearchive",
         "zip" => "application/zip",
         "tar" => "application/x-tar",
         "gz" => "application/gzip",

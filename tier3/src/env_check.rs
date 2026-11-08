@@ -148,6 +148,9 @@ pub fn probe_environment() -> EnvReport {
     probe_f3d(&mut report);
     probe_blender(&mut report);
 
+    //  Playwright CLI (HTML page snapshots)
+    probe_playwright(&mut report);
+
     //  Python + usd-core (USDZ geometry pipeline)
     probe_python_usd(&mut report);
     let usd_available = usd_fallback_available(&report);
@@ -354,6 +357,31 @@ fn probe_blender(report: &mut EnvReport) {
             name: "blender".into(),
             category: "geometry".into(),
             method,
+            available,
+            details,
+            unavailable_reason,
+        },
+    );
+}
+
+//  Playwright CLI probe
+
+/// Probe for the Playwright CLI (`playwright-cli`) used for HTML snapshots.
+///
+/// Finding the binary is not enough - the browser engine has to be installed
+/// too - so the probe is delegated to [`crate::html::probe`], which opens and
+/// closes a real headless session.
+fn probe_playwright(report: &mut EnvReport) {
+    let (available, details, unavailable_reason) = crate::html::probe();
+    report.backends.insert(
+        crate::html::HANDLER_NAME.to_string(),
+        BackendInfo {
+            name: crate::html::HANDLER_NAME.to_string(),
+            category: "document".into(),
+            method: ProbeMethod::Executable {
+                binary: "playwright-cli".into(),
+                check_arg: "open about:blank".into(),
+            },
             available,
             details,
             unavailable_reason,

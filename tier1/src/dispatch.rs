@@ -362,6 +362,13 @@ pub fn format_manifest() -> &'static [FormatEntry] {&[
     //  Tier 3 - documents (PDF first-page render via pdftoppm subprocess)
     FormatEntry {extension: "pdf", label: "PDF Document",
                 kind: FileKind::Document,   tier: 3, renderer: "pdftoppm", shortcut: false },
+    //  Tier 3 - web pages (headless browser snapshot via playwright-cli)
+    FormatEntry {extension: "html", label: "HTML Web Page",
+                kind: FileKind::Document,   tier: 3, renderer: "playwright_cli", shortcut: false },
+    FormatEntry {extension: "xhtml", label: "XHTML Web Page",
+                kind: FileKind::Document,   tier: 3, renderer: "playwright_cli", shortcut: false },
+    FormatEntry {extension: "mhtml", label: "MHTML Web Archive",
+                kind: FileKind::Document,   tier: 3, renderer: "playwright_cli", shortcut: false },
     //  Tier 3 - video via ffmpeg CLI
     FormatEntry {extension: "flv", label: "Flash Video",
                 kind: FileKind::Video,  tier: 3, renderer: "ffmpeg_cli", shortcut: false},

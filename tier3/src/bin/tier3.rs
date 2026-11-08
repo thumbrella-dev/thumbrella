@@ -93,6 +93,16 @@ async fn main() {
         description: "Flash video renderer (FFmpeg CLI)",
     });
 
+    // HTML pages are rendered by the Playwright CLI, which loads the original
+    // URL itself (no staging).  The probe confirms the browser engine works.
+    tier3::env_check::register_handler(tier3::env_check::HandlerDecl {
+        name: tier3::html::HANDLER_NAME,
+        category: "document",
+        command: "playwright-cli",
+        extensions: tier3::html::HTML_EXTENSIONS,
+        description: "HTML web page snapshot (playwright-cli)",
+    });
+
     //  Probe the environment
     let env_report = tier3::env_check::probe_environment();
 
@@ -266,8 +276,8 @@ fn register_tier3_check(env: &tier3::env_check::EnvReport) {
     // General tools section - backends not tied to specific extensions.
     {
         let general: &[&str] = &[
-            "blender", "f3d", "python3", "ffmpeg_cli", "ffprobe", "magick", "oiiotool",
-            "display_server",
+            "playwright_cli", "blender", "f3d", "python3", "ffmpeg_cli", "ffprobe", "magick",
+            "oiiotool", "display_server",
         ];
         let entries: Vec<tier1::check::CheckEntry> = general
             .iter()

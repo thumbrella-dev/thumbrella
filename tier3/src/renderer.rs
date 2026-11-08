@@ -14,7 +14,7 @@
 //! | Image | libav, image crate, raw preview, jxl, resvg | (same as tier 2) |
 //! | Video | libav | (same as tier 2) |
 //! | Vector | resvg | (same as tier 2) + optional inkscape subprocess |
-//! | Document | (none) | subprocess: pdftoppm (PDF first page) |
+//! | Document | (none) | subprocess: pdftoppm (PDF), soffice (office), playwright-cli (HTML) |
 //! | Geometry | (none) | subprocess: blender (glTF/GLB, USD/ABC/BLEND), f3d (mesh/OBJ/FBX) |
 //!
 //! # Dispatch order
@@ -1045,6 +1045,11 @@ fn run_oiiotool_decode(bytes: &[u8], ext: &str) -> Result<RenderOutput, String> 
 /// files only get here when that failed (no raster preview, or an EMF/WMF
 /// preview only soffice can draw).
 async fn render_document_tier3(cook: &mut dyn RenderCook, ext: &str) -> bool {
+    // HTML pages are snapshotted by the browser, which loads the URL itself.
+    if crate::html::is_html_extension(ext) {
+        return crate::html::render(cook, ext).await;
+    }
+
     let is_office = crate::office::is_office_extension(ext);
     if ext != "pdf" && !is_office {
         return false;

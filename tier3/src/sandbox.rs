@@ -94,6 +94,33 @@ pub fn office() -> SandboxConfig {
     }
 }
 
+/// Limits tailored to the headless browser driven by `playwright-cli`.
+///
+/// Chromium keeps a descriptor per renderer process, socket, and shared
+/// memory segment, and a cold page load needs a longer budget than a simple
+/// CLI tool.  The 30 s ceiling matches Blender and soffice, and matches the
+/// tier-1 handoff read timeout.  Address-space limiting stays off because
+/// Chromium's multi-process layout reserves large per-renderer mappings.
+pub fn browser() -> SandboxConfig {
+    SandboxConfig {
+        timeout: Duration::from_secs(30),
+        max_fds: 1024,
+        ..SandboxConfig::default()
+    }
+}
+
+/// Short deadline for best-effort browser session teardown.
+///
+/// Closing a session must never hold up a render, so cleanup gets a small
+/// fraction of the render budget.
+pub fn browser_close() -> SandboxConfig {
+    SandboxConfig {
+        timeout: Duration::from_secs(5),
+        max_fds: 1024,
+        ..SandboxConfig::default()
+    }
+}
+
 /// Run a configured command and enforce its wall-clock deadline.
 ///
 /// Captured stdout and stderr are drained concurrently so a noisy renderer
