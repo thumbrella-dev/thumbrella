@@ -2,6 +2,9 @@
 
 ## Development
 
+- Minimize and parallel external tool probing at starting (saves 5 seconds)
+- Allow TBR_PROBE to predefine external tools and avoid startup probe
+
 ## 2.4.0 - 2026/11/09
 
 Full support for office and website thumbnails

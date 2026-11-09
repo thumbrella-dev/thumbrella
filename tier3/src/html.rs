@@ -22,21 +22,18 @@
 //! playwright-cli install-browser chromium --no-shell
 //! ```
 //!
-//! The engine stays the CLI's business.  At startup [`probe`] asks
-//! `playwright-cli install-browser --list` what is actually installed, picks the
-//! first engine from [`PREFERRED_BROWSERS`] that appears there, and only then
-//! passes `--browser`.  When the list holds none of our preferences the flag is
-//! omitted entirely and the CLI uses its own default (or its config file).
-//! An empty list means there is nothing to drive, so the backend is reported
+//! The engine stays the CLI's business: Thumbrella never installs or configures
+//! Playwright and never passes `--browser`, so the CLI uses whatever engine it
+//! is set up to use.  At startup [`probe`] only checks that the binary exists
+//! and that the browser cache holds a launchable engine, by reading the cache
+//! directory (`PLAYWRIGHT_BROWSERS_PATH`, else Playwright's default location)
+//! instead of invoking Node.  With no engine present the backend is reported
 //! unavailable and HTML falls back to the normal document placeholder.
 //!
 //! Only the viewport is fixed, because it is part of the output contract.
-//! Chromium-headless-shell entries are ignored: they are not launchable as a
-//! `--browser` value on their own.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use image::DynamicImage;
@@ -57,20 +54,6 @@ pub const HTML_EXTENSIONS: &[&str] = &["html", "xhtml", "mhtml"];
 
 /// Command invoked for a snapshot.
 const CLI_BINARY: &str = "playwright-cli";
-
-/// Engines we are willing to name explicitly, best first.
-///
-/// The first three share the same rendering engine, so output stays consistent
-/// between deployments; the last two are fallbacks for hosts that only have
-/// them.  This list is also the set of names recognised in
-/// `install-browser --list`.
-const PREFERRED_BROWSERS: &[&str] = &["chromium", "chrome", "msedge", "firefox", "webkit"];
-
-/// Engine chosen by the startup probe.
-///
-/// `None` before the probe runs, and also when no preferred engine was found -
-/// in both cases the CLI decides for itself.
-static SELECTED_BROWSER: RwLock<Option<&'static str>> = RwLock::new(None);
 
 /// Bytes reserved in the scratch arena for a screenshot.
 const MAX_SNAPSHOT_BYTES: u64 = 128 * 1024 * 1024;
@@ -210,12 +193,11 @@ fn snapshot(url: &str) -> Result<DynamicImage, String> {
     // `--idle-timeout` reuses the render deadline: the daemon is spawned
     // detached, so it can outlive the process group we kill on timeout.
     let idle = idle_timeout_arg();
-    let browser = selected_browser();
 
     let out_path = arena.output_path("png");
     let out_str = out_path.to_str().ok_or("non-UTF-8 scratch path")?;
 
-    let args = open_args(url, &idle, browser, Some(config));
+    let args = open_args(url, &idle, Some(config));
     run_cli(work_dir, &session, "open", &args)?;
     run_cli(work_dir, &session, "screenshot", &["--filename", out_str, "--type", "png"])?;
 
@@ -296,11 +278,12 @@ fn describe_failure(stderr: &[u8], code: Option<i32>) -> String {
 
 //  Probe
 
-/// Startup probe: is `playwright-cli` present and able to run a snapshot?
+/// Startup probe: is `playwright-cli` present with a browser engine installed?
 ///
-/// The version check alone is not enough - the binary is useless without a
-/// downloaded browser - so the probe inspects what `install-browser --list`
-/// reports and then opens (and closes) a real session to prove it launches.
+/// The probe is deliberately cheap and read-only: it checks that the binary
+/// exists, then lists the browser cache on disk for a launchable engine.  It
+/// never installs anything, never launches a browser, and never passes
+/// `--browser`, so the CLI uses whatever engine it is configured to use.
 ///
 /// Returns `(available, details, unavailable_reason)`.
 pub fn probe() -> (bool, Option<String>, Option<String>) {
@@ -309,131 +292,76 @@ pub fn probe() -> (bool, Option<String>, Option<String>) {
         Err(e) => return (false, None, Some(format!("{CLI_BINARY} not found: {e}"))),
     };
 
-    let version = Command::new(&path)
-        .arg("--version")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown version".into());
-    let label = format!("{}: {version}", path.display());
-
-    let installed = match installed_browsers() {
-        Ok(installed) => installed,
-        Err(error) => return (false, Some(label), Some(error)),
-    };
-    if installed.is_empty() {
+    let dir = browsers_dir();
+    let engines = installed_engines(&dir);
+    let label = format!("{}: {}", path.display(), dir.display());
+    if engines.is_empty() {
         return (
             false,
             Some(label),
-            Some("no browsers installed (playwright-cli install-browser)".into()),
+            Some(format!(
+                "no browser engine installed in {} (install one with playwright-cli)",
+                dir.display()
+            )),
         );
     }
 
-    // Preferred engine when the host has one; otherwise let the CLI decide.
-    if let Some(browser) = PREFERRED_BROWSERS.iter().copied().find(|b| installed.contains(b)) {
-        match probe_launch(Some(browser)) {
-            Ok(()) => {
-                set_selected_browser(Some(browser));
-                return (true, Some(format!("{label}, {browser}")), None);
-            }
-            Err(error) => debug(&format!("{browser} launch failed: {error}")),
-        }
-    }
-
-    match probe_launch(None) {
-        Ok(()) => {
-            set_selected_browser(None);
-            (true, Some(format!("{label}, default engine")), None)
-        }
-        Err(error) => (false, Some(label), Some(error)),
-    }
+    (true, Some(format!("{label} ({})", engines.join(", "))), None)
 }
 
-/// Engines reported by `playwright-cli install-browser --list`.
+/// Directory Playwright stores downloaded browsers in.
 ///
-/// The command prints every browser known to every Playwright installation on
-/// the host as `<cache>/<engine>-<revision>` paths; only the engine name
-/// matters here.  Entries for engines we do not name explicitly (headless
-/// shells, ffmpeg, winldd) are dropped.
-fn installed_browsers() -> Result<Vec<&'static str>, String> {
-    let output = Command::new(CLI_BINARY)
-        .args(["install-browser", "--list"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| format!("list browsers: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "list browsers: {}",
-            describe_failure(&output.stderr, output.status.code())
-        ));
+/// `PLAYWRIGHT_BROWSERS_PATH` wins when set (it is in the tier3 image); the
+/// rest mirror Playwright's own defaults for Linux hosts.
+fn browsers_dir() -> PathBuf {
+    if let Some(path) = std::env::var_os("PLAYWRIGHT_BROWSERS_PATH") {
+        return PathBuf::from(path);
     }
-    Ok(parse_installed_browsers(&String::from_utf8_lossy(&output.stdout)))
+    if let Some(cache) = std::env::var_os("XDG_CACHE_HOME") {
+        return PathBuf::from(cache).join("ms-playwright");
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home).join(".cache").join("ms-playwright");
+    }
+    PathBuf::from(".cache/ms-playwright")
 }
 
-/// Extract engine names from the `install-browser --list` output.
-fn parse_installed_browsers(listing: &str) -> Vec<&'static str> {
+/// Recognise a browser-cache entry (`chromium-1252`) as a launchable engine.
+///
+/// Headless-shell, ffmpeg and winldd entries are not launchable on their own
+/// and are ignored.
+fn engine_from_entry(name: &str) -> Option<&'static str> {
+    let (engine, revision) = name.rsplit_once('-')?;
+    if revision.is_empty() || !revision.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    match engine {
+        "chromium" => Some("chromium"),
+        "firefox" => Some("firefox"),
+        "webkit" => Some("webkit"),
+        _ => None,
+    }
+}
+
+/// Launchable engines present in `dir`, in a stable preference order.
+fn installed_engines(dir: &Path) -> Vec<&'static str> {
     let mut found: Vec<&'static str> = Vec::new();
-    for line in listing.lines() {
-        let Some(entry) = line.trim().rsplit('/').next() else { continue };
-        let Some((engine, revision)) = entry.rsplit_once('-') else { continue };
-        if revision.is_empty() || !revision.bytes().all(|b| b.is_ascii_digit()) {
-            continue;
-        }
-        let engine = engine.replace('_', "-");
-        if let Some(known) = PREFERRED_BROWSERS.iter().copied().find(|b| *b == engine)
-            && !found.contains(&known)
-        {
-            found.push(known);
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str()
+                && let Some(engine) = engine_from_entry(name)
+                && !found.contains(&engine)
+            {
+                found.push(engine);
+            }
         }
     }
-    found
+    ["chromium", "firefox", "webkit"].into_iter().filter(|e| found.contains(e)).collect()
 }
 
-fn set_selected_browser(browser: Option<&'static str>) {
-    *SELECTED_BROWSER.write().unwrap() = browser;
-}
-
-/// Engine chosen at startup, or `None` to let the CLI decide.
-fn selected_browser() -> Option<&'static str> {
-    *SELECTED_BROWSER.read().unwrap()
-}
-
-/// Open and close a throwaway session to prove the browser engine works.
-fn probe_launch(browser: Option<&str>) -> Result<(), String> {
-    let dir = tempfile::Builder::new()
-        .prefix("thumbrella-probe-")
-        .tempdir()
-        .map_err(|e| format!("probe workdir: {e}"))?;
-    let session = format!("thumbrella-probe-{}", std::process::id());
-    let _guard = SessionGuard {
-        session: session.clone(),
-        dir: dir.path().to_path_buf(),
-    };
-
-    let idle = idle_timeout_arg();
-    let args = open_args("about:blank", &idle, browser, None);
-    run_cli(dir.path(), &session, "open", &args)?;
-    Ok(())
-}
-
-/// Arguments for `open`, adding `--browser` only when an engine was chosen.
-fn open_args<'a>(
-    url: &'a str,
-    idle: &'a str,
-    browser: Option<&'a str>,
-    config: Option<&'a str>,
-) -> Vec<&'a str> {
+/// Arguments for `open`.  The engine is left to the CLI's own default.
+fn open_args<'a>(url: &'a str, idle: &'a str, config: Option<&'a str>) -> Vec<&'a str> {
     let mut args = vec![url, "--idle-timeout", idle];
-    if let Some(browser) = browser {
-        args.push("--browser");
-        args.push(browser);
-    }
     if let Some(config) = config {
         args.push("--config");
         args.push(config);
@@ -529,34 +457,24 @@ mod tests {
     }
 
     #[test]
-    fn parse_installed_browsers_reads_engine_names() {
-        let listing = "Playwright version: 1.65.0\n  Browsers:\n    /root/.cache/ms-playwright/chromium-1252\n    /root/.cache/ms-playwright/chromium_headless_shell-1252\n    /root/.cache/ms-playwright/ffmpeg-1013\n  References:\n    /usr/lib/node_modules/playwright/node_modules/playwright-core\n";
-        assert_eq!(parse_installed_browsers(listing), vec!["chromium"]);
-        assert_eq!(parse_installed_browsers(""), Vec::<&str>::new());
-        assert_eq!(parse_installed_browsers("  Browsers:\n    ffmpeg-1013\n"), Vec::<&str>::new());
+    fn recognises_launchable_engines_from_cache_entries() {
+        assert_eq!(engine_from_entry("chromium-1252"), Some("chromium"));
+        assert_eq!(engine_from_entry("firefox-1234"), Some("firefox"));
+        assert_eq!(engine_from_entry("webkit-2203"), Some("webkit"));
+        assert_eq!(engine_from_entry("chromium_headless_shell-1252"), None);
+        assert_eq!(engine_from_entry("ffmpeg-1013"), None);
+        assert_eq!(engine_from_entry("chromium"), None);
+        assert_eq!(engine_from_entry("chromium-"), None);
     }
 
     #[test]
-    fn preferred_engine_wins_over_installation_order() {
-        let installed = parse_installed_browsers(
-            "    /root/.cache/ms-playwright/webkit-2100\n    /root/.cache/ms-playwright/chromium-1252\n",
-        );
-        let chosen = PREFERRED_BROWSERS.iter().copied().find(|b| installed.contains(b));
-        assert_eq!(chosen, Some("chromium"));
-    }
-
-    #[test]
-    fn open_args_omit_the_browser_when_none_was_chosen() {
+    fn open_args_adds_only_the_config_when_present() {
         assert_eq!(
-            open_args("https://x/", "30000", None, None),
+            open_args("https://x/", "30000", None),
             vec!["https://x/", "--idle-timeout", "30000"]
         );
         assert_eq!(
-            open_args("https://x/", "30000", Some("chromium"), None),
-            vec!["https://x/", "--idle-timeout", "30000", "--browser", "chromium"]
-        );
-        assert_eq!(
-            open_args("https://x/", "30000", None, Some("/tmp/c.json")),
+            open_args("https://x/", "30000", Some("/tmp/c.json")),
             vec!["https://x/", "--idle-timeout", "30000", "--config", "/tmp/c.json"]
         );
     }

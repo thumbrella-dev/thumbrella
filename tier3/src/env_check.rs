@@ -31,6 +31,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 //  Handler registry
 
@@ -135,29 +136,30 @@ pub fn probe_environment() -> EnvReport {
         summary: String::new(),
     };
 
-    //  Builtin backends (always available)
+    //  In-process probes: cheap, no subprocesses.
     probe_builtins(&mut report);
-
-    //  Shared library backends
     probe_shared_libraries(&mut report);
+    probe_handler_metadata(&mut report);
+    probe_runtime_services(&mut report);
 
-    //  Executable backends
-    probe_executables(&mut report);
+    //  When a probe cache is supplied (and we are not re-probing), trust it
+    //  instead of spawning any external command.  Otherwise run the subprocess
+    //  probes concurrently, each bounded by a hard deadline (see
+    //  `sandbox::probe`) so a wedged tool never delays startup.
+    if let Some(tokens) = configured_probe_tokens().filter(|_| !force_probe()) {
+        apply_probe_cache(&mut report, &tokens);
+    } else {
+        for result in run_probes_parallel(subprocess_probe_jobs()) {
+            if let Some(formats) = result.blender_formats {
+                report.blender_formats = formats;
+            }
+            for backend in result.backends {
+                report.backends.insert(backend.name.clone(), backend);
+            }
+        }
+    }
 
-    //  LibreOffice (soffice) - needs build/version/flag validation, not just
-    //  a PATH lookup, so it gets a dedicated probe that overrides the generic
-    //  handler entry inserted by `probe_executables`.
-    probe_office(&mut report);
-
-    //  F3D (geometry renderer with X11 dependency)
-    probe_f3d(&mut report);
-    probe_blender(&mut report);
-
-    //  Playwright CLI (HTML page snapshots)
-    probe_playwright(&mut report);
-
-    //  Python + usd-core (USDZ geometry pipeline)
-    probe_python_usd(&mut report);
+    //  USD fallback depends on both the f3d and python3/usd-core results.
     let usd_available = usd_fallback_available(&report);
     if let Some(backend) = report.backends.get_mut("usdz") {
         backend.available = usd_available;
@@ -165,9 +167,6 @@ pub fn probe_environment() -> EnvReport {
             backend.unavailable_reason = Some("requires f3d and python3 with usd-core".into());
         }
     }
-
-    //  Runtime service backends
-    probe_runtime_services(&mut report);
 
     //  Build summary
     let available: Vec<&str> =
@@ -187,6 +186,185 @@ pub fn probe_environment() -> EnvReport {
     *ENV_REPORT.write().unwrap() = Some(report.clone());
 
     report
+}
+
+//  Parallel probe runner
+
+/// The outcome of one subprocess probe.
+struct ProbeResult {
+    backends: Vec<BackendInfo>,
+    /// Populated only by the Blender probe when it succeeds.
+    blender_formats: Option<BTreeSet<String>>,
+}
+
+impl ProbeResult {
+    fn one(backend: BackendInfo) -> Self {
+        Self { backends: vec![backend], blender_formats: None }
+    }
+}
+
+/// A probe that spawns external commands and therefore runs on its own thread.
+type ProbeJob = Box<dyn FnOnce() -> ProbeResult + Send>;
+
+/// Every probe that shells out to an external tool.
+fn subprocess_probe_jobs() -> Vec<ProbeJob> {
+    vec![
+        Box::new(|| job_executable("ffmpeg_cli", "image", "ffmpeg", "-version")),
+        Box::new(|| job_executable("ffprobe", "video", "ffprobe", "-version")),
+        Box::new(|| job_executable("magick", "image", "gm", "version")),
+        Box::new(|| job_executable("oiiotool", "image", "oiiotool", "--version")),
+        Box::new(office_job),
+        Box::new(f3d_job),
+        Box::new(blender_job),
+        Box::new(playwright_job),
+        Box::new(python_usd_job),
+    ]
+}
+
+/// Run every probe job on its own thread and collect the results.
+///
+/// A job that panics is dropped rather than aborting startup; its backend is
+/// then simply absent from the report (treated as unavailable).
+fn run_probes_parallel(jobs: Vec<ProbeJob>) -> Vec<ProbeResult> {
+    let handles: Vec<_> = jobs.into_iter().map(std::thread::spawn).collect();
+    handles.into_iter().filter_map(|handle| handle.join().ok()).collect()
+}
+
+/// Build a `ProbeResult` for a tool checked by running `<binary> <check_arg>`.
+fn job_executable(name: &str, category: &str, binary: &str, check_arg: &str) -> ProbeResult {
+    let (available, details, unavailable_reason) = try_executable(binary, check_arg);
+    ProbeResult::one(BackendInfo {
+        name: name.to_string(),
+        category: category.to_string(),
+        method: ProbeMethod::Executable {
+            binary: binary.to_string(),
+            check_arg: check_arg.to_string(),
+        },
+        available,
+        details,
+        unavailable_reason,
+    })
+}
+
+//  Probe cache (TBR_PROBE)
+
+/// External tools whose availability can be cached, in output order.
+/// The token is the command name; `python3` additionally implies `usd-core`.
+const TOOL_TOKENS: &[(&str, &str)] = &[
+    ("oiiotool", "oiiotool"),
+    ("pdftoppm", "pdftoppm"),
+    ("playwright_cli", "playwright-cli"),
+    ("magick", "gm"),
+    ("blender", "blender"),
+    ("f3d", "f3d"),
+    ("soffice", "soffice"),
+    ("ffmpeg_cli", "ffmpeg"),
+    ("ffprobe", "ffprobe"),
+    ("python3", "python3"),
+];
+
+/// Backend metadata used when replaying a probe cache:
+/// `(backend name, token/command, category)`.
+const CACHED_TOOLS: &[(&str, &str, &str)] = &[
+    ("oiiotool", "oiiotool", "image"),
+    ("pdftoppm", "pdftoppm", "document"),
+    ("playwright_cli", "playwright-cli", "document"),
+    ("magick", "gm", "image"),
+    ("blender", "blender", "geometry"),
+    ("f3d", "f3d", "geometry"),
+    ("soffice", "soffice", "document"),
+    ("ffmpeg_cli", "ffmpeg", "image"),
+    ("ffprobe", "ffprobe", "video"),
+    ("python3", "python3", "runtime"),
+];
+
+static FORCE_PROBE: AtomicBool = AtomicBool::new(false);
+
+/// Ignore `TBR_PROBE` and force a live probe (used by the `probe` command).
+pub fn set_force_probe() {
+    FORCE_PROBE.store(true, Ordering::Relaxed);
+}
+
+fn force_probe() -> bool {
+    FORCE_PROBE.load(Ordering::Relaxed)
+}
+
+/// Parse `TBR_PROBE` as a comma-separated list of available tools.
+fn configured_probe_tokens() -> Option<Vec<String>> {
+    let raw = std::env::var("TBR_PROBE").ok()?;
+    if raw.trim().is_empty() {
+        return None;
+    }
+    Some(
+        raw.split(',')
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect(),
+    )
+}
+
+/// Populate the external-tool backends from a `TBR_PROBE` token list.
+///
+/// Listed tools are available; everything else is unavailable.  `blender`
+/// additionally enables every format the handler declares, and `python3` is
+/// taken to include `usd-core` (see [`probe_envvar`]).
+fn apply_probe_cache(report: &mut EnvReport, tokens: &[String]) {
+    let has = |token: &str| tokens.iter().any(|t| t == token);
+    for (name, token, category) in CACHED_TOOLS {
+        let available = has(token);
+        report.backends.insert(
+            (*name).to_string(),
+            BackendInfo {
+                name: (*name).to_string(),
+                category: (*category).to_string(),
+                method: ProbeMethod::Executable {
+                    binary: (*token).to_string(),
+                    check_arg: String::new(),
+                },
+                available,
+                details: available.then(|| format!("TBR_PROBE: {token}")),
+                unavailable_reason: if available {
+                    None
+                } else {
+                    Some("not listed in TBR_PROBE".to_string())
+                },
+            },
+        );
+    }
+
+    if has("blender") {
+        report.blender_formats = blender_handler_extensions();
+    }
+    // `python3` in the cache means the USD pipeline is ready; mark usd-core as
+    // available so `usd_fallback_available` enables USDZ dispatch.
+    if has("python3")
+        && let Some(backend) = report.backends.get_mut("python3")
+    {
+        backend.details = Some(format!(
+            "{}; usd-core available",
+            backend.details.as_deref().unwrap_or("python3")
+        ));
+    }
+}
+
+/// Build the `TBR_PROBE=...` value that reproduces `report`'s tool availability.
+///
+/// `python3` is emitted only when `usd-core` is present, because the cache
+/// treats `python3` as implying the USD pipeline.
+pub fn probe_envvar(report: &EnvReport) -> String {
+    let mut tokens: Vec<&str> = Vec::new();
+    for (name, token) in TOOL_TOKENS {
+        let Some(backend) = report.backends.get(*name) else { continue };
+        let ok = if *name == "python3" {
+            backend.details.as_deref().is_some_and(|d| d.contains("usd-core available"))
+        } else {
+            backend.available
+        };
+        if ok && !tokens.contains(token) {
+            tokens.push(token);
+        }
+    }
+    format!("TBR_PROBE={}", tokens.join(","))
 }
 
 /// Available handlers for an extension in registration order.
@@ -247,18 +425,12 @@ mod blender_tests {
     }
 
     #[test]
-    fn parses_only_marked_valid_probe_output() {
-        assert_eq!(
-            parse_blender_formats(b"Blender\nTHUMBRELLA_FORMATS=[\"fbx\",\"stl\"]\n").unwrap(),
-            BTreeSet::from(["fbx".into(), "stl".into()])
-        );
-        assert!(parse_blender_formats(b"Blender").is_err());
-        assert!(parse_blender_formats(b"THUMBRELLA_FORMATS=not-json").is_err());
-        assert_eq!(
-            parse_blender_addons(b"THUMBRELLA_ADDONS=[\"cycles\",\"pose_library\"]\n").unwrap(),
-            vec!["cycles".to_string(), "pose_library".to_string()]
-        );
-        assert!(parse_blender_addons(b"Blender").is_err());
+    fn parses_blender_version() {
+        assert_eq!(parse_blender_version("Blender 4.5.15\n"), Some((4, 5)));
+        assert_eq!(parse_blender_version("Blender 3.0.0\nBuild: abc"), Some((3, 0)));
+        assert_eq!(parse_blender_version("Blender 4\n"), Some((4, 0)));
+        assert_eq!(parse_blender_version("not blender"), None);
+        assert_eq!(parse_blender_version(""), None);
     }
 
     #[test]
@@ -290,108 +462,117 @@ mod blender_tests {
     }
 }
 
-fn parse_blender_formats(stdout: &[u8]) -> Result<BTreeSet<String>, String> {
-    let text = std::str::from_utf8(stdout).map_err(|e| format!("invalid probe output: {e}"))?;
-    let json = text
-        .lines()
-        .find_map(|line| line.strip_prefix("THUMBRELLA_FORMATS="))
-        .ok_or("missing Blender format probe output")?;
-    serde_json::from_str(json).map_err(|e| format!("invalid Blender format probe output: {e}"))
+/// Oldest Blender that ships the USD importer reached through the `usd*`
+/// handler extensions.  Alembic (abc), glTF/GLB, DAE and PLY importers all
+/// predate it by years, so one version threshold covers every extension the
+/// Blender handler declares.
+const MIN_BLENDER_VERSION: (u32, u32) = (3, 0);
+
+/// Parse `(major, minor)` from `blender --version` output such as
+/// `Blender 4.5.15`.
+fn parse_blender_version(text: &str) -> Option<(u32, u32)> {
+    let rest = text.split_once("Blender")?.1.trim_start();
+    let token = rest.split_whitespace().next()?;
+    let mut parts = token.split('.');
+    let major: u32 = parts.next()?.parse().ok()?;
+    let minor: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    Some((major, minor))
 }
 
-fn parse_blender_addons(stdout: &[u8]) -> Result<Vec<String>, String> {
-    let text = std::str::from_utf8(stdout).map_err(|e| format!("invalid probe output: {e}"))?;
-    let json = text
-        .lines()
-        .find_map(|line| line.strip_prefix("THUMBRELLA_ADDONS="))
-        .ok_or("missing Blender addon probe output")?;
-    serde_json::from_str(json).map_err(|e| format!("invalid Blender addon probe output: {e}"))
+/// Extensions declared by the registered `blender` handler.
+///
+/// Populated into the format-availability set when the installed Blender is
+/// new enough to have every importer we depend on.
+fn blender_handler_extensions() -> BTreeSet<String> {
+    registered_handlers()
+        .into_iter()
+        .find(|h| h.name == "blender")
+        .map(|h| h.extensions.iter().map(|e| e.to_string()).collect())
+        .unwrap_or_default()
 }
 
-fn probe_blender(report: &mut EnvReport) {
+fn blender_job() -> ProbeResult {
     let method = ProbeMethod::Executable {
         binary: "blender".into(),
-        check_arg: "format probe".into(),
+        check_arg: "--version".into(),
     };
-    let result = (|| -> Result<(String, BTreeSet<String>, Vec<String>), String> {
+    let result = (|| -> Result<(String, String), String> {
         let path = which::which("blender").map_err(|e| format!("blender not found: {e}"))?;
-        let arena = crate::scratch::ScratchArena::new(1024 * 1024)
-            .map_err(|e| format!("probe scratch: {e}"))?;
-        let script = arena
-            .stage_bytes(include_str!("blender_render.py").as_bytes(), "blender_render.py")
-            .map_err(|e| format!("stage probe: {e}"))?;
-        // Shared builder keeps the probe's security flags and environment
-        // containment identical to the render path.  The probe does not need
-        // an X display, so it runs Blender directly instead of via xvfb-run.
-        let mut cmd = crate::blender::probe_command(&script, &arena)
-            .map_err(|e| format!("prepare Blender probe: {e}"))?;
-        cmd.args(["--", "probe"])
+        //  A version check is all we need: the importer surface we rely on is
+        //  keyed off the release that added USD.  Running a real import pass is
+        //  far too slow for startup.
+        let mut cmd = std::process::Command::new(&path);
+        cmd.arg("--version")
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        let output = crate::sandbox::output(&mut cmd, &crate::sandbox::blender())
-            .map_err(|e| format!("Blender probe: {e}"))?;
+        let output = crate::sandbox::output(&mut cmd, &crate::sandbox::probe())
+            .map_err(|e| format!("blender --version: {e}"))?;
         if !output.status.success() {
             return Err(format!(
-                "Blender probe exited {}: {}",
+                "blender --version exited {}: {}",
                 output.status,
                 String::from_utf8_lossy(&output.stderr).trim()
             ));
         }
-        Ok((
-            path.display().to_string(),
-            parse_blender_formats(&output.stdout)?,
-            parse_blender_addons(&output.stdout)?,
-        ))
-    })();
-    let (available, details, unavailable_reason) = match result {
-        Ok((path, formats, addons)) => {
-            // Addon names are diagnostic noise for `check`/`formats`; keep them
-            // out of the backend details and only emit them in raw log mode.
-            if matches!(std::env::var("TBR_LOG").as_deref(), Ok("full")) {
-                eprintln!("[tier3] blender addons: {}", addons.join(", "));
-            }
-            let detail = format!("{path}: {}", formats.iter().cloned().collect::<Vec<_>>().join(", "));
-            report.blender_formats = formats;
-            (true, Some(detail), None)
+        let text = String::from_utf8_lossy(&output.stdout);
+        let first_line = text.lines().next().unwrap_or("").trim().to_string();
+        let version = parse_blender_version(&text)
+            .ok_or_else(|| format!("could not parse Blender version from '{first_line}'"))?;
+        if version < MIN_BLENDER_VERSION {
+            return Err(format!(
+                "Blender {}.{} is too old (need {}.{}+ for USD import)",
+                version.0, version.1, MIN_BLENDER_VERSION.0, MIN_BLENDER_VERSION.1,
+            ));
         }
-        Err(error) => (false, None, Some(error)),
-    };
-    report.backends.insert(
-        "blender".into(),
-        BackendInfo {
+        Ok((path.display().to_string(), first_line))
+    })();
+    match result {
+        Ok((path, version_line)) => {
+            let mut result = ProbeResult::one(BackendInfo {
+                name: "blender".into(),
+                category: "geometry".into(),
+                method,
+                available: true,
+                details: Some(format!("{path}: {version_line}")),
+                unavailable_reason: None,
+            });
+            //  A new-enough Blender has every importer the handler declares, so
+            //  gate dispatch on the version rather than a per-format probe.
+            result.blender_formats = Some(blender_handler_extensions());
+            result
+        }
+        Err(error) => ProbeResult::one(BackendInfo {
             name: "blender".into(),
             category: "geometry".into(),
             method,
-            available,
-            details,
-            unavailable_reason,
-        },
-    );
+            available: false,
+            details: None,
+            unavailable_reason: Some(error),
+        }),
+    }
 }
 
 //  Playwright CLI probe
 
 /// Probe for the Playwright CLI (`playwright-cli`) used for HTML snapshots.
 ///
-/// Finding the binary is not enough - the browser engine has to be installed
-/// too - so the probe is delegated to [`crate::html::probe`], which opens and
-/// closes a real headless session.
-fn probe_playwright(report: &mut EnvReport) {
+/// Delegated to [`crate::html::probe`], which checks the binary and the
+/// browser cache on disk.  It never installs anything and never launches a
+/// browser.
+fn playwright_job() -> ProbeResult {
     let (available, details, unavailable_reason) = crate::html::probe();
-    report.backends.insert(
-        crate::html::HANDLER_NAME.to_string(),
-        BackendInfo {
-            name: crate::html::HANDLER_NAME.to_string(),
-            category: "document".into(),
-            method: ProbeMethod::Executable {
-                binary: "playwright-cli".into(),
-                check_arg: "open about:blank".into(),
-            },
-            available,
-            details,
-            unavailable_reason,
+    ProbeResult::one(BackendInfo {
+        name: crate::html::HANDLER_NAME.to_string(),
+        category: "document".into(),
+        method: ProbeMethod::Executable {
+            binary: "playwright-cli".into(),
+            check_arg: "browser cache".into(),
         },
-    );
+        available,
+        details,
+        unavailable_reason,
+    })
 }
 
 /// Return the cached environment report, or `None` if not yet probed.
@@ -455,43 +636,10 @@ fn probe_shared_libraries(report: &mut EnvReport) {
     }
 }
 
-fn probe_executables(report: &mut EnvReport) {
-    // Each entry is (backend_name, category, binary, check_arg, description).
-    //
-    // These are external command-line tools invoked as subprocesses.
-    // Tier 3 runs them with input on stdin and captures stdout.
-    let candidates: &[(&str, &str, &str, &str, &str)] = &[
-        ("ffmpeg_cli", "image", "ffmpeg", "-version", "FFmpeg CLI (JPEG fallback / transcoding)"),
-        ("ffprobe", "video", "ffprobe", "-version", "FFmpeg media probe"),
-        ("magick", "image", "gm", "version", "GraphicsMagick (arithmetic JPEG, resize)"),
-        (
-            "oiiotool",
-            "image",
-            "oiiotool",
-            "--version",
-            "OpenImageIO (EXR, HDR, DPX, studio formats)",
-        ),
-    ];
-
-    for (name, category, binary, check_arg, desc) in candidates {
-        let (available, details, reason) = try_executable(binary, check_arg, desc);
-        report.backends.insert(
-            name.to_string(),
-            BackendInfo {
-                name: name.to_string(),
-                category: category.to_string(),
-                method: ProbeMethod::Executable {
-                    binary: binary.to_string(),
-                    check_arg: check_arg.to_string(),
-                },
-                available,
-                details,
-                unavailable_reason: reason,
-            },
-        );
-    }
-
-    // Registered handlers - probed by file existence + execute bit.
+fn probe_handler_metadata(report: &mut EnvReport) {
+    // Registered handlers - probed by file existence + execute bit.  This is a
+    // cheap in-process check that seeds an entry for every handler; the
+    // subprocess probes later override the ones they can verify in detail.
     // Handlers with command "(builtin)" are always available (pure-Rust).
     let handlers = HANDLER_REGISTRY.read().unwrap().clone();
     for h in &handlers {
@@ -521,30 +669,23 @@ fn probe_executables(report: &mut EnvReport) {
 
 //  Office (soffice) probe
 
-/// Probe for a usable LibreOffice `soffice`.
+/// Validate a `soffice` build (LibreOffice identity and version).
 ///
-/// The generic handler probe only checks that the file exists and is
-/// executable, which is not enough: OpenOffice/StarOffice also provide a
-/// `soffice` wrapper but do not support LibreOffice's `--convert-to` CLI, and
-/// older LibreOffice builds lack the arguments the office renderer passes.
-/// The detailed validation lives in [`crate::office::probe`]; this wraps its
-/// result in a [`BackendInfo`] under the handler name.
-fn probe_office(report: &mut EnvReport) {
+/// Delegated to [`crate::office::probe`], which only runs `soffice --version`
+/// and overrides the file-existence entry seeded by `probe_handler_metadata`.
+fn office_job() -> ProbeResult {
     let (available, details, unavailable_reason) = crate::office::probe();
-    report.backends.insert(
-        crate::office::HANDLER_NAME.to_string(),
-        BackendInfo {
-            name: crate::office::HANDLER_NAME.to_string(),
-            category: "document".to_string(),
-            method: ProbeMethod::Executable {
-                binary: "soffice".into(),
-                check_arg: "--version + --help".into(),
-            },
-            available,
-            details,
-            unavailable_reason,
+    ProbeResult::one(BackendInfo {
+        name: crate::office::HANDLER_NAME.to_string(),
+        category: "document".to_string(),
+        method: ProbeMethod::Executable {
+            binary: "soffice".into(),
+            check_arg: "--version".into(),
         },
-    );
+        available,
+        details,
+        unavailable_reason,
+    })
 }
 
 fn probe_runtime_services(report: &mut EnvReport) {
@@ -577,69 +718,62 @@ fn probe_runtime_services(report: &mut EnvReport) {
 /// only attempted when `DISPLAY` or `WAYLAND_DISPLAY` is set.  Without a
 /// display we still report the binary as available if it exists and is
 /// executable, but note the display requirement.
-fn probe_f3d(report: &mut EnvReport) {
+fn f3d_job() -> ProbeResult {
+    let method = ProbeMethod::Executable {
+        binary: "f3d".into(),
+        check_arg: "--version".into(),
+    };
     let path = match which::which("f3d") {
         Ok(p) => p,
         Err(_) => {
-            report.backends.insert(
-                "f3d".into(),
-                BackendInfo {
-                    name: "f3d".into(),
-                    category: "geometry".into(),
-                    method: ProbeMethod::Executable {
-                        binary: "f3d".into(),
-                        check_arg: "--version".into(),
-                    },
-                    available: false,
-                    details: None,
-                    unavailable_reason: Some("f3d not found on PATH".into()),
-                },
-            );
-            return;
+            return ProbeResult::one(BackendInfo {
+                name: "f3d".into(),
+                category: "geometry".into(),
+                method,
+                available: false,
+                details: None,
+                unavailable_reason: Some("f3d not found on PATH".into()),
+            })
         }
     };
 
     let has_display =
         std::env::var("DISPLAY").ok().or_else(|| std::env::var("WAYLAND_DISPLAY").ok()).is_some();
 
-    let (details, reason) = if has_display {
-        match std::process::Command::new(&path)
-            .arg("--version")
+    let (available, details, reason) = if has_display {
+        let mut cmd = std::process::Command::new(&path);
+        cmd.arg("--version")
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
-        {
+            .stderr(std::process::Stdio::piped());
+        match crate::sandbox::output(&mut cmd, &crate::sandbox::probe()) {
             Ok(output) => {
                 let first_line = String::from_utf8_lossy(&output.stdout)
                     .lines()
                     .next()
                     .unwrap_or("(no output)")
                     .to_string();
-                (Some(format!("{}: {}", path.display(), first_line)), None)
+                (true, Some(format!("{}: {}", path.display(), first_line)), None)
             }
-            Err(e) => {
-                (Some(format!("found at {}", path.display())), Some(format!("f3d --version: {e}")))
-            }
+            Err(e) => (
+                false,
+                Some(format!("found at {}", path.display())),
+                Some(format!("f3d --version: {e}")),
+            ),
         }
     } else {
         // F3D --version crashes without a display; just note it was found.
-        (Some(format!("{} (display required for version check)", path.display())), None)
+        (true, Some(format!("{} (display required for version check)", path.display())), None)
     };
 
-    report.backends.insert(
-        "f3d".into(),
-        BackendInfo {
-            name: "f3d".into(),
-            category: "geometry".into(),
-            method: ProbeMethod::Executable {
-                binary: "f3d".into(),
-                check_arg: "--version".into(),
-            },
-            available: true,
-            details,
-            unavailable_reason: reason,
-        },
-    );
+    ProbeResult::one(BackendInfo {
+        name: "f3d".into(),
+        category: "geometry".into(),
+        method,
+        available,
+        details,
+        unavailable_reason: reason,
+    })
 }
 
 //  Python + usd-core probe
@@ -649,36 +783,33 @@ fn probe_f3d(report: &mut EnvReport) {
 /// The tier-3 USD pipeline uses a Python script to extract mesh data from
 /// USDZ/USDC/USDA files, then feeds the resulting OBJ to F3D for rendering.
 /// Both Python and usd-core must be present for USD support.
-fn probe_python_usd(report: &mut EnvReport) {
+fn python_usd_job() -> ProbeResult {
+    let method = ProbeMethod::Executable {
+        binary: "python3".into(),
+        check_arg: "--version".into(),
+    };
     let python = match which::which("python3") {
         Ok(p) => p,
         Err(_) => {
-            report.backends.insert(
-                "python3".into(),
-                BackendInfo {
-                    name: "python3".into(),
-                    category: "runtime".into(),
-                    method: ProbeMethod::Executable {
-                        binary: "python3".into(),
-                        check_arg: "--version".into(),
-                    },
-                    available: false,
-                    details: None,
-                    unavailable_reason: Some("python3 not found on PATH".into()),
-                },
-            );
-            return;
+            return ProbeResult::one(BackendInfo {
+                name: "python3".into(),
+                category: "runtime".into(),
+                method,
+                available: false,
+                details: None,
+                unavailable_reason: Some("python3 not found on PATH".into()),
+            })
         }
     };
 
     // Check Python version.
-    let py_ver = std::process::Command::new(&python)
-        .arg("--version")
+    let mut cmd = std::process::Command::new(&python);
+    cmd.arg("--version")
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .ok()
-        .map(|o| {
+        .stderr(std::process::Stdio::piped());
+    let py_ver = match crate::sandbox::output(&mut cmd, &crate::sandbox::probe()) {
+        Ok(o) => {
             let s = String::from_utf8_lossy(&o.stdout);
             let s = s.trim();
             if s.is_empty() {
@@ -686,42 +817,47 @@ fn probe_python_usd(report: &mut EnvReport) {
             } else {
                 s.to_string()
             }
-        })
-        .unwrap_or_else(|| "unknown version".into());
+        }
+        Err(e) => {
+            return ProbeResult::one(BackendInfo {
+                name: "python3".into(),
+                category: "runtime".into(),
+                method,
+                available: false,
+                details: Some(format!("found at {}", python.display())),
+                unavailable_reason: Some(format!("python3 --version: {e}")),
+            })
+        }
+    };
 
     // Check for usd-core (the PyPI package that provides pxr.Usd).
-    let usd_ok = std::process::Command::new(&python)
-        .arg("-c")
+    let mut cmd = std::process::Command::new(&python);
+    cmd.arg("-c")
         .arg("from pxr import Usd")
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
+        .stderr(std::process::Stdio::null());
+    let usd_ok = crate::sandbox::output(&mut cmd, &crate::sandbox::probe())
+        .map(|o| o.status.success())
         .unwrap_or(false);
 
-    report.backends.insert(
-        "python3".into(),
-        BackendInfo {
-            name: "python3".into(),
-            category: "runtime".into(),
-            method: ProbeMethod::Executable {
-                binary: "python3".into(),
-                check_arg: "--version".into(),
-            },
-            available: true,
-            details: Some(format!(
-                "{}: {}; usd-core {}",
-                python.display(),
-                py_ver,
-                if usd_ok { "available" } else { "NOT FOUND" }
-            )),
-            unavailable_reason: if usd_ok {
-                None
-            } else {
-                Some("usd-core not installed (pip install usd-core)".into())
-            },
+    ProbeResult::one(BackendInfo {
+        name: "python3".into(),
+        category: "runtime".into(),
+        method,
+        available: true,
+        details: Some(format!(
+            "{}: {}; usd-core {}",
+            python.display(),
+            py_ver,
+            if usd_ok { "available" } else { "NOT FOUND" }
+        )),
+        unavailable_reason: if usd_ok {
+            None
+        } else {
+            Some("usd-core not installed (pip install usd-core)".into())
         },
-    );
+    })
 }
 
 //  Low-level probe helpers
@@ -742,24 +878,23 @@ fn try_dlopen(soname: &str, _desc: &str) -> (bool, Option<String>, Option<String
 
 /// Try to locate an executable on `$PATH` and run it with a benign check arg.
 ///
+/// The command is bounded by [`crate::sandbox::probe`], so a tool that hangs
+/// is reported unavailable rather than stalling startup.
+///
 /// Returns `(available, details, reason)`.
-fn try_executable(
-    binary: &str,
-    check_arg: &str,
-    _desc: &str,
-) -> (bool, Option<String>, Option<String>) {
+fn try_executable(binary: &str, check_arg: &str) -> (bool, Option<String>, Option<String>) {
     let path = match which::which(binary) {
         Ok(p) => p,
         Err(e) => return (false, None, Some(format!("which({binary}): {e}"))),
     };
 
     // Run the binary with the check arg and capture the first line of output.
-    match std::process::Command::new(&path)
-        .arg(check_arg)
+    let mut cmd = std::process::Command::new(&path);
+    cmd.arg(check_arg)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-    {
+        .stderr(std::process::Stdio::piped());
+    match crate::sandbox::output(&mut cmd, &crate::sandbox::probe()) {
         Ok(output) => {
             let first_line = String::from_utf8_lossy(&output.stdout)
                 .lines()

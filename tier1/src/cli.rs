@@ -9,6 +9,7 @@
 //! <binary> result <url>...          # thumbnail URLs, print result metadata
 //! <binary> check                    # validate runtime config and dependencies
 //! <binary> formats            # list all supported formats by kind
+//! <binary> probe              # print TBR_PROBE=... for available external tools
 //! <binary> service            # print deployment config files
 //! <binary> license            # print third-party license notices
 //! <binary> version            # print build version
@@ -119,6 +120,13 @@ enum Command {
         json: bool,
     },
 
+    /// Print the TBR_PROBE value listing available external tools.
+    ///
+    /// Runs every environment probe (ignoring any existing `TBR_PROBE`) and
+    /// prints the `TBR_PROBE=...` line that reproduces the result.  Set that
+    /// variable in a container to skip startup probing entirely.
+    Probe,
+
     /// Print or write a deployment config file.
     ///
     /// Without an alias, lists the available files. Each file is embedded
@@ -185,7 +193,7 @@ where
 
     let runtime = if !matches!(
         cli.command,
-        Command::Check { .. } | Command::Formats { .. } | Command::Service { .. }
+        Command::Check { .. } | Command::Formats { .. } | Command::Service { .. } | Command::Probe
     ) {
         let cfg = crate::config::AppConfig::from_env();
 
@@ -217,6 +225,7 @@ where
         }
         Command::Check { json } => run_check(json, tier).await,
         Command::Formats { json } => run_formats(json),
+        Command::Probe => run_probe(),
         Command::Service { alias, write } => run_service(alias, write),
         Command::Version => run_version(tier),
         Command::License => run_license(),
@@ -1036,6 +1045,19 @@ fn run_formats(json: bool) {
     }
     if !tier3_available {
         println!("  Tier 3 is NOT configured - set TBR_TIER3 to enable.");
+    }
+}
+
+//  probe
+
+/// Print the `TBR_PROBE=...` value computed by the environment probe.
+///
+/// A higher tier registers the value after probing; without one (e.g. the
+/// tier1 binary) there are no external tools, so print an empty list.
+fn run_probe() {
+    match crate::check::probe_envvar() {
+        Some(value) => println!("{value}"),
+        None => println!("TBR_PROBE="),
     }
 }
 

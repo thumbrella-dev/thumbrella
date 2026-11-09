@@ -200,6 +200,23 @@ pub fn format_tools() -> Option<(Vec<String>, Vec<String>)> {
     FORMAT_TOOLS.read().unwrap().clone()
 }
 
+//  Probe cache envvar
+//
+//  Registered by tier3 after the environment probe.  The `probe` command
+//  prints it, and `check` shows it like the other TBR_* variables.
+
+static PROBE_ENVVAR: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// Record the `TBR_PROBE=...` value computed by the environment probe.
+pub fn set_probe_envvar(value: String) {
+    *PROBE_ENVVAR.write().unwrap() = Some(value);
+}
+
+/// The `TBR_PROBE=...` value, if a higher tier computed it.
+pub fn probe_envvar() -> Option<String> {
+    PROBE_ENVVAR.read().unwrap().clone()
+}
+
 /// Queue footer notes for the `check` report.
 pub fn register_check_notes(notes: Vec<String>) {
     CHECK_NOTES.write().unwrap().extend(notes);
@@ -254,6 +271,11 @@ pub struct CheckReport {
     /// Checks whether the configured `TBR_HANDSHAKE` value looks like an auth
     /// token (starts with `tbr_[a-z]_`), which would indicate a misconfiguration.
     pub handshake_validation: Validation,
+
+    /// Value of `TBR_PROBE` if set (comma-separated available tools), else
+    /// `None` when the environment is probed live at startup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_cache: Option<String>,
 
     //  Tier 1
     /// Tier 1 is always builtin - this field is informational only.
@@ -452,6 +474,7 @@ pub fn collect(cfg: &crate::config::AppConfig) -> CheckReport {
         trace_file_check,
         handshake_set: cfg.handshake.is_some(),
         handshake_validation,
+        probe_cache: std::env::var("TBR_PROBE").ok().filter(|s| !s.trim().is_empty()),
         tier1: TierStatus::Builtin,
         tier2,
         tier2_handoff,
@@ -706,6 +729,12 @@ impl CheckReport {
         // TBR_LOCAL
         let local_val = if self.allow_local { "allowed" } else { "denied" };
         print_env_line("TBR_LOCAL", local_val, "");
+
+        // TBR_PROBE
+        match self.probe_cache.as_deref() {
+            Some(list) => print_env_line("TBR_PROBE", list, ""),
+            None => print_env_default("TBR_PROBE", "unset (live probe)"),
+        }
 
         // TBR_TRACE
         print_dsn_var("TBR_TRACE", &self.trace_url, &self.trace_validation, &self.trace_file_check);

@@ -313,13 +313,12 @@ fn scrape_pages(
 /// and do not implement LibreOffice's `--convert-to` pipeline, and LibreOffice
 /// builds older than [`MIN_LIBREOFFICE_VERSION`] lack the arguments used here.
 ///
-/// The probe therefore checks three things:
-///
-/// 1. `soffice --version` identifies the build as **LibreOffice** (rejecting
-///    OpenOffice/StarOffice banners).
-/// 2. The reported version is at least [`MIN_LIBREOFFICE_VERSION`].
-/// 3. `soffice --help` lists both `--headless` and `--convert-to`, proving the
-///    arguments passed by [`soffice_png`] are understood.
+/// The probe only runs `soffice --version`: the banner identifies the build as
+/// **LibreOffice** (rejecting OpenOffice/StarOffice shims) and yields the
+/// version, which must be at least [`MIN_LIBREOFFICE_VERSION`].  `--headless`
+/// and `--convert-to` have existed since long before that minimum, so parsing
+/// `--help` would tell us nothing extra - and it is slow, since it can spin up
+/// a session just to print usage.
 ///
 /// Returns `(available, details, unavailable_reason)` in the same shape as the
 /// other tier-3 probes.
@@ -330,13 +329,12 @@ pub fn probe() -> (bool, Option<String>, Option<String>) {
     };
 
     //  Identify the build from its version banner.
-    let banner = match Command::new(&path)
-        .arg("--version")
+    let mut cmd = Command::new(&path);
+    cmd.arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-    {
+        .stderr(Stdio::piped());
+    let banner = match crate::sandbox::output(&mut cmd, &crate::sandbox::office()) {
         Ok(output) => {
             let mut text = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if text.is_empty() {
@@ -360,14 +358,7 @@ pub fn probe() -> (bool, Option<String>, Option<String>) {
         return (false, Some(label), Some(reason));
     }
 
-    //  Confirm the exact arguments we pass are recognised.
-    match help_text(&path) {
-        Ok(help) => match check_help(&help) {
-            Ok(()) => (true, Some(label), None),
-            Err(reason) => (false, Some(label), Some(reason)),
-        },
-        Err(reason) => (false, Some(label), Some(reason)),
-    }
+    (true, Some(label), None)
 }
 
 /// Validate a `soffice --version` banner, returning the parsed
@@ -408,47 +399,6 @@ fn parse_libreoffice_version(banner: &str) -> Option<(u32, u32)> {
     let major: u32 = parts.next()?.parse().ok()?;
     let minor: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     Some((major, minor))
-}
-
-/// Ensure the `--help` text advertises the options this module depends on.
-fn check_help(help: &str) -> Result<(), String> {
-    let mut missing = Vec::new();
-    if !help.contains("--headless") {
-        missing.push("--headless");
-    }
-    if !help.contains("--convert-to") {
-        missing.push("--convert-to");
-    }
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(format!("soffice help lacks required options: {}", missing.join(", ")))
-    }
-}
-
-/// Capture `soffice --help`, using a throwaway profile so the probe does not
-/// touch (or lock) the real user profile.
-fn help_text(path: &Path) -> Result<String, String> {
-    let profile = tempfile::Builder::new()
-        .prefix("tbr-soffice-probe")
-        .tempdir()
-        .map_err(|e| format!("create soffice probe profile: {e}"))?;
-
-    let output = Command::new(path)
-        .arg(format!("-env:UserInstallation=file://{}", profile.path().display()))
-        .arg("--help")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| format!("soffice --help: {e}"))?;
-
-    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-    text.push_str(&String::from_utf8_lossy(&output.stderr));
-    if text.trim().is_empty() {
-        return Err("soffice --help produced no output".into());
-    }
-    Ok(text)
 }
 
 /// Convert `input` to a PNG with soffice and decode the result.
@@ -823,13 +773,5 @@ mod tests {
         assert!(check_banner("").is_err());
         // Old LibreOffice is rejected by version, not just identity.
         assert!(check_banner("LibreOffice 5.4.7.2 40(Build:2)\n").is_err());
-    }
-
-    #[test]
-    fn help_must_advertise_required_options() {
-        let help = "Usage: soffice [options]...\n  --headless\n  --convert-to ext\n";
-        assert!(check_help(help).is_ok());
-        assert!(check_help("  --headless only\n").is_err());
-        assert!(check_help("  --convert-to only\n").is_err());
     }
 }

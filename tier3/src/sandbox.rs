@@ -55,6 +55,20 @@ pub fn default_strict() -> SandboxConfig {
     SandboxConfig::default()
 }
 
+/// Hard deadline for startup capability probes.
+///
+/// A probe only runs a trivial command (`--version`, an import check).  If a
+/// tool cannot answer within this window it is treated as misconfigured, so a
+/// wedged external binary can never hold startup hostage waiting for health
+/// checks.
+pub fn probe() -> SandboxConfig {
+    SandboxConfig {
+        timeout: Duration::from_secs(2),
+        max_fds: 1024,
+        ..SandboxConfig::default()
+    }
+}
+
 /// Limits tailored to Blender renders.
 ///
 /// Blender needs a longer startup/render budget than the generic 20 s

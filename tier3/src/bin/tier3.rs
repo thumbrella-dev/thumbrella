@@ -9,6 +9,11 @@
 
 #[tokio::main]
 async fn main() {
+    //  The `probe` command must ignore TBR_PROBE and run the real probes.
+    if std::env::args().skip(1).any(|a| a == "probe") {
+        tier3::env_check::set_force_probe();
+    }
+
     let tier2_env = std::env::var("TBR_TIER2").ok().filter(|s| !s.is_empty());
     let tier3_env = std::env::var("TBR_TIER3").ok().filter(|s| !s.is_empty());
 
@@ -133,6 +138,9 @@ async fn main() {
 
     //  Register check sections
     register_tier3_check(&env_report);
+
+    //  Record the TBR_PROBE value for the `probe` command and `check` output.
+    tier1::check::set_probe_envvar(tier3::env_check::probe_envvar(&env_report));
 
     //  When running local (no TBR_TIER3), report on the external tools:
     //  - `formats` footer lists which tools were found vs missing

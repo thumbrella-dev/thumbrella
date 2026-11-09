@@ -18,6 +18,7 @@
 //! | `TBR_PIN`                  | 604800  | Sliding pin TTL in seconds; 0 disables pin URLs |
 //! | `TBR_TRACE`                | -       | Trace sink DSN - `ndjson:<path>`, …              |
 //! | `TBR_LOG`                  | standard| Output level: `standard`, `minimal`, `full`      |
+//! | `TBR_PROBE`                | -       | Comma-separated available external tools; skips startup probing |
 //!
 //! # Connect-string syntax
 //!

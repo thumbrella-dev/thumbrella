@@ -75,15 +75,6 @@ pub(crate) fn command(script: &Path, arena: &ScratchArena) -> std::io::Result<Co
     configure(cmd, script, arena)
 }
 
-/// Build a Blender command for the startup probe.
-///
-/// The probe only imports modules, so it does not need an X display and is run
-/// directly through `blender` rather than `xvfb-run`.  All other flags and
-/// environment settings match [`command`].
-pub(crate) fn probe_command(script: &Path, arena: &ScratchArena) -> std::io::Result<Command> {
-    configure(Command::new("blender"), script, arena)
-}
-
 /// Apply the common arguments and environment containment to `cmd`.
 fn configure(mut cmd: Command, script: &Path, arena: &ScratchArena) -> std::io::Result<Command> {
     let base = arena.root();
