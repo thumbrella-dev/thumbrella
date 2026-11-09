@@ -144,6 +144,11 @@ pub fn probe_environment() -> EnvReport {
     //  Executable backends
     probe_executables(&mut report);
 
+    //  LibreOffice (soffice) - needs build/version/flag validation, not just
+    //  a PATH lookup, so it gets a dedicated probe that overrides the generic
+    //  handler entry inserted by `probe_executables`.
+    probe_office(&mut report);
+
     //  F3D (geometry renderer with X11 dependency)
     probe_f3d(&mut report);
     probe_blender(&mut report);
@@ -512,6 +517,34 @@ fn probe_executables(report: &mut EnvReport) {
             },
         );
     }
+}
+
+//  Office (soffice) probe
+
+/// Probe for a usable LibreOffice `soffice`.
+///
+/// The generic handler probe only checks that the file exists and is
+/// executable, which is not enough: OpenOffice/StarOffice also provide a
+/// `soffice` wrapper but do not support LibreOffice's `--convert-to` CLI, and
+/// older LibreOffice builds lack the arguments the office renderer passes.
+/// The detailed validation lives in [`crate::office::probe`]; this wraps its
+/// result in a [`BackendInfo`] under the handler name.
+fn probe_office(report: &mut EnvReport) {
+    let (available, details, unavailable_reason) = crate::office::probe();
+    report.backends.insert(
+        crate::office::HANDLER_NAME.to_string(),
+        BackendInfo {
+            name: crate::office::HANDLER_NAME.to_string(),
+            category: "document".to_string(),
+            method: ProbeMethod::Executable {
+                binary: "soffice".into(),
+                check_arg: "--version + --help".into(),
+            },
+            available,
+            details,
+            unavailable_reason,
+        },
+    );
 }
 
 fn probe_runtime_services(report: &mut EnvReport) {

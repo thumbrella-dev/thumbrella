@@ -20,7 +20,7 @@
 
 use std::io::{Cursor, Read, Seek};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use image::DynamicImage;
 use tier1::renderer::RenderOutput;
@@ -35,6 +35,11 @@ pub const OFFICE_EXTENSIONS: &[&str] =
 
 /// Name under which the handler is registered in the environment check.
 pub const HANDLER_NAME: &str = "soffice";
+
+/// Oldest LibreOffice (major, minor) the `--headless --convert-to` pipeline
+/// here is known to work with.  Older builds either lack `--convert-to` or
+/// predate the current headless render path.
+const MIN_LIBREOFFICE_VERSION: (u32, u32) = (6, 0);
 
 /// Largest document staged for conversion.
 const MAX_DOCUMENT_BYTES: u64 = 100 * 1024 * 1024;
@@ -300,6 +305,151 @@ fn scrape_pages(
 }
 
 //  soffice
+
+/// Probe for a `soffice` build that can actually do what this module needs.
+///
+/// Finding `soffice` on `$PATH` is not enough: Apache OpenOffice and
+/// StarOffice also ship a `soffice` wrapper but use a different command line
+/// and do not implement LibreOffice's `--convert-to` pipeline, and LibreOffice
+/// builds older than [`MIN_LIBREOFFICE_VERSION`] lack the arguments used here.
+///
+/// The probe therefore checks three things:
+///
+/// 1. `soffice --version` identifies the build as **LibreOffice** (rejecting
+///    OpenOffice/StarOffice banners).
+/// 2. The reported version is at least [`MIN_LIBREOFFICE_VERSION`].
+/// 3. `soffice --help` lists both `--headless` and `--convert-to`, proving the
+///    arguments passed by [`soffice_png`] are understood.
+///
+/// Returns `(available, details, unavailable_reason)` in the same shape as the
+/// other tier-3 probes.
+pub fn probe() -> (bool, Option<String>, Option<String>) {
+    let path = match which::which("soffice") {
+        Ok(path) => path,
+        Err(e) => return (false, None, Some(format!("soffice not found: {e}"))),
+    };
+
+    //  Identify the build from its version banner.
+    let banner = match Command::new(&path)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+    {
+        Ok(output) => {
+            let mut text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if text.is_empty() {
+                text = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            }
+            text
+        }
+        Err(e) => {
+            return (
+                false,
+                Some(format!("found at {}", path.display())),
+                Some(format!("soffice --version: {e}")),
+            )
+        }
+    };
+
+    let first_line = banner.lines().next().unwrap_or("").trim().to_string();
+    let label = format!("{}: {}", path.display(), first_line);
+
+    if let Err(reason) = check_banner(&banner) {
+        return (false, Some(label), Some(reason));
+    }
+
+    //  Confirm the exact arguments we pass are recognised.
+    match help_text(&path) {
+        Ok(help) => match check_help(&help) {
+            Ok(()) => (true, Some(label), None),
+            Err(reason) => (false, Some(label), Some(reason)),
+        },
+        Err(reason) => (false, Some(label), Some(reason)),
+    }
+}
+
+/// Validate a `soffice --version` banner, returning the parsed
+/// `(major, minor)` version or a human-readable rejection reason.
+fn check_banner(banner: &str) -> Result<(u32, u32), String> {
+    let first_line = banner.lines().next().unwrap_or("").trim();
+
+    if !banner.contains("LibreOffice") {
+        return Err(if first_line.is_empty() {
+            "soffice --version produced no output (not LibreOffice?)".into()
+        } else {
+            format!(
+                "not LibreOffice ({first_line}); OpenOffice/StarOffice lack --convert-to"
+            )
+        });
+    }
+
+    let version = parse_libreoffice_version(banner).ok_or_else(|| {
+        format!("could not parse a LibreOffice version from '{first_line}'")
+    })?;
+
+    if version < MIN_LIBREOFFICE_VERSION {
+        return Err(format!(
+            "LibreOffice {}.{} is too old (need {}.{}+ for --headless --convert-to)",
+            version.0, version.1, MIN_LIBREOFFICE_VERSION.0, MIN_LIBREOFFICE_VERSION.1,
+        ));
+    }
+
+    Ok(version)
+}
+
+/// Parse `(major, minor)` from a banner such as
+/// `LibreOffice 7.4.7.2 40(Build:2)` or `LibreOffice 24.8.4.2 48(Build:2)`.
+fn parse_libreoffice_version(banner: &str) -> Option<(u32, u32)> {
+    let rest = banner.split_once("LibreOffice")?.1.trim_start();
+    let token = rest.split_whitespace().next()?;
+    let mut parts = token.split('.');
+    let major: u32 = parts.next()?.parse().ok()?;
+    let minor: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    Some((major, minor))
+}
+
+/// Ensure the `--help` text advertises the options this module depends on.
+fn check_help(help: &str) -> Result<(), String> {
+    let mut missing = Vec::new();
+    if !help.contains("--headless") {
+        missing.push("--headless");
+    }
+    if !help.contains("--convert-to") {
+        missing.push("--convert-to");
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("soffice help lacks required options: {}", missing.join(", ")))
+    }
+}
+
+/// Capture `soffice --help`, using a throwaway profile so the probe does not
+/// touch (or lock) the real user profile.
+fn help_text(path: &Path) -> Result<String, String> {
+    let profile = tempfile::Builder::new()
+        .prefix("tbr-soffice-probe")
+        .tempdir()
+        .map_err(|e| format!("create soffice probe profile: {e}"))?;
+
+    let output = Command::new(path)
+        .arg(format!("-env:UserInstallation=file://{}", profile.path().display()))
+        .arg("--help")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("soffice --help: {e}"))?;
+
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    if text.trim().is_empty() {
+        return Err("soffice --help produced no output".into());
+    }
+    Ok(text)
+}
 
 /// Convert `input` to a PNG with soffice and decode the result.
 ///
@@ -644,5 +794,42 @@ mod tests {
         assert_eq!(property_set_u32(&s, 14), Some(9));
         assert_eq!(property_set_u32(&s, 7), None);
         assert_eq!(property_set_u32(&s[..30], 14), None);
+    }
+
+    #[test]
+    fn parses_libreoffice_version() {
+        assert_eq!(
+            parse_libreoffice_version("LibreOffice 7.4.7.2 40(Build:2)"),
+            Some((7, 4))
+        );
+        assert_eq!(
+            parse_libreoffice_version("LibreOffice 24.8.4.2 48(Build:2)"),
+            Some((24, 8))
+        );
+        // No minor component degrades to 0.
+        assert_eq!(parse_libreoffice_version("LibreOffice 7"), Some((7, 0)));
+        assert_eq!(parse_libreoffice_version("OpenOffice 4.1.14"), None);
+        assert_eq!(parse_libreoffice_version(""), None);
+    }
+
+    #[test]
+    fn rejects_non_libreoffice_and_old_builds() {
+        // A genuine LibreOffice banner above the minimum passes.
+        assert!(check_banner("LibreOffice 7.4.7.2 40(Build:2)\n").is_ok());
+        // OpenOffice/StarOffice ship a soffice shim but no --convert-to.
+        assert!(check_banner("Apache OpenOffice 4.1.14\n").is_err());
+        assert!(check_banner("StarOffice 9\n").is_err());
+        // Empty banner (broken wrapper).
+        assert!(check_banner("").is_err());
+        // Old LibreOffice is rejected by version, not just identity.
+        assert!(check_banner("LibreOffice 5.4.7.2 40(Build:2)\n").is_err());
+    }
+
+    #[test]
+    fn help_must_advertise_required_options() {
+        let help = "Usage: soffice [options]...\n  --headless\n  --convert-to ext\n";
+        assert!(check_help(help).is_ok());
+        assert!(check_help("  --headless only\n").is_err());
+        assert!(check_help("  --convert-to only\n").is_err());
     }
 }
