@@ -2,6 +2,10 @@
 
 ## Development
 
+## 2.4.0 - 2026/11/09
+
+Full support for office and website thumbnails
+
 - Support for MS Office and other document formats
 - Support web urls and html thumbnail rendering
 - Docker hub container gets more formats, like pdf, jp2, and more
