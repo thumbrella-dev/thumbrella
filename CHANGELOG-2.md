@@ -2,6 +2,8 @@
 
 ## Development
 
+- Fix regression in external ffmpeg probe
+
 ## 2.4.1 - 2026/11/10
 
 Startup a few seconds faster by simplifying or skipping probe of external tools

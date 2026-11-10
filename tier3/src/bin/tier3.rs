@@ -90,12 +90,27 @@ async fn main() {
         description: "Office document renderer (LibreOffice headless)",
     });
 
+    // FFmpeg CLI handles FLV video plus every image format that tiers 1/2
+    // cannot decode at all.  Image decodes go through
+    // `renderer::render_image_ffmpeg_fallback`, which needs both `ffmpeg` and
+    // `ffprobe`, so one declaration covers both roles.
     tier3::env_check::register_handler(tier3::env_check::HandlerDecl {
         name: "ffmpeg_cli",
         category: "video",
         command: "ffmpeg",
-        extensions: &["flv"],
-        description: "Flash video renderer (FFmpeg CLI)",
+        extensions: &["flv", "avif", "dcm", "jp2", "pam", "qoi", "xwd"],
+        description: "FLV video and image-only formats (FFmpeg CLI)",
+    });
+
+    // Frame/plate image formats oiiotool reads better than FFmpeg.  The
+    // extension list is shared with `renderer::is_oiio_format`, which is what
+    // actually picks the tool at render time, so the two cannot drift apart.
+    tier3::env_check::register_handler(tier3::env_check::HandlerDecl {
+        name: "oiiotool",
+        category: "image",
+        command: "oiiotool",
+        extensions: tier3::renderer::OIIO_IMAGE_EXTENSIONS,
+        description: "Frame and plate image formats (OpenImageIO)",
     });
 
     // HTML pages are rendered by the Playwright CLI, which loads the original

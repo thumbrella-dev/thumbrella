@@ -362,20 +362,18 @@ fn run_magick_image_decode(bytes: &[u8], ext: &str) -> Result<RenderOutput, Stri
     })
 }
 
+/// Image extensions that oiiotool reads better than FFmpeg.
+///
+/// Single source of truth for the FFmpeg-vs-oiiotool split.  It is also what
+/// the `oiiotool` handler declares as its extensions, so `formats` and `check`
+/// report availability from the same list the render path uses.  `hdr` and
+/// `rgbe` normally render in tier 2; oiiotool only serves them as a fallback.
+pub const OIIO_IMAGE_EXTENSIONS: &[&str] =
+    &["hdr", "rgbe", "dpx", "cin", "fits", "iff", "pic", "rla", "zfile"];
+
 /// Check if an extension is best handled by oiiotool (skip tier2).
 fn is_oiio_format(ext: &str) -> bool {
-    matches!(
-        ext,
-        "hdr"
-            | "rgbe"
-            | "dpx"
-            | "cin"
-            | "fits"
-            | "iff"
-            | "pic"
-            | "rla"
-            | "zfile"
-    )
+    OIIO_IMAGE_EXTENSIONS.contains(&ext)
 }
 
 /// Header information parsed directly from a JPEG 2000 codestream.
