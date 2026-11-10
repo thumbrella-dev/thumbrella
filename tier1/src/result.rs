@@ -170,7 +170,8 @@ pub struct ThumbResult {
     pub pin: Option<String>,
     /// Wall-clock seconds to produce this result.
     pub duration: f64,
-    /// Bytes fetched from the upstream source.
+    /// Bytes fetched from the upstream source and, for HTML, browser response
+    /// bodies from requests completed by the accounting read after the screenshot.
     pub download_size: u64,
     /// HTTP status returned by the upstream source, if fetched.
     #[serde(default)]

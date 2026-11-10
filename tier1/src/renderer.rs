@@ -126,6 +126,8 @@ pub trait RenderCook: Send {
     fn add_bytes_consumed(&mut self, n: u64) {
         self.set_bytes_consumed(n);
     }
+    /// Add bytes fetched independently of the source reader, such as browser resources.
+    fn add_external_download_bytes(&mut self, n: u64);
 }
 
 // RenderCook is implemented for ThumbCook in cook.rs (needs private field access).

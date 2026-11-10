@@ -318,6 +318,26 @@ fn capability_renderer(available: bool) -> Arc<CapabilityRenderer> {
 }
 
 #[tokio::test]
+async fn headerless_success_uses_default_freshness_and_durable_cache() {
+    let response = reply(200, &[("content-type", "text/html")]);
+    let url = register_path("headerless-freshness", "page.html", vec![response]);
+    let backend = memory();
+    let renderer = capability_renderer(true);
+    let mut rt = runtime(CacheStore::backend_only(backend.clone()));
+    Arc::make_mut(&mut rt).renderer = Some(renderer.clone());
+
+    let before = unix_now_secs();
+    let first = run(&url, rt.clone(), None).await;
+    assert_eq!(first.source, Some(ResultSource::Render));
+    let hints = CacheHints::decode(&first.media.unwrap().cache).unwrap();
+    assert!((before + 60..=unix_now_secs() + 60).contains(&hints.expires_at.unwrap()));
+    assert!(backend.get_entry(&url, 0).await.unwrap().is_fresh(unix_now_secs()));
+    assert_eq!(run(&url, rt, None).await.source, Some(ResultSource::Cache));
+    assert_eq!(requests(&url).len(), 1);
+    assert_eq!(renderer.calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
 async fn blend_preview_shortcut_and_render_fallback() {
     use std::io::Write;
 
@@ -490,6 +510,24 @@ async fn closing_http_buffer_preserves_download_accounting_for_any_media() {
     cook.stamp_download_bytes();
     assert_eq!(cook.out_download_bytes, body.len() as u64);
     assert_eq!(cook.tel_io_secs, io_secs);
+}
+
+#[tokio::test]
+async fn external_download_bytes_include_source_fetch_once() {
+    use crate::renderer::RenderCook;
+
+    let body = vec![b'x'; 8192];
+    let mut response = reply(200, &[]);
+    response.body = body.clone();
+    let url = register_path("external-accounting", "file.html", vec![response]);
+    let mut cook = ThumbCook::<MockStream>::new(url, runtime(CacheStore::none()));
+    pipeline::connect(&mut cook).await;
+    pipeline::inspect(&mut cook).await;
+    assert_eq!(cook.http_bytes_fetched(), body.len() as u64);
+    cook.http_close().await;
+    cook.add_external_download_bytes(300);
+    cook.add_external_download_bytes(100);
+    assert_eq!(cook.render_bytes_consumed, Some(body.len() as u64 + 400));
 }
 
 #[tokio::test]

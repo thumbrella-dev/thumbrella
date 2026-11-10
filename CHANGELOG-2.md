@@ -2,6 +2,8 @@
 
 ## Development
 
+- Improve caching and metadata for html web thumbnails
+- Correct default unit for cache size configuration (use mb, not kb)
 
 ## 2.4.2 - 2026/11/10
 

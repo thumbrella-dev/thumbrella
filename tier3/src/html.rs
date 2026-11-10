@@ -9,8 +9,7 @@
 //!
 //! The same path serves MHTML web archives: they are self-contained pages, so
 //! the browser renders them without any unpacking on our side.  Local inputs
-//! (`file://`) are loaded through `run-code` because `open` blocks that
-//! protocol.
+//! (`file://`) are enabled in the session configuration.
 //!
 //! # Environment contract
 //!
@@ -54,6 +53,23 @@ pub const HTML_EXTENSIONS: &[&str] = &["html", "xhtml", "mhtml"];
 
 /// Command invoked for a snapshot.
 const CLI_BINARY: &str = "playwright-cli";
+
+const START_NETWORK_ACCOUNTING: &str = r#"async page => {
+    page.__thumbrellaSizes = [];
+    page.on("requestfinished", request => {
+        page.__thumbrellaSizes.push(request.sizes().then(
+            sizes => ({ bytes: sizes.responseBodySize }),
+            error => ({ error: String(error) })
+        ));
+    });
+}"#;
+
+const READ_NETWORK_ACCOUNTING: &str = r#"async page => {
+    const sizes = await Promise.all(page.__thumbrellaSizes);
+    const failed = sizes.find(size => size.error);
+    if (failed) throw new Error(failed.error);
+    return sizes.reduce((total, size) => total + size.bytes, 0);
+}"#;
 
 /// Bytes reserved in the scratch arena for a screenshot.
 const MAX_SNAPSHOT_BYTES: u64 = 128 * 1024 * 1024;
@@ -125,7 +141,15 @@ pub async fn render(cook: &mut dyn RenderCook, ext: &str) -> bool {
     let result = tokio::task::spawn_blocking(move || snapshot(&url)).await;
 
     match result {
-        Ok(Ok(image)) => {
+        Ok(Ok((image, browser_bytes))) => {
+            match browser_bytes {
+                Ok(bytes) => cook.add_external_download_bytes(bytes),
+                Err(error) => {
+                    tier1::ux::get()
+                        .warn_message(&format!("browser download size unavailable: {error}"));
+                    cook.add_external_download_bytes(0);
+                }
+            }
             // No source properties: the screenshot dimensions describe our
             // own canvas, not the page, so reporting them as width/height
             // would be misleading metadata.
@@ -156,8 +180,9 @@ pub async fn render(cook: &mut dyn RenderCook, ext: &str) -> bool {
 /// Load `url` in a headless browser and return the viewport screenshot.
 ///
 /// A unique browser session is created per call and closed on the way out,
-/// including on the error paths.
-fn snapshot(url: &str) -> Result<DynamicImage, String> {
+/// including on the error paths. Download bytes include response bodies for
+/// browser requests completed by the accounting read after the screenshot.
+fn snapshot(url: &str) -> Result<(DynamicImage, Result<u64, String>), String> {
     let arena = ScratchArena::new(MAX_SNAPSHOT_BYTES).map_err(|e| format!("scratch arena: {e}"))?;
     let work_dir = arena.root();
 
@@ -197,13 +222,25 @@ fn snapshot(url: &str) -> Result<DynamicImage, String> {
     let out_path = arena.output_path("png");
     let out_str = out_path.to_str().ok_or("non-UTF-8 scratch path")?;
 
-    let args = open_args(url, &idle, Some(config));
+    let args = open_args("about:blank", &idle, Some(config));
     run_cli(work_dir, &session, "open", &args)?;
+    let accounting_started = run_cli(work_dir, &session, "run-code", &[START_NETWORK_ACCOUNTING]);
+    run_cli(work_dir, &session, "goto", &[url])?;
     run_cli(work_dir, &session, "screenshot", &["--filename", out_str, "--type", "png"])?;
+    let browser_bytes = accounting_started.and_then(|_| {
+        run_cli(work_dir, &session, "run-code", &[READ_NETWORK_ACCOUNTING]).and_then(|accounting| {
+            accounting
+                .get("result")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "browser download size missing from Playwright response".to_string())?
+                .parse::<u64>()
+                .map_err(|e| format!("invalid browser download size: {e}"))
+        })
+    });
 
     let bytes = arena.read_output(&out_path).map_err(|e| format!("read screenshot: {e}"))?;
     let image = image::load_from_memory(&bytes).map_err(|e| format!("decode screenshot: {e}"))?;
-    Ok(image)
+    Ok((image, browser_bytes))
 }
 
 /// Browser session guard - closes the session even when a step fails.
@@ -336,6 +373,47 @@ fn debug(message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires playwright-cli and an installed browser"]
+    async fn snapshot_counts_document_and_subresource_bytes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        const HTML: &str =
+            "<html><head><script src=\"/asset.js\"></script></head><body>test</body></html>";
+        const SCRIPT: &str = "window.thumbrellaTest = true;";
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut request = [0; 4096];
+                    let count = stream.read(&mut request).await.unwrap();
+                    let request = String::from_utf8_lossy(&request[..count]);
+                    let (status, content_type, body) = if request.starts_with("GET / ") {
+                        ("200 OK", "text/html", HTML)
+                    } else if request.starts_with("GET /asset.js ") {
+                        ("200 OK", "application/javascript", SCRIPT)
+                    } else {
+                        ("404 Not Found", "text/plain", "")
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                });
+            }
+        });
+        let result = tokio::task::spawn_blocking(move || snapshot(&format!("http://{address}/")))
+            .await
+            .unwrap();
+        server.abort();
+        let (_, browser_bytes) = result.unwrap();
+        assert_eq!(browser_bytes.unwrap(), (HTML.len() + SCRIPT.len()) as u64);
+    }
 
     #[test]
     fn launch_config_allows_local_files_only_when_asked() {

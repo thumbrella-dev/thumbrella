@@ -120,6 +120,9 @@ pub async fn connect<S: HttpStream>(cook: &mut ThumbCook<S>) {
         return;
     }
 
+    if cook.src.cache_hints.is_none() {
+        cook.src.cache_hints = Some(CacheHints::default());
+    }
     cook.src.final_url = Some(buf.url.clone());
     cook.src.canonical_url = canonical_url(&buf.url);
 

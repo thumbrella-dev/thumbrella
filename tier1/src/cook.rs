@@ -1663,4 +1663,10 @@ impl<S: HttpStream + Send + 'static> crate::renderer::RenderCook for ThumbCook<S
     fn add_bytes_consumed(&mut self, n: u64) {
         self.render_bytes_consumed = Some(self.render_bytes_consumed.unwrap_or(0).saturating_add(n));
     }
+    fn add_external_download_bytes(&mut self, n: u64) {
+        let current = self
+            .render_bytes_consumed
+            .unwrap_or_else(|| self.out_download_bytes.max(self.http_bytes_fetched()));
+        self.render_bytes_consumed = Some(current.saturating_add(n));
+    }
 }
