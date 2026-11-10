@@ -36,10 +36,9 @@ impl MemoryCacheBackend {
         let pin_secret =
             PinSecret::generate().map_err(|e| format!("cannot generate pin secret: {e}"))?;
         let max_bytes = max_bytes.max(1024 * 1024);
-        let cap_hint = (max_bytes / 512).min(100_000);
         let cache = moka::sync::Cache::builder()
             .support_invalidation_closures()
-            .max_capacity(cap_hint.max(1))
+            .max_capacity(max_bytes)
             .weigher(|_key: &String, value: &CacheEntry| -> u32 {
                 let size = value.media.thumbnail.len()
                     + value.media.cache.len()
@@ -274,6 +273,24 @@ pub fn parse_mem_size(fragment: &str) -> Result<Option<(u64, &str)>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn byte_capacity_uses_weight_bytes() {
+        let backend = MemoryCacheBackend::with_max_bytes(100 * 1024 * 1024).unwrap();
+        let now = unix_now_secs();
+        for i in 0..40 {
+            let media = crate::result::ThumbMedia {
+                thumbnail: vec![0; 4096],
+                cache: crate::source::CacheHints::expiring_in(600).encode(60),
+                ..Default::default()
+            };
+            backend.put(format!("key-{i}"), media, 0, now + 600, 0).await;
+        }
+
+        for i in 0..40 {
+            assert!(backend.get_entry(&format!("key-{i}"), 0).await.is_some());
+        }
+    }
 
     #[test]
     fn test_parse_mem_size() {
