@@ -14,25 +14,25 @@
 //!
 //! # Environment contract
 //!
-//! Thumbrella does not install or configure Playwright.  It expects a working
-//! `playwright-cli` on `$PATH` with a browser already downloaded:
+//! Thumbrella does not install, configure, or select a browser.  It expects a
+//! working `playwright-cli` on `$PATH` with a browser already downloaded, and
+//! leaves the engine choice to Playwright's own configuration (for example a
+//! `~/.playwright/cli.config.json` with `{"browser":{"browserName":"chromium"}}`
+//! when using a Playwright-managed browser instead of the default `chrome`
+//! channel):
 //!
 //! ```text
 //! npm install -g @playwright/cli
-//! playwright-cli install-browser chromium --no-shell
+//! playwright-cli install-browser chromium
 //! ```
 //!
-//! The engine stays the CLI's business: Thumbrella never installs or configures
-//! Playwright and never passes `--browser`, so the CLI uses whatever engine it
-//! is set up to use.  At startup [`probe`] only checks that the binary exists
-//! and that the browser cache holds a launchable engine, by reading the cache
-//! directory (`PLAYWRIGHT_BROWSERS_PATH`, else Playwright's default location)
-//! instead of invoking Node.  With no engine present the backend is reported
-//! unavailable and HTML falls back to the normal document placeholder.
+//! Availability is detected by the shared environment probe, which simply runs
+//! `playwright-cli --version`; if the CLI cannot be invoked the backend is
+//! reported unavailable and HTML falls back to the normal document placeholder.
 //!
 //! Only the viewport is fixed, because it is part of the output contract.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -276,89 +276,6 @@ fn describe_failure(stderr: &[u8], code: Option<i32>) -> String {
     }
 }
 
-//  Probe
-
-/// Startup probe: is `playwright-cli` present with a browser engine installed?
-///
-/// The probe is deliberately cheap and read-only: it checks that the binary
-/// exists, then lists the browser cache on disk for a launchable engine.  It
-/// never installs anything, never launches a browser, and never passes
-/// `--browser`, so the CLI uses whatever engine it is configured to use.
-///
-/// Returns `(available, details, unavailable_reason)`.
-pub fn probe() -> (bool, Option<String>, Option<String>) {
-    let path = match which::which(CLI_BINARY) {
-        Ok(path) => path,
-        Err(e) => return (false, None, Some(format!("{CLI_BINARY} not found: {e}"))),
-    };
-
-    let dir = browsers_dir();
-    let engines = installed_engines(&dir);
-    let label = format!("{}: {}", path.display(), dir.display());
-    if engines.is_empty() {
-        return (
-            false,
-            Some(label),
-            Some(format!(
-                "no browser engine installed in {} (install one with playwright-cli)",
-                dir.display()
-            )),
-        );
-    }
-
-    (true, Some(format!("{label} ({})", engines.join(", "))), None)
-}
-
-/// Directory Playwright stores downloaded browsers in.
-///
-/// `PLAYWRIGHT_BROWSERS_PATH` wins when set (it is in the tier3 image); the
-/// rest mirror Playwright's own defaults for Linux hosts.
-fn browsers_dir() -> PathBuf {
-    if let Some(path) = std::env::var_os("PLAYWRIGHT_BROWSERS_PATH") {
-        return PathBuf::from(path);
-    }
-    if let Some(cache) = std::env::var_os("XDG_CACHE_HOME") {
-        return PathBuf::from(cache).join("ms-playwright");
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(".cache").join("ms-playwright");
-    }
-    PathBuf::from(".cache/ms-playwright")
-}
-
-/// Recognise a browser-cache entry (`chromium-1252`) as a launchable engine.
-///
-/// Headless-shell, ffmpeg and winldd entries are not launchable on their own
-/// and are ignored.
-fn engine_from_entry(name: &str) -> Option<&'static str> {
-    let (engine, revision) = name.rsplit_once('-')?;
-    if revision.is_empty() || !revision.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    match engine {
-        "chromium" => Some("chromium"),
-        "firefox" => Some("firefox"),
-        "webkit" => Some("webkit"),
-        _ => None,
-    }
-}
-
-/// Launchable engines present in `dir`, in a stable preference order.
-fn installed_engines(dir: &Path) -> Vec<&'static str> {
-    let mut found: Vec<&'static str> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str()
-                && let Some(engine) = engine_from_entry(name)
-                && !found.contains(&engine)
-            {
-                found.push(engine);
-            }
-        }
-    }
-    ["chromium", "firefox", "webkit"].into_iter().filter(|e| found.contains(e)).collect()
-}
-
 /// Arguments for `open`.  The engine is left to the CLI's own default.
 fn open_args<'a>(url: &'a str, idle: &'a str, config: Option<&'a str>) -> Vec<&'a str> {
     let mut args = vec![url, "--idle-timeout", idle];
@@ -371,10 +288,13 @@ fn open_args<'a>(url: &'a str, idle: &'a str, config: Option<&'a str>) -> Vec<&'
 
 /// Launch configuration written for every snapshot session.
 ///
-/// Carries the fixed viewport and the browser switches in [`LAUNCH_ARGS`].
-/// Deliberately no `browserName`: the engine stays whatever the CLI (or the
-/// operator's own config) decides, so this file cannot override a host's
-/// browser choice.
+/// Carries only the fixed viewport and the browser switches in [`LAUNCH_ARGS`].
+/// The browser engine, executable path, and all other Playwright settings stay
+/// the host's responsibility: `playwright-cli` deep-merges this file over its
+/// global config (`~/.playwright/cli.config.json`) and built-in defaults, so an
+/// operator's chosen engine is preserved.  Naming an engine here would override
+/// that configuration and couple this renderer to one particular Playwright
+/// install.
 ///
 /// `allow_local_files` lifts the CLI's `file:` navigation guard, which local
 /// pages and MHTML archives need.  It is only enabled for those renders.
@@ -457,17 +377,6 @@ mod tests {
     }
 
     #[test]
-    fn recognises_launchable_engines_from_cache_entries() {
-        assert_eq!(engine_from_entry("chromium-1252"), Some("chromium"));
-        assert_eq!(engine_from_entry("firefox-1234"), Some("firefox"));
-        assert_eq!(engine_from_entry("webkit-2203"), Some("webkit"));
-        assert_eq!(engine_from_entry("chromium_headless_shell-1252"), None);
-        assert_eq!(engine_from_entry("ffmpeg-1013"), None);
-        assert_eq!(engine_from_entry("chromium"), None);
-        assert_eq!(engine_from_entry("chromium-"), None);
-    }
-
-    #[test]
     fn open_args_adds_only_the_config_when_present() {
         assert_eq!(
             open_args("https://x/", "30000", None),
@@ -485,6 +394,9 @@ mod tests {
         assert_eq!(config["browser"]["contextOptions"]["viewport"]["width"], VIEWPORT.0);
         assert_eq!(config["browser"]["contextOptions"]["viewport"]["height"], VIEWPORT.1);
         assert_eq!(config["browser"]["launchOptions"]["args"], serde_json::json!(LAUNCH_ARGS));
-        assert!(config["browser"].get("browserName").is_none(), "engine must stay the CLI's call");
+        assert!(
+            config["browser"].get("browserName").is_none(),
+            "engine selection belongs to the host's Playwright config"
+        );
     }
 }

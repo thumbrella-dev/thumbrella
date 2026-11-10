@@ -9,9 +9,10 @@
 //! # Handler registry
 //!
 //! Tier 3 backends are declared via [`register_handler`] at startup.  Each
-//! handler specifies its name, the command path, and which file extensions
-//! it handles.  The probe walks all registered handlers and checks whether
-//! the command exists and is executable.  Results are cached in the
+//! handler specifies its name, the command, and which file extensions it
+//! handles.  External tools are considered available when their command can be
+//! invoked with a lightweight `--version`-style argument (the OS resolves the
+//! name; there is no separate path/existence check).  Results are cached in the
 //! [`EnvReport`] and consumed by the renderer dispatch and `tier3 check`.
 //!
 //! # Design
@@ -24,8 +25,7 @@
 //! | Type | Method | Example |
 //! |------|--------|---------|
 //! | Shared library | `libloading::Library::new()` | `libpdfium.so` |
-//! | Executable | `which::which()` + `--version` | `ffmpeg`, `inkscape` |
-//! | Registered handler | file exists + exec bit / PATH lookup | `f3d` |
+//! | Executable | run `<tool> --version` (spawn success) | `ffmpeg`, `f3d` |
 //! | Runtime service | Check env var or socket | `DISPLAY` for xvfb |
 
 use serde::{Deserialize, Serialize};
@@ -159,12 +159,18 @@ pub fn probe_environment() -> EnvReport {
         }
     }
 
+    //  Every registered external handler must end up in the report.  A missing
+    //  entry means someone forgot to add a probe job; surface it as unavailable
+    //  rather than letting dispatch silently lose the format.
+    ensure_handlers_reported(&mut report);
+
     //  USD fallback depends on both the f3d and python3/usd-core results.
     let usd_available = usd_fallback_available(&report);
     if let Some(backend) = report.backends.get_mut("usdz") {
         backend.available = usd_available;
         if !usd_available {
-            backend.unavailable_reason = Some("requires f3d and python3 with usd-core".into());
+            backend.unavailable_reason =
+                Some("requires f3d and python3 with importable usd-core (py3-usd)".into());
         }
     }
 
@@ -207,17 +213,29 @@ impl ProbeResult {
 type ProbeJob = Box<dyn FnOnce() -> ProbeResult + Send>;
 
 /// Every probe that shells out to an external tool.
+///
+/// Each job runs a lightweight version/help switch and requires the exit status
+/// it declares (0 unless a tool's switch is known to differ).  A tool that
+/// starts but exits with an unexpected status is treated as unavailable.
+///
+/// Every registered external handler needs a job here (or a `CACHED_TOOLS`
+/// entry for cached mode); `ensure_handlers_reported` surfaces any that are
+/// missing instead of silently leaving the backend absent.
 fn subprocess_probe_jobs() -> Vec<ProbeJob> {
     vec![
-        Box::new(|| job_executable("ffmpeg_cli", "image", "ffmpeg", "-version")),
-        Box::new(|| job_executable("ffprobe", "video", "ffprobe", "-version")),
-        Box::new(|| job_executable("magick", "image", "gm", "version")),
-        Box::new(|| job_executable("oiiotool", "image", "oiiotool", "--version")),
-        Box::new(office_job),
-        Box::new(f3d_job),
-        Box::new(blender_job),
-        Box::new(playwright_job),
+        Box::new(|| job_executable("ffmpeg_cli", "image", "ffmpeg", "-version", 0)),
+        Box::new(|| job_executable("ffprobe", "video", "ffprobe", "-version", 0)),
+        Box::new(|| job_executable("magick", "image", "gm", "version", 0)),
+        Box::new(|| job_executable("oiiotool", "image", "oiiotool", "--version", 0)),
+        Box::new(|| job_executable("pdftoppm", "document", "pdftoppm", "-v", 0)),
+        Box::new(|| job_executable("f3d", "geometry", "f3d", "--version", 0)),
+        Box::new(|| {
+            job_executable("playwright_cli", "document", "playwright-cli", "--version", 0)
+        }),
+        Box::new(|| job_executable("xvfb_run", "runtime", "xvfb-run", "--help", 0)),
         Box::new(python_usd_job),
+        Box::new(office_job),
+        Box::new(blender_job),
     ]
 }
 
@@ -231,8 +249,18 @@ fn run_probes_parallel(jobs: Vec<ProbeJob>) -> Vec<ProbeResult> {
 }
 
 /// Build a `ProbeResult` for a tool checked by running `<binary> <check_arg>`.
-fn job_executable(name: &str, category: &str, binary: &str, check_arg: &str) -> ProbeResult {
-    let (available, details, unavailable_reason) = try_executable(binary, check_arg);
+///
+/// `expected_exit` is the exit status that means "the tool ran normally"; most
+/// version switches return 0, but it can be set per command for tools that
+/// differ.
+fn job_executable(
+    name: &str,
+    category: &str,
+    binary: &str,
+    check_arg: &str,
+    expected_exit: i32,
+) -> ProbeResult {
+    let (available, details, unavailable_reason) = try_executable(binary, check_arg, expected_exit);
     ProbeResult::one(BackendInfo {
         name: name.to_string(),
         category: category.to_string(),
@@ -246,10 +274,58 @@ fn job_executable(name: &str, category: &str, binary: &str, check_arg: &str) -> 
     })
 }
 
+/// Probe for Python 3 with an importable `usd-core` (the USD pipeline's Python
+/// dependency).
+///
+/// A present `python3` is not enough: the `pxr` bindings have to import and
+/// initialise.  The probe imports the module and creates an in-memory stage,
+/// which catches the common ways a wheel install breaks (wrong Python version,
+/// missing native libraries, ABI mismatch, partial install).
+fn python_usd_job() -> ProbeResult {
+    let method = ProbeMethod::Executable {
+        binary: "python3".into(),
+        check_arg: "-c import usd".into(),
+    };
+
+    let version = run_capture("python3", &["--version"], 0)
+        .map(|o| output_first_line(&o))
+        .unwrap_or_else(|_| "unknown version".to_string());
+
+    let import = run_capture(
+        "python3",
+        &["-c", "from pxr import Usd; Usd.Stage.CreateInMemory()"],
+        0,
+    );
+    let (available, unavailable_reason) = match import {
+        Ok(_) => (true, None),
+        Err(error) => (
+            false,
+            Some(format!(
+                "usd-core import failed ({error}); install with pip install usd-core"
+            )),
+        ),
+    };
+
+    ProbeResult::one(BackendInfo {
+        name: "python3".into(),
+        category: "runtime".into(),
+        method,
+        available,
+        details: Some(format!(
+            "python3 {version}; usd-core {}",
+            if available { "importable" } else { "unavailable" }
+        )),
+        unavailable_reason,
+    })
+}
+
 //  Probe cache (TBR_PROBE)
 
 /// External tools whose availability can be cached, in output order.
-/// The token is the command name; `python3` additionally implies `usd-core`.
+///
+/// The token normally matches the command name.  Python is the exception: the
+/// `python3` backend only means "python3 with an importable usd-core", so it is
+/// emitted as `py3-usd` to leave room for other Python-library probes later.
 const TOOL_TOKENS: &[(&str, &str)] = &[
     ("oiiotool", "oiiotool"),
     ("pdftoppm", "pdftoppm"),
@@ -260,7 +336,8 @@ const TOOL_TOKENS: &[(&str, &str)] = &[
     ("soffice", "soffice"),
     ("ffmpeg_cli", "ffmpeg"),
     ("ffprobe", "ffprobe"),
-    ("python3", "python3"),
+    ("python3", "py3-usd"),
+    ("xvfb_run", "xvfb-run"),
 ];
 
 /// Backend metadata used when replaying a probe cache:
@@ -275,7 +352,8 @@ const CACHED_TOOLS: &[(&str, &str, &str)] = &[
     ("soffice", "soffice", "document"),
     ("ffmpeg_cli", "ffmpeg", "image"),
     ("ffprobe", "ffprobe", "video"),
-    ("python3", "python3", "runtime"),
+    ("python3", "py3-usd", "runtime"),
+    ("xvfb_run", "xvfb-run", "runtime"),
 ];
 
 static FORCE_PROBE: AtomicBool = AtomicBool::new(false);
@@ -306,8 +384,8 @@ fn configured_probe_tokens() -> Option<Vec<String>> {
 /// Populate the external-tool backends from a `TBR_PROBE` token list.
 ///
 /// Listed tools are available; everything else is unavailable.  `blender`
-/// additionally enables every format the handler declares, and `python3` is
-/// taken to include `usd-core` (see [`probe_envvar`]).
+/// additionally enables every format the handler declares; the `py3-usd` token
+/// marks python3 with an importable `usd-core` (see [`probe_envvar`]).
 fn apply_probe_cache(report: &mut EnvReport, tokens: &[String]) {
     let has = |token: &str| tokens.iter().any(|t| t == token);
     for (name, token, category) in CACHED_TOOLS {
@@ -335,31 +413,14 @@ fn apply_probe_cache(report: &mut EnvReport, tokens: &[String]) {
     if has("blender") {
         report.blender_formats = blender_handler_extensions();
     }
-    // `python3` in the cache means the USD pipeline is ready; mark usd-core as
-    // available so `usd_fallback_available` enables USDZ dispatch.
-    if has("python3")
-        && let Some(backend) = report.backends.get_mut("python3")
-    {
-        backend.details = Some(format!(
-            "{}; usd-core available",
-            backend.details.as_deref().unwrap_or("python3")
-        ));
-    }
 }
 
 /// Build the `TBR_PROBE=...` value that reproduces `report`'s tool availability.
-///
-/// `python3` is emitted only when `usd-core` is present, because the cache
-/// treats `python3` as implying the USD pipeline.
 pub fn probe_envvar(report: &EnvReport) -> String {
     let mut tokens: Vec<&str> = Vec::new();
     for (name, token) in TOOL_TOKENS {
         let Some(backend) = report.backends.get(*name) else { continue };
-        let ok = if *name == "python3" {
-            backend.details.as_deref().is_some_and(|d| d.contains("usd-core available"))
-        } else {
-            backend.available
-        };
+        let ok = backend.available;
         if ok && !tokens.contains(token) {
             tokens.push(token);
         }
@@ -394,9 +455,7 @@ fn select_available_handlers(
 
 fn usd_fallback_available(report: &EnvReport) -> bool {
     report.backends.get("f3d").is_some_and(|b| b.available)
-        && report.backends.get("python3").is_some_and(|b| {
-            b.available && b.details.as_deref().is_some_and(|d| d.contains("usd-core available"))
-        })
+        && report.backends.get("python3").is_some_and(|b| b.available)
 }
 
 #[cfg(test)]
@@ -444,7 +503,7 @@ mod blender_tests {
             backends: BTreeMap::from([
                 ("blender".into(), backend("blender", true, None)),
                 ("f3d".into(), backend("f3d", true, None)),
-                ("python3".into(), backend("python3", true, Some("usd-core available"))),
+                ("python3".into(), backend("python3", true, None)),
             ]),
             blender_formats: BTreeSet::from(["fbx".into()]),
             summary: String::new(),
@@ -496,12 +555,11 @@ fn blender_job() -> ProbeResult {
         binary: "blender".into(),
         check_arg: "--version".into(),
     };
-    let result = (|| -> Result<(String, String), String> {
-        let path = which::which("blender").map_err(|e| format!("blender not found: {e}"))?;
+    let result = (|| -> Result<String, String> {
         //  A version check is all we need: the importer surface we rely on is
         //  keyed off the release that added USD.  Running a real import pass is
         //  far too slow for startup.
-        let mut cmd = std::process::Command::new(&path);
+        let mut cmd = std::process::Command::new("blender");
         cmd.arg("--version")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -525,16 +583,16 @@ fn blender_job() -> ProbeResult {
                 version.0, version.1, MIN_BLENDER_VERSION.0, MIN_BLENDER_VERSION.1,
             ));
         }
-        Ok((path.display().to_string(), first_line))
+        Ok(first_line)
     })();
     match result {
-        Ok((path, version_line)) => {
+        Ok(version_line) => {
             let mut result = ProbeResult::one(BackendInfo {
                 name: "blender".into(),
                 category: "geometry".into(),
                 method,
                 available: true,
-                details: Some(format!("{path}: {version_line}")),
+                details: Some(format!("blender --version: {version_line}")),
                 unavailable_reason: None,
             });
             //  A new-enough Blender has every importer the handler declares, so
@@ -553,31 +611,17 @@ fn blender_job() -> ProbeResult {
     }
 }
 
-//  Playwright CLI probe
-
-/// Probe for the Playwright CLI (`playwright-cli`) used for HTML snapshots.
-///
-/// Delegated to [`crate::html::probe`], which checks the binary and the
-/// browser cache on disk.  It never installs anything and never launches a
-/// browser.
-fn playwright_job() -> ProbeResult {
-    let (available, details, unavailable_reason) = crate::html::probe();
-    ProbeResult::one(BackendInfo {
-        name: crate::html::HANDLER_NAME.to_string(),
-        category: "document".into(),
-        method: ProbeMethod::Executable {
-            binary: "playwright-cli".into(),
-            check_arg: "browser cache".into(),
-        },
-        available,
-        details,
-        unavailable_reason,
-    })
-}
-
 /// Return the cached environment report, or `None` if not yet probed.
 pub fn cached_report() -> Option<EnvReport> {
     ENV_REPORT.read().unwrap().clone()
+}
+
+/// True when `xvfb-run` passed its probe.
+///
+/// Renderers use this to decide whether to wrap a GUI tool in a virtual display
+/// when no real one is present.
+pub fn xvfb_available() -> bool {
+    cached_report().and_then(|r| r.backends.get("xvfb_run").map(|b| b.available)).unwrap_or(false)
 }
 
 //  Individual probe helpers
@@ -637,31 +681,50 @@ fn probe_shared_libraries(report: &mut EnvReport) {
 }
 
 fn probe_handler_metadata(report: &mut EnvReport) {
-    // Registered handlers - probed by file existence + execute bit.  This is a
-    // cheap in-process check that seeds an entry for every handler; the
-    // subprocess probes later override the ones they can verify in detail.
-    // Handlers with command "(builtin)" are always available (pure-Rust).
-    let handlers = HANDLER_REGISTRY.read().unwrap().clone();
-    for h in &handlers {
-        let (available, details, reason, method) = if h.command == "(builtin)" {
-            (true, Some(h.description.to_string()), None, ProbeMethod::Builtin)
-        } else {
-            let (a, d, r) = try_executable_at(h.command, h.description);
-            let m = ProbeMethod::Executable {
-                binary: h.command.to_string(),
-                check_arg: String::new(),
-            };
-            (a, d, r, m)
-        };
+    //  Pure-Rust handlers (command "(builtin)") have no executable to probe, so
+    //  seed them here.  External handlers are registered by their own version
+    //  probes (see `subprocess_probe_jobs`); `ensure_handlers_reported` catches
+    //  any that are missing.
+    for h in HANDLER_REGISTRY.read().unwrap().clone() {
+        if h.command != "(builtin)" {
+            continue;
+        }
         report.backends.insert(
             h.name.to_string(),
             BackendInfo {
                 name: h.name.to_string(),
                 category: h.category.to_string(),
-                method,
-                available,
-                details,
-                unavailable_reason: reason,
+                method: ProbeMethod::Builtin,
+                available: true,
+                details: Some(h.description.to_string()),
+                unavailable_reason: None,
+            },
+        );
+    }
+}
+
+/// Ensure every registered external handler has a report entry.
+///
+/// A missing entry almost always means a probe job was forgotten.  Mark it
+/// unavailable with a clear reason so `check`/`formats` show the omission
+/// instead of the format silently disappearing from dispatch.
+fn ensure_handlers_reported(report: &mut EnvReport) {
+    for h in HANDLER_REGISTRY.read().unwrap().clone() {
+        if report.backends.contains_key(h.name) {
+            continue;
+        }
+        report.backends.insert(
+            h.name.to_string(),
+            BackendInfo {
+                name: h.name.to_string(),
+                category: h.category.to_string(),
+                method: ProbeMethod::Executable {
+                    binary: h.command.to_string(),
+                    check_arg: String::new(),
+                },
+                available: false,
+                details: None,
+                unavailable_reason: Some(format!("no probe registered for {}", h.command)),
             },
         );
     }
@@ -710,156 +773,6 @@ fn probe_runtime_services(report: &mut EnvReport) {
     );
 }
 
-//  F3D probe
-
-/// Probe for the F3D 3D geometry renderer.
-///
-/// F3D `--version` crashes without a display server, so the version check is
-/// only attempted when `DISPLAY` or `WAYLAND_DISPLAY` is set.  Without a
-/// display we still report the binary as available if it exists and is
-/// executable, but note the display requirement.
-fn f3d_job() -> ProbeResult {
-    let method = ProbeMethod::Executable {
-        binary: "f3d".into(),
-        check_arg: "--version".into(),
-    };
-    let path = match which::which("f3d") {
-        Ok(p) => p,
-        Err(_) => {
-            return ProbeResult::one(BackendInfo {
-                name: "f3d".into(),
-                category: "geometry".into(),
-                method,
-                available: false,
-                details: None,
-                unavailable_reason: Some("f3d not found on PATH".into()),
-            })
-        }
-    };
-
-    let has_display =
-        std::env::var("DISPLAY").ok().or_else(|| std::env::var("WAYLAND_DISPLAY").ok()).is_some();
-
-    let (available, details, reason) = if has_display {
-        let mut cmd = std::process::Command::new(&path);
-        cmd.arg("--version")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        match crate::sandbox::output(&mut cmd, &crate::sandbox::probe()) {
-            Ok(output) => {
-                let first_line = String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .next()
-                    .unwrap_or("(no output)")
-                    .to_string();
-                (true, Some(format!("{}: {}", path.display(), first_line)), None)
-            }
-            Err(e) => (
-                false,
-                Some(format!("found at {}", path.display())),
-                Some(format!("f3d --version: {e}")),
-            ),
-        }
-    } else {
-        // F3D --version crashes without a display; just note it was found.
-        (true, Some(format!("{} (display required for version check)", path.display())), None)
-    };
-
-    ProbeResult::one(BackendInfo {
-        name: "f3d".into(),
-        category: "geometry".into(),
-        method,
-        available,
-        details,
-        unavailable_reason: reason,
-    })
-}
-
-//  Python + usd-core probe
-
-/// Probe for Python 3 with the `usd-core` package (USDZ/USD geometry extraction).
-///
-/// The tier-3 USD pipeline uses a Python script to extract mesh data from
-/// USDZ/USDC/USDA files, then feeds the resulting OBJ to F3D for rendering.
-/// Both Python and usd-core must be present for USD support.
-fn python_usd_job() -> ProbeResult {
-    let method = ProbeMethod::Executable {
-        binary: "python3".into(),
-        check_arg: "--version".into(),
-    };
-    let python = match which::which("python3") {
-        Ok(p) => p,
-        Err(_) => {
-            return ProbeResult::one(BackendInfo {
-                name: "python3".into(),
-                category: "runtime".into(),
-                method,
-                available: false,
-                details: None,
-                unavailable_reason: Some("python3 not found on PATH".into()),
-            })
-        }
-    };
-
-    // Check Python version.
-    let mut cmd = std::process::Command::new(&python);
-    cmd.arg("--version")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let py_ver = match crate::sandbox::output(&mut cmd, &crate::sandbox::probe()) {
-        Ok(o) => {
-            let s = String::from_utf8_lossy(&o.stdout);
-            let s = s.trim();
-            if s.is_empty() {
-                String::from_utf8_lossy(&o.stderr).trim().to_string()
-            } else {
-                s.to_string()
-            }
-        }
-        Err(e) => {
-            return ProbeResult::one(BackendInfo {
-                name: "python3".into(),
-                category: "runtime".into(),
-                method,
-                available: false,
-                details: Some(format!("found at {}", python.display())),
-                unavailable_reason: Some(format!("python3 --version: {e}")),
-            })
-        }
-    };
-
-    // Check for usd-core (the PyPI package that provides pxr.Usd).
-    let mut cmd = std::process::Command::new(&python);
-    cmd.arg("-c")
-        .arg("from pxr import Usd")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    let usd_ok = crate::sandbox::output(&mut cmd, &crate::sandbox::probe())
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    ProbeResult::one(BackendInfo {
-        name: "python3".into(),
-        category: "runtime".into(),
-        method,
-        available: true,
-        details: Some(format!(
-            "{}: {}; usd-core {}",
-            python.display(),
-            py_ver,
-            if usd_ok { "available" } else { "NOT FOUND" }
-        )),
-        unavailable_reason: if usd_ok {
-            None
-        } else {
-            Some("usd-core not installed (pip install usd-core)".into())
-        },
-    })
-}
-
 //  Low-level probe helpers
 
 /// Try to open a shared library via dlopen.
@@ -876,83 +789,82 @@ fn try_dlopen(soname: &str, _desc: &str) -> (bool, Option<String>, Option<String
     }
 }
 
-/// Try to locate an executable on `$PATH` and run it with a benign check arg.
+/// Run a tool and require a specific exit status.
+///
+/// The binary is executed directly; the OS resolves it on `$PATH`, so there is
+/// no separate "is it on the path?" step.  `expected_exit` lets each command
+/// define what "ran normally" means (most version switches return 0).
 ///
 /// The command is bounded by [`crate::sandbox::probe`], so a tool that hangs
 /// is reported unavailable rather than stalling startup.
-///
-/// Returns `(available, details, reason)`.
-fn try_executable(binary: &str, check_arg: &str) -> (bool, Option<String>, Option<String>) {
-    let path = match which::which(binary) {
-        Ok(p) => p,
-        Err(e) => return (false, None, Some(format!("which({binary}): {e}"))),
-    };
-
-    // Run the binary with the check arg and capture the first line of output.
-    let mut cmd = std::process::Command::new(&path);
-    cmd.arg(check_arg)
+fn run_capture(
+    binary: &str,
+    args: &[&str],
+    expected_exit: i32,
+) -> Result<std::process::Output, String> {
+    let mut cmd = std::process::Command::new(binary);
+    cmd.args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    match crate::sandbox::output(&mut cmd, &crate::sandbox::probe()) {
-        Ok(output) => {
-            let first_line = String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .next()
-                .unwrap_or("(no output)")
-                .to_string();
-            (true, Some(format!("{}: {}", path.display(), first_line)), None)
+    let output = crate::sandbox::output(&mut cmd, &crate::sandbox::probe())
+        .map_err(|e| format!("run {binary}: {e}"))?;
+    match output.status.code() {
+        Some(code) if code == expected_exit => Ok(output),
+        Some(code) => {
+            let detail = output_last_error_line(&output);
+            let detail = if detail.is_empty() { String::new() } else { format!(": {detail}") };
+            Err(format!("exit {code} (expected {expected_exit}){detail}"))
         }
-        Err(e) => (
-            false,
-            Some(format!("found at {}", path.display())),
-            Some(format!("{binary} {check_arg}: {e}")),
-        ),
+        None => Err("terminated by signal".to_string()),
     }
 }
 
-/// Check whether a file at an absolute path exists and is executable.
-///
-/// Does not invoke the tool - only checks metadata.  Use this for scripts
-/// and binaries at known paths that do not support a `--version` flag.
+/// First non-empty line of stdout, falling back to stderr.
+fn output_first_line(output: &std::process::Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if let Some(line) = stdout.lines().map(str::trim).find(|l| !l.is_empty()) {
+        return line.to_string();
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    stderr
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("(no output)")
+        .to_string()
+}
+
+/// Last non-empty line of stderr (the useful line for tracebacks), falling
+/// back to stdout.
+fn output_last_error_line(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if let Some(line) = stderr.lines().map(str::trim).filter(|l| !l.is_empty()).next_back() {
+        return line.to_string();
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .next_back()
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Run `<binary> <check_arg>` and report availability from a successful exit.
 ///
 /// Returns `(available, details, reason)`.
-fn try_executable_at(path: &str, _desc: &str) -> (bool, Option<String>, Option<String>) {
-    let resolved = if std::path::Path::new(path).components().count() > 1 {
-        std::path::PathBuf::from(path)
-    } else {
-        match which::which(path) {
-            Ok(p) => p,
-            Err(e) => return (false, None, Some(format!("which({path}): {e}"))),
+fn try_executable(
+    binary: &str,
+    check_arg: &str,
+    expected_exit: i32,
+) -> (bool, Option<String>, Option<String>) {
+    match run_capture(binary, &[check_arg], expected_exit) {
+        Ok(output) => {
+            let first_line = output_first_line(&output);
+            (true, Some(format!("{binary} {check_arg}: {first_line}")), None)
         }
-    };
-
-    match std::fs::metadata(&resolved) {
-        Ok(meta) if meta.is_file() => check_file_executable(meta, &resolved),
-        Ok(_) => (false, None, Some(format!("{}: not a regular file", resolved.display()))),
-        Err(e) => (false, None, Some(format!("{}: {e}", resolved.display()))),
+        Err(e) => (false, None, Some(format!("{binary} {check_arg}: {e}"))),
     }
-}
-
-#[cfg(unix)]
-fn check_file_executable(
-    meta: std::fs::Metadata,
-    resolved: &std::path::Path,
-) -> (bool, Option<String>, Option<String>) {
-    use std::os::unix::fs::PermissionsExt;
-    let mode = meta.permissions().mode();
-    if mode & 0o111 != 0 {
-        (true, Some(format!("executable at {}", resolved.display())), None)
-    } else {
-        (false, None, Some(format!("{}: not executable (mode {mode:o})", resolved.display())))
-    }
-}
-
-#[cfg(not(unix))]
-fn check_file_executable(
-    _meta: std::fs::Metadata,
-    resolved: &std::path::Path,
-) -> (bool, Option<String>, Option<String>) {
-    // Windows: just check file exists - execute bits don't apply.
-    (true, Some(format!("found at {}", resolved.display())), None)
 }

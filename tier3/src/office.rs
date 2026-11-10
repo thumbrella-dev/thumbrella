@@ -323,36 +323,31 @@ fn scrape_pages(
 /// Returns `(available, details, unavailable_reason)` in the same shape as the
 /// other tier-3 probes.
 pub fn probe() -> (bool, Option<String>, Option<String>) {
-    let path = match which::which("soffice") {
-        Ok(path) => path,
-        Err(e) => return (false, None, Some(format!("soffice not found: {e}"))),
-    };
-
     //  Identify the build from its version banner.
-    let mut cmd = Command::new(&path);
+    let mut cmd = Command::new("soffice");
     cmd.arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let banner = match crate::sandbox::output(&mut cmd, &crate::sandbox::office()) {
-        Ok(output) => {
-            let mut text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if text.is_empty() {
-                text = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            }
-            text
-        }
-        Err(e) => {
-            return (
-                false,
-                Some(format!("found at {}", path.display())),
-                Some(format!("soffice --version: {e}")),
-            )
-        }
+    let output = match crate::sandbox::output(&mut cmd, &crate::sandbox::probe()) {
+        Ok(output) => output,
+        Err(e) => return (false, None, Some(format!("soffice --version: {e}"))),
     };
+    if output.status.code() != Some(0) {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return (
+            false,
+            None,
+            Some(format!("soffice --version exit {:?}: {detail}", output.status.code())),
+        );
+    }
+    let mut banner = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if banner.is_empty() {
+        banner = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    }
 
     let first_line = banner.lines().next().unwrap_or("").trim().to_string();
-    let label = format!("{}: {}", path.display(), first_line);
+    let label = format!("soffice: {first_line}");
 
     if let Err(reason) = check_banner(&banner) {
         return (false, Some(label), Some(reason));

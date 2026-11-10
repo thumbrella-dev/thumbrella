@@ -1504,7 +1504,9 @@ fn run_f3d_geometry_handler(
 
     // F3D 2.2.x (Debian) does not support newer flags like --no-config or
     // --rendering-backend. Use broadly-compatible options.
-    let mut cmd = if std::env::var("DISPLAY").is_ok() {
+    // Use a virtual display only when there is no real one and `xvfb-run`
+    // passed its probe; otherwise try f3d directly.
+    let mut cmd = if std::env::var_os("DISPLAY").is_some() || !crate::env_check::xvfb_available() {
         let mut c = Command::new("f3d");
         c.arg(&input_path)
             .arg(format!("--output={}", output_path.display()))

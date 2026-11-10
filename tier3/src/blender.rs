@@ -61,11 +61,12 @@ const XVFB_SCREEN: &str = "-screen 0 800x600x24";
 /// introduced with `--` to reach the script unchanged (for example
 /// `-- render INPUT OUTPUT EXTENSION`).
 ///
-/// When `DISPLAY` is unset the command is wrapped in `xvfb-run`.  The caller
-/// is still responsible for attaching `stdout`/`stderr` and running the
-/// command through [`crate::sandbox`].
+/// When `DISPLAY` is unset and `xvfb-run` passed its probe, the command is
+/// wrapped in `xvfb-run`; otherwise Blender is run directly.  The caller is
+/// still responsible for attaching `stdout`/`stderr` and running the command
+/// through [`crate::sandbox`].
 pub(crate) fn command(script: &Path, arena: &ScratchArena) -> std::io::Result<Command> {
-    let cmd = if std::env::var_os("DISPLAY").is_some() {
+    let cmd = if std::env::var_os("DISPLAY").is_some() || !crate::env_check::xvfb_available() {
         Command::new("blender")
     } else {
         let mut cmd = Command::new("xvfb-run");
