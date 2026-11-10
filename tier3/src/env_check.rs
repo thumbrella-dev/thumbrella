@@ -425,6 +425,7 @@ pub fn probe_envvar(report: &EnvReport) -> String {
             tokens.push(token);
         }
     }
+    tokens.sort_unstable();
     format!("TBR_PROBE={}", tokens.join(","))
 }
 

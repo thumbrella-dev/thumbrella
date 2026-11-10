@@ -9,7 +9,7 @@
 //! <binary> result <url>...          # thumbnail URLs, print result metadata
 //! <binary> check                    # validate runtime config and dependencies
 //! <binary> formats            # list all supported formats by kind
-//! <binary> probe              # print TBR_PROBE=... for available external tools
+//! <binary> probe              # print TBR_PROBE=... for available external tools (tier3)
 //! <binary> service            # print deployment config files
 //! <binary> license            # print third-party license notices
 //! <binary> version            # print build version
@@ -120,7 +120,7 @@ enum Command {
         json: bool,
     },
 
-    /// Print the TBR_PROBE value listing available external tools.
+    /// Print the TBR_PROBE value listing available external tools (tier 3 only).
     ///
     /// Runs every environment probe (ignoring any existing `TBR_PROBE`) and
     /// prints the `TBR_PROBE=...` line that reproduces the result.  Set that
@@ -225,7 +225,7 @@ where
         }
         Command::Check { json } => run_check(json, tier).await,
         Command::Formats { json } => run_formats(json),
-        Command::Probe => run_probe(),
+        Command::Probe => run_probe(tier),
         Command::Service { alias, write } => run_service(alias, write),
         Command::Version => run_version(tier),
         Command::License => run_license(),
@@ -1052,9 +1052,14 @@ fn run_formats(json: bool) {
 
 /// Print the `TBR_PROBE=...` value computed by the environment probe.
 ///
-/// A higher tier registers the value after probing; without one (e.g. the
-/// tier1 binary) there are no external tools, so print an empty list.
-fn run_probe() {
+/// Only tier 3 runs environment probes; earlier tiers reject this command
+/// rather than printing an empty value.
+fn run_probe(tier: u8) {
+    if tier < 3 {
+        crate::ux::get().warn_message("Probe only available in tier3 builds.");
+        std::process::exit(1);
+    }
+
     match crate::check::probe_envvar() {
         Some(value) => println!("{value}"),
         None => println!("TBR_PROBE="),

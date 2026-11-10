@@ -543,6 +543,12 @@ impl Ux {
         let _ = io::stderr().write_all(msg.as_bytes());
     }
 
+    /// Print a warning without a follow-up suggestion.
+    pub fn warn_message(&self, message: &str) {
+        let line = format!("  {} {message}\n", Colour::yellow("warn:"));
+        let _ = io::stderr().write_all(line.as_bytes());
+    }
+
     /// Print a single-line startup issue (used by `serve` after the banner).
     pub fn print_startup_issue(&self, msg: &str) {
         let line = format!("  {} {}\n", Colour::red("error:"), msg,);
