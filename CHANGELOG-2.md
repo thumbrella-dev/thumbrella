@@ -2,6 +2,11 @@
 
 ## Development
 
+
+## 2.4.2 - 2026/11/10
+
+Quick fix for ffmpeg probing problems
+
 - Fix regression in external ffmpeg probe
 
 ## 2.4.1 - 2026/11/10
