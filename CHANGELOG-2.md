@@ -2,6 +2,10 @@
 
 ## Development
 
+## 2.4.1 - 2026/11/10
+
+Startup a few seconds faster by simplifying or skipping probe of external tools
+
 - Minimize and parallel external tool probing at starting (saves 5 seconds)
 - Allow TBR_PROBE to predefine external tools and avoid startup probe
 
