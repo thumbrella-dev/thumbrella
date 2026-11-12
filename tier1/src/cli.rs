@@ -124,7 +124,9 @@ enum Command {
     ///
     /// Runs every environment probe (ignoring any existing `TBR_PROBE`) and
     /// prints the `TBR_PROBE=...` line that reproduces the result.  Set that
-    /// variable in a container to skip startup probing entirely.
+    /// variable in a container to skip startup probing entirely. Tier 3 allows
+    /// up to 10 seconds per probe subprocess here, versus 3 seconds during
+    /// normal startup.
     Probe,
 
     /// Print or write a deployment config file.

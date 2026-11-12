@@ -62,10 +62,8 @@ pub fn default_strict() -> SandboxConfig {
 ///
 /// Measured cold in the tier3 image, the slowest probe (`playwright-cli
 /// --version`) takes ~0.5 s and the whole parallel set finishes in under 1 s
-/// even when pinned to a single CPU, so 2 s leaves roughly 2x headroom while
-/// still keeping a wedged binary from stalling startup.  Do not inflate it
-/// without numbers: a timeout only ever produces false negatives, and a
-/// failing probe is cheap to reproduce with `thumbrella probe`.
+/// even when pinned to a single CPU. The explicit `probe` command uses a
+/// longer deadline via `env_check::probe_config`.
 pub fn probe() -> SandboxConfig {
     SandboxConfig {
         timeout: Duration::from_secs(3),

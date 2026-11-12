@@ -7,6 +7,63 @@ use std::process::Command;
 
 use tier3::office::run_office_handler;
 
+#[cfg(unix)]
+fn probe_with_slow_soffice(delay_secs: u64, args: &[&str]) -> std::process::Output {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let soffice = dir.path().join("soffice");
+    std::fs::write(&soffice, format!("#!/bin/sh\nsleep {delay_secs}\necho 'LibreOffice 24.2.7.2'\n"))
+        .unwrap();
+    std::fs::set_permissions(&soffice, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut paths = vec![dir.path().to_path_buf()];
+    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_thumbrella"));
+    child
+        .args(args)
+        .env("PATH", std::env::join_paths(paths).unwrap())
+        .env_remove("TBR_TIER3")
+        .env("TBR_LOG", "full");
+    if args == ["probe"] {
+        child.env("TBR_PROBE", "ffmpeg");
+    } else {
+        child.env_remove("TBR_PROBE");
+    }
+    child.output().unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_probe_allows_slow_tools_without_delaying_startup() {
+    let startup = probe_with_slow_soffice(4, &["check"]);
+    assert!(startup.status.success());
+    let diagnostics = String::from_utf8_lossy(&startup.stderr);
+    let unavailable = diagnostics.split("unavailable (").nth(1).expect("probe summary");
+    assert!(unavailable.split(')').next().unwrap().split(", ").any(|name| name == "soffice"));
+
+    let probe = probe_with_slow_soffice(4, &["probe"]);
+    assert!(probe.status.success());
+    let output = String::from_utf8_lossy(&probe.stdout);
+    assert!(output.trim().strip_prefix("TBR_PROBE=").unwrap().split(',').any(|name| name == "soffice"));
+
+    let result = probe_with_slow_soffice(4, &["result", "probe"]);
+    assert!(result.status.success());
+    let diagnostics = String::from_utf8_lossy(&result.stderr);
+    let unavailable = diagnostics.split("unavailable (").nth(1).expect("probe summary");
+    assert!(unavailable.split(')').next().unwrap().split(", ").any(|name| name == "soffice"));
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_probe_still_times_out_hung_tools() {
+    let probe = probe_with_slow_soffice(11, &["probe"]);
+    assert!(probe.status.success());
+    let output = String::from_utf8_lossy(&probe.stdout);
+    assert!(
+        !output.trim().strip_prefix("TBR_PROBE=").unwrap().split(',').any(|name| name == "soffice")
+    );
+}
+
 fn have_soffice() -> bool {
     which::which("soffice").is_ok()
 }

@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 //  Handler registry
 
@@ -145,7 +146,7 @@ pub fn probe_environment() -> EnvReport {
     //  When a probe cache is supplied (and we are not re-probing), trust it
     //  instead of spawning any external command.  Otherwise run the subprocess
     //  probes concurrently, each bounded by a hard deadline (see
-    //  `sandbox::probe`) so a wedged tool never delays startup.
+    //  `probe_config`) so a wedged tool never delays startup.
     if let Some(tokens) = configured_probe_tokens().filter(|_| !force_probe()) {
         apply_probe_cache(&mut report, &tokens);
     } else {
@@ -367,6 +368,14 @@ fn force_probe() -> bool {
     FORCE_PROBE.load(Ordering::Relaxed)
 }
 
+pub(crate) fn probe_config() -> crate::sandbox::SandboxConfig {
+    let mut config = crate::sandbox::probe();
+    if force_probe() {
+        config.timeout = Duration::from_secs(10);
+    }
+    config
+}
+
 /// Parse `TBR_PROBE` as a comma-separated list of available tools.
 fn configured_probe_tokens() -> Option<Vec<String>> {
     let raw = std::env::var("TBR_PROBE").ok()?;
@@ -565,7 +574,7 @@ fn blender_job() -> ProbeResult {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        let output = crate::sandbox::output(&mut cmd, &crate::sandbox::probe())
+        let output = crate::sandbox::output(&mut cmd, &probe_config())
             .map_err(|e| format!("blender --version: {e}"))?;
         if !output.status.success() {
             return Err(format!(
@@ -796,8 +805,7 @@ fn try_dlopen(soname: &str, _desc: &str) -> (bool, Option<String>, Option<String
 /// no separate "is it on the path?" step.  `expected_exit` lets each command
 /// define what "ran normally" means (most version switches return 0).
 ///
-/// The command is bounded by [`crate::sandbox::probe`], so a tool that hangs
-/// is reported unavailable rather than stalling startup.
+/// A tool that hangs is reported unavailable rather than stalling startup.
 fn run_capture(
     binary: &str,
     args: &[&str],
@@ -808,8 +816,8 @@ fn run_capture(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let output = crate::sandbox::output(&mut cmd, &crate::sandbox::probe())
-        .map_err(|e| format!("run {binary}: {e}"))?;
+    let output =
+        crate::sandbox::output(&mut cmd, &probe_config()).map_err(|e| format!("run {binary}: {e}"))?;
     match output.status.code() {
         Some(code) if code == expected_exit => Ok(output),
         Some(code) => {

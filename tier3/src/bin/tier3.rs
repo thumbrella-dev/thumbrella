@@ -10,7 +10,7 @@
 #[tokio::main]
 async fn main() {
     //  The `probe` command must ignore TBR_PROBE and run the real probes.
-    if std::env::args().skip(1).any(|a| a == "probe") {
+    if std::env::args().nth(1).as_deref() == Some("probe") {
         tier3::env_check::set_force_probe();
     }
 

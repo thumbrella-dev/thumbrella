@@ -332,6 +332,22 @@ pub trait CacheBackend {
         key: &'a str,
         pin_ttl: u64,
     ) -> Pin<Box<dyn Future<Output = Option<CacheEntry>> + 'a>>;
+    /// Return the actual serving layer for composite backends.
+    fn get_entry_with_backend<'a>(
+        &'a self,
+        key: &'a str,
+        pin_ttl: u64,
+    ) -> Pin<Box<dyn Future<Output = Option<(CacheEntry, &'static str)>> + 'a>> {
+        Box::pin(async move { self.get_entry(key, pin_ttl).await.map(|entry| (entry, self.name())) })
+    }
+    fn get_entry_with_after<'a>(
+        &'a self,
+        key: &'a str,
+        pin_ttl: u64,
+        _after: &'a mut AfterResponse,
+    ) -> Pin<Box<dyn Future<Output = Option<(CacheEntry, &'static str)>> + 'a>> {
+        self.get_entry_with_backend(key, pin_ttl)
+    }
     fn get_pin_entry<'a>(
         &'a self,
         key: &'a str,
@@ -572,6 +588,12 @@ impl CacheStore {
         }
     }
 
+    /// Replace the durable backend while retaining the shared debounce frontend.
+    #[cfg(not(feature = "native"))]
+    pub fn with_backend(&self, backend: Arc<dyn CacheBackend>) -> Self {
+        Self { backend: Some(backend), frontend: self.frontend.clone() }
+    }
+
     /// Empty store - no reads, no writes.
     pub fn none() -> Self {
         Self::default()
@@ -686,7 +708,25 @@ impl CacheStore {
     /// The cook must check freshness or revalidate before serving the media.
     pub async fn check_entry(&self, key: &str, pin_ttl: u64) -> Option<(CacheEntry, &'static str)> {
         let backend = self.backend.as_ref()?;
-        backend.get_entry(key, pin_ttl).await.map(|entry| (entry, backend.name()))
+        #[cfg(feature = "native")]
+        {
+            backend.get_entry(key, pin_ttl).await.map(|entry| (entry, backend.name()))
+        }
+
+        #[cfg(not(feature = "native"))]
+        {
+            backend.get_entry_with_backend(key, pin_ttl).await
+        }
+    }
+
+    #[cfg(not(feature = "native"))]
+    pub async fn check_entry_with_after(
+        &self,
+        key: &str,
+        pin_ttl: u64,
+        after: &mut AfterResponse,
+    ) -> Option<(CacheEntry, &'static str)> {
+        self.backend.as_ref()?.get_entry_with_after(key, pin_ttl, after).await
     }
 
     pub async fn get_pin_entry(&self, key: &str) -> Option<(CacheEntry, &'static str)> {

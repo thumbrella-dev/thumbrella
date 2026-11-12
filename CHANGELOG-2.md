@@ -2,6 +2,7 @@
 
 ## Development
 
+- Increase external command probe timeout for 'probe' subcommand
 
 ## 2.4.3 - 2026/11/11
 

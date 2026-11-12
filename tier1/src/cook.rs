@@ -1020,7 +1020,14 @@ impl<S: HttpStream> ThumbCook<S> {
         let pre_cached = if self.ctx_handoff || self.input.cache_disabled {
             None
         } else {
-            self.runtime.cache.check_entry(&cache_key, self.default_pin_ttl).await
+            #[cfg(feature = "native")]
+            {
+                self.runtime.cache.check_entry(&cache_key, self.default_pin_ttl).await
+            }
+            #[cfg(not(feature = "native"))]
+            {
+                self.runtime.cache.check_entry_with_after(&cache_key, self.default_pin_ttl, after).await
+            }
         };
         let mut validates_stored = false;
         if let Some((ref entry, backend)) = pre_cached {

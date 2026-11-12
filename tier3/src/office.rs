@@ -329,7 +329,7 @@ pub fn probe() -> (bool, Option<String>, Option<String>) {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = match crate::sandbox::output(&mut cmd, &crate::sandbox::probe()) {
+    let output = match crate::sandbox::output(&mut cmd, &crate::env_check::probe_config()) {
         Ok(output) => output,
         Err(e) => return (false, None, Some(format!("soffice --version: {e}"))),
     };
