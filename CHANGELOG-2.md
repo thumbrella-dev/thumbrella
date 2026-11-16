@@ -2,7 +2,9 @@
 
 ## Development
 
+- Build flags to optimize image operations
 - Increase external command probe timeout for 'probe' subcommand
+- Dispatch webp, jxl, tga to tier2 from tier3 for faster results
 
 ## 2.4.3 - 2026/11/11
 

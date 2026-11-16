@@ -190,11 +190,11 @@ pub struct FormatEntry {
 #[rustfmt::skip]
 pub fn format_manifest() -> &'static [FormatEntry] {&[
     //  Tier 1 - pure Rust (image crate)
-    FormatEntry {extension: "png", label: "PNG",
+    FormatEntry {extension: "png", label: "Portable Network Graphics",
                 kind: FileKind::Image,  tier: 1, renderer: "image_crate", shortcut: true },
-    FormatEntry {extension: "gif", label: "GIF",
+    FormatEntry {extension: "gif", label: "Graphics Interchange Format",
                 kind: FileKind::Image,  tier: 1, renderer: "image_crate", shortcut: true },
-    FormatEntry {extension: "webp", label: "Google",
+    FormatEntry {extension: "webp", label: "Google VP8 Image",
                 kind: FileKind::Image,  tier: 1, renderer: "image_crate", shortcut: true },
     FormatEntry {extension: "bmp", label: "Windows Bitmap",
                 kind: FileKind::Image,  tier: 1, renderer: "image_crate", shortcut: true },
@@ -206,6 +206,8 @@ pub fn format_manifest() -> &'static [FormatEntry] {&[
     FormatEntry {extension: "jpeg", label: "JPEG",
                 kind: FileKind::Image,  tier: 2, renderer: "libav", shortcut: true },
     //  Tier 2 - libav / resvg / jxl-oxide
+    FormatEntry {extension: "webp", label: "Google VP8 Image",
+                kind: FileKind::Image,  tier: 2, renderer: "image_crate", shortcut: false},    
     FormatEntry {extension: "svg", label: "Scalable Vector",
                 kind: FileKind::Vector, tier: 2, renderer: "resvg", shortcut: false},
     FormatEntry {extension: "jxl", label: "JPEG XL",
@@ -269,7 +271,7 @@ pub fn format_manifest() -> &'static [FormatEntry] {&[
     FormatEntry {extension: "pbm", label: "NetPBM",
                 kind: FileKind::Image,  tier: 2, renderer: "libav", shortcut: false},
     FormatEntry {extension: "tga", label: "Targa",
-                kind: FileKind::Image,  tier: 2, renderer: "libav", shortcut: false},
+                kind: FileKind::Image,  tier: 2, renderer: "image_crate", shortcut: false},
     //  Tier 2 - video (libav / ffmpeg)
     FormatEntry {extension: "mp4", label: "MPEG-4",
                 kind: FileKind::Video,  tier: 2, renderer: "libav", shortcut: false},
@@ -375,17 +377,7 @@ pub fn format_manifest() -> &'static [FormatEntry] {&[
     //  Tier 3 - ffmpeg CLI: arithmetic JPEG + all image formats
     FormatEntry {extension: "jpeg", label: "JPEG (arithmetic)",
                 kind: FileKind::Image,  tier: 3, renderer: "ffmpeg_cli", shortcut: false},
-    FormatEntry {extension: "png", label: "PNG (via ffmpeg)",
-                kind: FileKind::Image,  tier: 3, renderer: "ffmpeg_cli", shortcut: false},
-    FormatEntry {extension: "webp", label: "WebP (via ffmpeg)",
-                kind: FileKind::Image,  tier: 3, renderer: "ffmpeg_cli", shortcut: false},
-    FormatEntry {extension: "bmp", label: "BMP (via ffmpeg)",
-                kind: FileKind::Image,  tier: 3, renderer: "ffmpeg_cli", shortcut: false},
-    FormatEntry {extension: "tiff", label: "TIFF (via ffmpeg)",
-                kind: FileKind::Image,  tier: 3, renderer: "ffmpeg_cli", shortcut: false},
     FormatEntry {extension: "psd", label: "PSD (via ffmpeg)",
-                kind: FileKind::Image,  tier: 3, renderer: "ffmpeg_cli", shortcut: false},
-    FormatEntry {extension: "gif", label: "GIF (via ffmpeg)",
                 kind: FileKind::Image,  tier: 3, renderer: "ffmpeg_cli", shortcut: false},
     FormatEntry {extension: "jp2", label: "JPEG 2000",
                 kind: FileKind::Image,  tier: 3, renderer: "ffmpeg_cli", shortcut: false},
@@ -401,11 +393,7 @@ pub fn format_manifest() -> &'static [FormatEntry] {&[
                 kind: FileKind::Image,  tier: 3, renderer: "ffmpeg_cli", shortcut: false},
     FormatEntry {extension: "pam", label: "PAM",
                 kind: FileKind::Image,  tier: 3, renderer: "ffmpeg_cli", shortcut: false},
-    FormatEntry {extension: "svg", label: "SVG (via ffmpeg)",
-                kind: FileKind::Vector, tier: 3, renderer: "ffmpeg_cli", shortcut: false},
     FormatEntry {extension: "avif", label: "AVIF (via ffmpeg)",
-                kind: FileKind::Image,  tier: 3, renderer: "ffmpeg_cli", shortcut: false},
-    FormatEntry {extension: "heic", label: "HEIC (via ffmpeg)",
                 kind: FileKind::Image,  tier: 3, renderer: "ffmpeg_cli", shortcut: false},
     //  Tier 3 - oiiotool: studio image formats
     FormatEntry {extension: "hdr", label: "Radiance HDR",

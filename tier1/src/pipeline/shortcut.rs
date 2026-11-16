@@ -1426,7 +1426,7 @@ fn tiff_u32_values(bytes: &[u8], ft: u16, fc: usize, v: usize, little: bool, max
 /// **Phase 2** - Triangle filter for the remaining ≤2× step.
 /// At ≤2× the Triangle kernel is small, so cost is low, but the quality
 /// improvement over a final nearest-neighbour step is substantial.
-fn pre_scale_to_target(img: DynamicImage, target_w: u32, target_h: u32) -> DynamicImage {
+pub fn pre_scale_to_target(img: DynamicImage, target_w: u32, target_h: u32) -> DynamicImage {
     let (w, h) = (img.width(), img.height());
     let (tw, th) = (target_w.max(1), target_h.max(1));
 

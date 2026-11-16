@@ -194,15 +194,23 @@ async fn render_sparse_image(cook: &mut dyn RenderCook, ext: &str) -> bool {
     }
 }
 
+/// Returns `true` for formats decoded by the `image` crate rather than libav.
+///
+/// PNG: the image crate handles interlaced PNG more efficiently than libav
+/// (otherwise their performance is within 10%).
+///
+/// TGA: libav cannot open a TGA from a pipe - the static build has the
+/// `targa` decoder but no TGA demuxer, and TGA has no magic bytes to
+/// auto-probe.  The image crate decodes it directly.
 fn is_image_crate_format(ext: &str) -> bool {
-    matches!(ext, "png")
-    // image library seems to handle interlaced png more efficiently than libav.
-    // but otherwise their performance is within 10%
+    matches!(ext, "png" | "tga")
 }
 
-/// Returns `true` for image formats that tier2's libav can decode.
-/// Other studio formats (HDR, DPX, …) and esoteric formats are handled by
-/// tier3's oiiotool / ffmpeg CLI.
+/// Returns `true` for image formats tier2 can render in-process.
+///
+/// Covers what libav decodes plus the formats with a dedicated decoder
+/// (JPEG XL via `jxl-oxide`).  Other studio formats (HDR, DPX, …) and esoteric
+/// formats are handled by tier3's oiiotool / ffmpeg CLI.
 fn tier2_handles_image(ext: &str) -> bool {
     matches!(
         ext,
@@ -215,6 +223,8 @@ fn tier2_handles_image(ext: &str) -> bool {
             | "tif"
             | "gif"
             | "ico"
+            | "jxl"
+            | "tga"
             | "psd"
             | "avif"
             | "heic"
@@ -409,7 +419,7 @@ fn decode_jxl(reader: &mut dyn ReadSeek) -> Option<RenderOutput> {
 ///
 /// We rasterise at 500×400 (2× the canonical thumbnail) with default
 /// quality settings (anti-aliasing on) so the downstream deliver step
-/// has enough pixel data for a clean Lanczos3 downscale to 250×200.
+/// has enough pixel data for a clean downscale to 250×200.
 fn render_svg(reader: &mut dyn ReadSeek) -> Option<RenderOutput> {
     let mut svg_str = String::new();
     reader.read_to_string(&mut svg_str).ok()?;
@@ -946,6 +956,17 @@ async fn render_video(cook: &mut dyn RenderCook, ext: &str, content_length: Opti
     apply_result(cook, result)
 }
 
+/// Decode an in-memory image buffer with the `image` crate.
+///
+/// `load_from_memory` sniffs the format from magic bytes.  TGA has none, so it
+/// must be named explicitly or the sniff fails with "unknown format".
+fn decode_image_bytes(bytes: &[u8], ext: &str) -> Option<DynamicImage> {
+    match ext {
+        "tga" => image::load_from_memory_with_format(bytes, image::ImageFormat::Tga).ok(),
+        _ => image::load_from_memory(bytes).ok(),
+    }
+}
+
 /// Drain `reader` via `read_to_end`, then decode with the `image` crate.
 /// Runs inside `spawn_blocking` - blocking I/O is expected.
 ///
@@ -961,9 +982,15 @@ fn collect_and_decode_image_crate(
 ) -> Option<RenderOutput> {
     use image::GenericImageView;
 
+    let t_read = std::time::Instant::now();
     let mut bytes = Vec::with_capacity(content_length.unwrap_or(65536) as usize);
     std::io::Read::read_to_end(&mut reader, &mut bytes).ok()?;
-    tbr_debug!("[tier2] collect_and_decode_image_crate: {} bytes  ext={}", bytes.len(), ext);
+    tbr_debug!(
+        "[tier2] collect_and_decode_image_crate: {} bytes  ext={}  read={:?}",
+        bytes.len(),
+        ext,
+        t_read.elapsed()
+    );
 
     // Read EXIF orientation before decoding - the `image` crate does not
     // apply it automatically.
@@ -972,11 +999,12 @@ fn collect_and_decode_image_crate(
     let cfg = ThumbnailConfig::CANONICAL;
 
     // For JPEG, attempt a fast DCT-downscaled decode first.
+    let t_decode = std::time::Instant::now();
     let (img, src_w, src_h, depth) = if matches!(ext, "jpeg" | "jpg") {
         match decode_jpeg_dct(&bytes, cfg.exact_width as u16, cfg.exact_height as u16) {
             Some(t) => t,
             None => {
-                let img = image::load_from_memory(&bytes).ok()?;
+                let img = decode_image_bytes(&bytes, ext)?;
                 let (w, h) = img.dimensions();
                 let color = img.color();
                 let d = u32::from(color.bits_per_pixel())
@@ -989,7 +1017,7 @@ fn collect_and_decode_image_crate(
             }
         }
     } else {
-        let img = image::load_from_memory(&bytes).ok()?;
+        let img = decode_image_bytes(&bytes, ext)?;
         let (w, h) = img.dimensions();
         let color = img.color();
         let d = u32::from(color.bits_per_pixel())
@@ -1001,9 +1029,18 @@ fn collect_and_decode_image_crate(
         (img, w, h, d)
     };
 
+    tbr_debug!("[tier2] decode {:?} -> {}x{} depth={}", t_decode.elapsed(), src_w, src_h, depth);
+
     // Apply EXIF orientation correction.
     let img = apply_exif_orientation(img, orientation);
+    let t_prescale = std::time::Instant::now();
     let img = pre_scale(img, cfg.exact_width, cfg.exact_height);
+    tbr_debug!(
+        "[tier2] pre_scale {:?} -> {}x{}",
+        t_prescale.elapsed(),
+        img.width(),
+        img.height()
+    );
 
     Some(RenderOutput {
         image: img,
@@ -1094,27 +1131,46 @@ fn apply_result(cook: &mut dyn RenderCook, result: Option<RenderOutput>) -> bool
     true
 }
 
-/// Fast thumbnail pre-scale that covers `target_w x target_h` (Lanczos3).
+/// Fast thumbnail pre-scale that covers `target_w x target_h`.
+///
+/// Delegates to tier1's [`pre_scale_to_target`](tier1::pipeline::pre_scale_to_target):
+/// 2x2 box-average halvings down to ~2x the target, then a Triangle step for
+/// the remainder.  Running Lanczos3 straight from full resolution cost ~78 ms
+/// on a 1920x1920 source for pixels that are immediately cropped down to a
+/// 250x200 JPEG; the box path is ~4x faster and keeps the same output whichever
+/// tier rendered the source.
 fn pre_scale(img: DynamicImage, target_w: u32, target_h: u32) -> DynamicImage {
-    use image::imageops::FilterType;
-    let (src_w, src_h) = (img.width(), img.height());
-    if src_w == 0 || src_h == 0 {
-        return img;
-    }
-    // Use max (cover), not min (fit): fill_crop will crop the excess, so we
-    // must never hand it an image smaller than the target in either dimension.
-    let scale = (target_w as f64 / src_w as f64).max(target_h as f64 / src_h as f64);
-    let new_w = ((src_w as f64 * scale).round() as u32).max(1);
-    let new_h = ((src_h as f64 * scale).round() as u32).max(1);
-    img.resize(new_w, new_h, FilterType::Lanczos3)
+    tier1::pipeline::pre_scale_to_target(img, target_w, target_h)
 }
 
 /// Fallback: fetch `url` - supports both `http(s)://` and `file://`.
+///
+/// A handoff cook arrives with no live connection, so this is the only fetch
+/// the receiving renderer makes.  Keep one client (and therefore one
+/// connection pool with warm TLS sessions) for the life of the process:
+/// `reqwest::get` builds a throwaway client per call, which pays a fresh DNS
+/// lookup, TCP connect and TLS handshake on every handoff.
+fn fetch_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(120))
+            .tcp_nodelay(true)
+            .build()
+            .unwrap_or_default()
+    })
+}
+
 pub async fn fetch_url(url: &str) -> Option<Vec<u8>> {
     if let Some(path) = tier1::local_path::path_from_file_url(url) {
         return tokio::fs::read(path).await.ok();
     }
-    reqwest::get(url).await.ok()?.bytes().await.ok().map(|b| b.to_vec())
+    let resp = fetch_client().get(url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    resp.bytes().await.ok().map(|b| b.to_vec())
 }
 
 //  EXIF orientation

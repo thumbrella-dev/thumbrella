@@ -1194,6 +1194,32 @@ pub async fn thumb(
 
 //  POST /batch
 
+pub async fn trace_batch_request(req: Request, next: Next) -> Response {
+    if req.method() != Method::POST || req.uri().path() != "/batch" || !ux::show_raw_logs() {
+        return next.run(req).await;
+    }
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tracing::Instrument;
+
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+    let span =
+        tracing::info_span!("batch_timing", request_id = NEXT_ID.fetch_add(1, Ordering::Relaxed));
+    async move {
+        let start = Instant::now();
+        tracing::info!("request entered router");
+        let response = next.run(req).await;
+        tracing::info!(
+            elapsed_ms = start.elapsed().as_secs_f64() * 1000.0,
+            status = response.status().as_u16(),
+            "response ready; body not yet sent"
+        );
+        response
+    }
+    .instrument(span)
+    .await
+}
+
 /// Batch thumbnail / describe endpoint.
 ///
 /// Accepts a `CallRequest` JSON body and returns a JSON array of `ThumbResult`
@@ -1205,7 +1231,10 @@ pub async fn batch(
     connect_info: ConnectInfo<SocketAddr>,
     Json(req): Json<CallRequest>,
 ) -> Response {
-    let _t0 = Instant::now();
+    let t0 = Instant::now();
+    if ux::show_raw_logs() {
+        tracing::info!("batch handler entered; request JSON parsed");
+    }
     let stream_mode = wants_ndjson(&headers);
     let ip = client_ip(&headers, Some(&connect_info.0));
 
@@ -1331,7 +1360,16 @@ pub async fn batch(
         items.push(result);
     }
 
-    Json(json!({ "items": items })).into_response()
+    let t_serialize = Instant::now();
+    let response = Json(json!({ "items": items })).into_response();
+    if ux::show_raw_logs() {
+        tracing::info!(
+            elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0,
+            serialize_ms = t_serialize.elapsed().as_secs_f64() * 1000.0,
+            "batch handler response ready"
+        );
+    }
+    response
 }
 
 /// Validate and normalise a URL from a request query parameter.

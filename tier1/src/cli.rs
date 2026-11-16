@@ -302,10 +302,8 @@ async fn run_server(runtime: Arc<Runtime>) {
                     post(routes::batch).layer(DefaultBodyLimit::max(routes::BATCH_MAX_BODY_BYTES)),
                 )
                 .fallback(routes::not_found)
-                .layer(axum::middleware::from_fn_with_state(
-                    runtime.clone(),
-                    routes::require_handshake,
-                )),
+                .layer(axum::middleware::from_fn_with_state(runtime.clone(), routes::require_handshake))
+                .layer(axum::middleware::from_fn(routes::trace_batch_request)),
         )
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(runtime);

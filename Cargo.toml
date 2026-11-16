@@ -67,3 +67,108 @@ lto = "fat"
 codegen-units = 1
 strip = "symbols"
 panic = "abort"
+
+# "z" sizes the app crates well but penalises the numeric inner loops in the
+# image/codec crates hard: measured on an interlaced 1920x1920 PNG, decoding
+# and Lanczos3 downscaling to the canonical 250x200 is ~4.5x slower than at
+# opt-level 3 (resize alone ~6x).  Per-package opt-level is honoured even
+# under fat LTO (verified), so compile the hot pixel paths for speed and let
+# everything else stay size-optimised.
+[profile.release.package.image]
+opt-level = 3
+
+[profile.release.package.png]
+opt-level = 3
+
+[profile.release.package.fdeflate]
+opt-level = 3
+
+[profile.release.package.flate2]
+opt-level = 3
+
+[profile.release.package.miniz_oxide]
+opt-level = 3
+
+[profile.release.package.zune-jpeg]
+opt-level = 3
+
+[profile.release.package.jpeg-decoder]
+opt-level = 3
+
+[profile.release.package.image-webp]
+opt-level = 3
+
+[profile.release.package.image-extras]
+opt-level = 3
+
+[profile.release.package.dds]
+opt-level = 3
+
+[profile.release.package.half]
+opt-level = 3
+
+[profile.release.package.zune-core]
+opt-level = 3
+
+[profile.release.package.zune-inflate]
+opt-level = 3
+
+[profile.release.package.usvg]
+opt-level = 3
+
+[profile.release.package.jxl-oxide]
+opt-level = 3
+
+[profile.release.package.jxl-oxide-common]
+opt-level = 3
+
+[profile.release.package.jxl-render]
+opt-level = 3
+
+[profile.release.package.jxl-modular]
+opt-level = 3
+
+[profile.release.package.jxl-vardct]
+opt-level = 3
+
+[profile.release.package.jxl-coding]
+opt-level = 3
+
+[profile.release.package.jxl-grid]
+opt-level = 3
+
+[profile.release.package.jxl-frame]
+opt-level = 3
+
+[profile.release.package.jxl-image]
+opt-level = 3
+
+[profile.release.package.jxl-color]
+opt-level = 3
+
+[profile.release.package.jxl-bitstream]
+opt-level = 3
+
+[profile.release.package.jxl-jbr]
+opt-level = 3
+
+[profile.release.package.jxl-threadpool]
+opt-level = 3
+
+[profile.release.package.tiff]
+opt-level = 3
+
+[profile.release.package.gif]
+opt-level = 3
+
+[profile.release.package.exr]
+opt-level = 3
+
+[profile.release.package.resvg]
+opt-level = 3
+
+[profile.release.package.tiny-skia]
+opt-level = 3
+
+[profile.release.package.tiny-skia-path]
+opt-level = 3
