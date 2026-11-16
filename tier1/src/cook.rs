@@ -950,6 +950,17 @@ impl<S: HttpStream> ThumbCook<S> {
         self.render_renderer = Some(format!("handoff/tier{target_tier}"));
     }
 
+    /// Mark this cook as resolved by an exhausted handoff budget.
+    ///
+    /// The caller still receives a placeholder image with status `success`;
+    /// the message records why.  `finish` supplies the kind-specific
+    /// placeholder bytes once the cook is materialised.
+    fn mark_handoff_timeout(&mut self) {
+        self.status = CookStatus::Complete;
+        self.placeholder_source = Some(ResultSource::Placeholder);
+        self.out_message = crate::handoff::TIMEOUT_MESSAGE.to_string();
+    }
+
     //  Pipeline entry
 
     /// Run the full pipeline and return `(result, trace, after)`.
@@ -1409,6 +1420,15 @@ impl<S: HttpStream> ThumbCook<S> {
                         });
                     }
                     Err(e) => {
+                        // The target kept returning 503 until the handoff
+                        // budget elapsed: answer with a placeholder instead of
+                        // escalating or failing.  `finish` fills in the
+                        // kind-specific placeholder image.
+                        if crate::handoff::is_timeout_error(&e) {
+                            self.mark_handoff_timeout();
+                            self.out_duration = t0.elapsed().as_secs_f64();
+                            return self.finish(after).await;
+                        }
                         self.out_message = format!("handoff to tier {attempt_tier} failed: {e}");
                     }
                 }

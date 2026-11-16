@@ -80,6 +80,9 @@ web-time = "1"
 parking_lot = "0.12"
 sha2 = "0.11"
 httpdate = "1"
+# Runtime-agnostic timer for the handoff 503 scaleback on non-tokio builds
+# (wasm32).  Native builds use tokio::time instead.
+futures-timer = "3"
 
 #  Native-only
 rusqlite        = { version = "0.40", features = ["bundled"],                optional = true }

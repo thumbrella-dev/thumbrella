@@ -745,6 +745,32 @@ async fn missing_handoff_handlers_skip_durable_storage_across_multiple_hops() {
 }
 
 #[tokio::test]
+async fn exhausted_handoff_budget_yields_a_successful_placeholder() {
+    let url = register_path("handoff-timeout", "image.png", vec![]);
+    let rt = runtime(CacheStore::none());
+    let mut cook = ThumbCook::<MockStream>::new(&url, rt);
+    cook.media.kind = Some(FileKind::Image);
+    cook.media.extension = Some("png".into());
+    cook.media.mime = Some("image/png".into());
+
+    // Same terminal state the handoff loop reaches when `post_handoff`
+    // reports an exhausted budget.
+    cook.mark_handoff_timeout();
+    let (result, _, mut after) = cook.finish(AfterResponse::new()).await;
+    for task in after.drain() {
+        task.await;
+    }
+
+    assert_eq!(result.status, ResultStatus::Success);
+    assert_eq!(result.message.as_deref(), Some("handoff timeout"));
+    assert_eq!(result.source, Some(ResultSource::Placeholder));
+    let media = result.media.expect("placeholder media");
+    assert_eq!(media.placeholder, "image");
+    assert_eq!(media.thumbnail, crate::assets::placeholder_for_kind(FileKind::Image));
+    assert!(!media.cache.is_empty());
+}
+
+#[tokio::test]
 async fn changed_200_renders_new_content_and_replaces_cache_metadata() {
     let mut response = reply(
         200,

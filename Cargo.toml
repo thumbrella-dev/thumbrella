@@ -57,7 +57,14 @@ debug = 2          # full debug info (variables, types, not just line tables)
 incremental = true
 codegen-units = 256
 
-# Dev build uses optimized dependencies for efficiency
+# Dev/test builds: workspace crates stay at opt-level 0 (debuggable, fast
+# incremental), but every *dependency* is compiled at 3.  The "*" wildcard
+# applies to dependencies only - it never overrides workspace members, so
+# tier1/tier2/the root bin remain unoptimized and inspectable.  Dependencies
+# are compiled once per dependency change, so this buys usable codec speed
+# (image/mozjpeg-rs/jxl at 0 are several times slower) without slowing the
+# edit loop.  This is not "more optimized than release": release adds opt-level
+# overrides for the app crates, fat LTO, codegen-units = 1, and panic = abort.
 [profile.dev.package."*"]
 opt-level = 3
 
@@ -74,6 +81,13 @@ panic = "abort"
 # opt-level 3 (resize alone ~6x).  Per-package opt-level is honoured even
 # under fat LTO (verified), so compile the hot pixel paths for speed and let
 # everything else stay size-optimised.
+#
+# The JPEG encoder and its SIMD helpers matter as much as the decoders, and so
+# does the pipeline code in tier1/tier2 that drives them.  Measured on the demo
+# media set (exr/jxl/webp/tga, medians of 11 runs): global opt-level 3 cut wall
+# time 44% vs "z" only, and adding just these packages to the list below reaches
+# the same runtime while building ~1m09s faster from clean (3m37s vs 4m46s).
+# Prefer extending this list over switching the whole profile to 3.
 [profile.release.package.image]
 opt-level = 3
 
@@ -171,4 +185,34 @@ opt-level = 3
 opt-level = 3
 
 [profile.release.package.tiny-skia-path]
+opt-level = 3
+
+# JPEG encoding (mozjpeg-rs) plus the SIMD crates it leans on.
+[profile.release.package.mozjpeg-rs]
+opt-level = 3
+
+[profile.release.package.wide]
+opt-level = 3
+
+[profile.release.package.archmage]
+opt-level = 3
+
+[profile.release.package.safe_unaligned_simd]
+opt-level = 3
+
+[profile.release.package.zenyuv]
+opt-level = 3
+
+[profile.release.package.rgb]
+opt-level = 3
+
+[profile.release.package.imgref]
+opt-level = 3
+
+# Pipeline/app crates - the orchestration and colour conversion around the
+# codecs is hot too, not just the dependencies.
+[profile.release.package.tier1]
+opt-level = 3
+
+[profile.release.package.tier2]
 opt-level = 3
