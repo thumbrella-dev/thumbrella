@@ -10,7 +10,10 @@
 //! - [`InputSpec`]      - original caller inputs; receiver needs url/etag.
 //! - [`MediaInfo`]      - sniffed type info; skips re-running connect+inspect.
 //! - [`SourceIdentity`] - cache key; tier-1 stores the result after receipt.
-//! - `first_page`       - head-start bytes; receiver parses without a new request.
+//! - `first_page`       - deprecated and always empty on the wire.  Receivers
+//!                        reconnect and read from byte 0; the old 4 KiB prefix
+//!                        bought nothing and only inflated the payload, but the
+//!                        field stays for compatibility with older senders.
 //!
 //! What does NOT travel:
 //! - `runtime`       - each tier constructs its own.
@@ -117,10 +120,13 @@ pub struct ThumbHandoff {
     pub media: MediaInfo,
     pub src: SourceIdentity,
 
-    /// First ~4 KiB of the remote file captured from the inspect page cache.
+    /// First bytes of the remote file, kept for wire compatibility.
     ///
-    /// Forwarded as a head start on header parsing.  `None` when no data was
-    /// cached before the connection was closed (unusual).
+    /// New senders always serialise this as an empty array (`[]`); receivers
+    /// ignore it.  It previously carried the first ~4 KiB as a head start, but
+    /// measured no benefit (every decoder reads past it immediately) while
+    /// bloating the request by several KB.  Older senders may still populate
+    /// it and are accepted (`default`), and older receivers simply see `[]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_page: Option<Vec<u8>>,
 }

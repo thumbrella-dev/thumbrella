@@ -112,6 +112,16 @@ impl CookStatus {
 
 //  Runtime
 
+/// Maximum origin body size (bytes) whose remainder tier1 reads and discards
+/// in a deferred task after issuing a handoff.
+///
+/// Draining to EOF lets the HTTP client return the connection to its
+/// keep-alive pool instead of dropping it mid-stream and paying a fresh
+/// TCP/TLS handshake on the next request.  Bodies above this size are closed
+/// immediately so the background read stays bounded.  Hardcoded for now;
+/// expose a knob only if operators need to trade egress for handshake cost.
+pub const HANDOFF_DRAIN_MAX_BYTES: u64 = 3 * 1024 * 1024;
+
 /// Shared server-wide configuration.  One instance per process, referenced by
 /// every concurrent cook via `Arc<Runtime>`.
 ///
@@ -352,6 +362,10 @@ pub struct ThumbCook<S: HttpStream> {
     pub http_accepts_ranges: bool,
     // Live connection - access via the http_* methods below.
     http_buf: Option<HttpBuffer<S>>,
+    /// Body remainder moved aside by `take_handoff` for deferred draining.
+    /// Pushed onto `AfterResponse` at `finish` so it never blocks the response
+    /// or the inline cache/pin drain.
+    http_drain: Option<HttpBuffer<S>>,
 
     //  Render state
     /// Decoded pixel buffer.  Populated by shortcut or render; consumed and
@@ -490,6 +504,7 @@ impl<S: HttpStream> ThumbCook<S> {
             http_status: None,
             http_accepts_ranges: false,
             http_buf: None,
+            http_drain: None,
             render_image: None,
             render_resolution: None,
             render_handler: RenderHandler::default(),
@@ -884,21 +899,44 @@ impl<S: HttpStream> ThumbCook<S> {
     /// [`crate::handoff::ThumbHandoff`] for
     /// forwarding to a higher-tier renderer over an external transport.
     ///
-    /// Closing and serialising are combined into a single step so it is
-    /// structurally impossible to send a handoff while the connection is
-    /// still open - the caller cannot obtain a `ThumbHandoff` without
-    /// first relinquishing the live stream.
-    pub async fn take_handoff(&mut self) -> crate::handoff::ThumbHandoff
+    /// Returns the payload plus, when the body is known to be small enough
+    /// (see [`HANDOFF_DRAIN_MAX_BYTES`]), the live buffer.  Callers queue that
+    /// buffer for a deferred `drain` so the origin connection is returned to
+    /// the keep-alive pool rather than dropped mid-stream.  When draining is
+    /// not warranted the connection is closed as before.
+    ///
+    /// The payload's `first_page` is always empty (an empty byte array).  It is
+    /// kept on the wire for compatibility, but the receiver reconnects and
+    /// reads from byte 0 either way - the old 4 KiB prefix measured no benefit.
+    pub async fn take_handoff(
+        &mut self,
+    ) -> (crate::handoff::ThumbHandoff, Option<HttpBuffer<S>>)
     where
         S: Send + 'static,
     {
-        let first_page = self.http_close().await;
-        crate::handoff::ThumbHandoff {
+        self.stamp_download_bytes();
+
+        let mut drain = None;
+        if let Some(mut buffer) = self.http_buf.take() {
+            let total = buffer.content_length;
+            let fetched = buffer.bytes_fetched();
+            let limit = HANDOFF_DRAIN_MAX_BYTES;
+            let small_enough =
+                limit > 0 && total.is_some_and(|total| total <= limit && fetched < total);
+            if small_enough {
+                drain = Some(buffer);
+            } else {
+                buffer.close().await;
+            }
+        }
+
+        let payload = crate::handoff::ThumbHandoff {
             input: self.input.clone(),
             media: self.media.clone(),
             src: self.src.clone(),
-            first_page,
-        }
+            first_page: Some(Vec::new()),
+        };
+        (payload, drain)
     }
 
     //  Handoff application
@@ -1284,7 +1322,11 @@ impl<S: HttpStream> ThumbCook<S> {
         // and escalate upward on failure.  Tier 2 never falls back on its own;
         // tier 1 drives the entire chain.
         {
-            let payload = self.take_handoff().await;
+            let (payload, drain) = self.take_handoff().await;
+            // Defer reading the rest of the origin body until after the
+            // response: a fully-read body lets the HTTP client reuse the
+            // connection instead of dropping it mid-stream.
+            self.http_drain = drain;
             let local_bytes = self.render_bytes_consumed.unwrap_or_else(|| self.http_bytes_fetched());
             if self.render_bytes_consumed.is_some() {
                 self.out_download_bytes = local_bytes;
@@ -1468,7 +1510,10 @@ impl<S: HttpStream> ThumbCook<S> {
         )
     }
 
-    async fn finish(mut self, mut after: AfterResponse) -> (ThumbResult, ThumbTrace, AfterResponse) {
+    async fn finish(mut self, mut after: AfterResponse) -> (ThumbResult, ThumbTrace, AfterResponse)
+    where
+        S: Send + 'static,
+    {
         // Final snapshot of I/O counters - safe to call multiple times since
         // stamp_download_bytes is idempotent on the bytes field.
         self.stamp_download_bytes();
@@ -1560,6 +1605,33 @@ impl<S: HttpStream> ThumbCook<S> {
                     .debounce_store(self.ctx_debounce_key.as_deref().unwrap_or(key), &result);
             }
         }
+        // Deferred origin-body drain: finish reading the response so the HTTP
+        // client can return the connection to its keep-alive pool.  Queued
+        // after the cache/pin drain above so it never delays the response or
+        // pin publication.
+        if let Some(buffer) = self.http_drain.take() {
+            #[cfg(feature = "native")]
+            {
+                // `HttpStream::next_chunk` has no `Send` guarantee, so drive
+                // the drain on the blocking pool instead of spawning a Send
+                // future.  Without a runtime (e.g. a sync caller) the buffer
+                // is simply dropped as before.
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    after.push_blocking(move || {
+                        let drained = handle.block_on(buffer.drain());
+                        tracing::debug!(drained, "handoff origin drain complete");
+                    });
+                }
+            }
+            #[cfg(not(feature = "native"))]
+            {
+                after.push(async move {
+                    let drained = buffer.drain().await;
+                    tracing::debug!(drained, "handoff origin drain complete");
+                });
+            }
+        }
+
         let trace = self.to_trace();
         self.runtime.trace.record(trace.clone(), &mut after);
         (result, trace, after)

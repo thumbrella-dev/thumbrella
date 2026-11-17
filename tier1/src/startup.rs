@@ -89,6 +89,9 @@ pub async fn startup(cfg: &AppConfig) -> Arc<Runtime> {
         cfg.cache_max_ttl_secs,
         cfg.cache_default_ttl_secs,
     );
-    Arc::get_mut(&mut runtime).expect("new runtime is uniquely owned").pin_ttl_secs = cfg.pin_ttl_secs;
+    {
+        let runtime = Arc::get_mut(&mut runtime).expect("new runtime is uniquely owned");
+        runtime.pin_ttl_secs = cfg.pin_ttl_secs;
+    }
     runtime
 }

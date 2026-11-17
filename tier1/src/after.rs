@@ -68,6 +68,19 @@ impl AfterResponse {
         self.tasks.push(Box::pin(fut));
     }
 
+    /// Schedule blocking work to run after the response (native only).
+    ///
+    /// Escape hatch for work whose future is not `Send` - notably driving an
+    /// [`crate::http_buf::HttpBuffer`] drain, because `HttpStream::next_chunk`
+    /// carries no `Send` guarantee in the trait.  The closure runs on tokio's
+    /// blocking pool; the buffer itself must be `Send`.
+    #[cfg(feature = "native")]
+    pub fn push_blocking(&mut self, task: impl FnOnce() + Send + 'static) {
+        self.tasks.push(Box::pin(async move {
+            let _ = tokio::task::spawn_blocking(task).await;
+        }));
+    }
+
     /// Drain all scheduled futures, returning them to the caller.
     ///
     /// Cloudflare Workers entry points pass each one to `ctx.wait_until()`.

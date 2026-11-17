@@ -439,14 +439,79 @@ async fn result_url_preserves_request_on_redirects_progress_failures_and_handoff
     cook.fail("source not found");
     assert_eq!(cook.to_result().url, url);
 
+    let (payload, drain) = cook.take_handoff().await;
+    assert!(drain.is_none());
     let mut cook =
-        ThumbCook::<MockStream>::from_handoff(cook.take_handoff().await, runtime(CacheStore::none()));
+        ThumbCook::<MockStream>::from_handoff(payload, runtime(CacheStore::none()));
     assert_eq!(cook.to_result().url, url);
     cook.debounce_result = Some(ThumbResult {
         url: "https://previous-caller.example/".into(),
         ..Default::default()
     });
     assert_eq!(cook.to_result().url, url);
+}
+
+#[tokio::test]
+async fn handoff_queues_small_bodies_for_deferred_draining() {
+    let mut response = reply(
+        200,
+        &[("content-length", "1200"), ("content-type", "image/png")],
+    );
+    response.body = vec![7u8; 1200];
+    let url = register_path("handoff-drain-small", "image.png", vec![response]);
+
+    let mut cook = ThumbCook::<MockStream>::new(&url, runtime(CacheStore::none()));
+    pipeline::connect(&mut cook).await;
+
+    let (_payload, drain) = cook.take_handoff().await;
+    let buffer = drain.expect("small body should be queued for draining");
+    assert_eq!(buffer.drain().await, 1200);
+}
+
+#[tokio::test]
+async fn handoff_closes_large_or_unknown_bodies_without_draining() {
+    let over_limit = (HANDOFF_DRAIN_MAX_BYTES + 1).to_string();
+    for (name, headers) in [
+        (
+            "handoff-drain-large",
+            vec![
+                ("content-length", over_limit.as_str()),
+                ("content-type", "image/png"),
+            ],
+        ),
+        ("handoff-drain-unknown", vec![("content-type", "image/png")]),
+    ] {
+        let mut response = reply(200, &headers);
+        response.body = vec![1u8; 4096];
+        let url = register_path(name, "image.png", vec![response]);
+
+        let mut cook = ThumbCook::<MockStream>::new(&url, runtime(CacheStore::none()));
+        pipeline::connect(&mut cook).await;
+
+        let (_payload, drain) = cook.take_handoff().await;
+        assert!(drain.is_none(), "{name} should not be drained");
+    }
+}
+
+#[tokio::test]
+async fn handoff_payload_carries_an_empty_prefix() {
+    // The sender reads a page during inspect, but the payload must not carry it.
+    let mut response = reply(
+        200,
+        &[("content-length", "6000"), ("content-type", "image/png")],
+    );
+    response.body = vec![3u8; 6000];
+    let url = register_path("handoff-empty-prefix", "image.png", vec![response]);
+
+    let mut cook = ThumbCook::<MockStream>::new(&url, runtime(CacheStore::none()));
+    pipeline::connect(&mut cook).await;
+    let mut head = [0u8; 4096];
+    let _ = cook.http_read(&mut head).await.unwrap();
+
+    let (payload, _drain) = cook.take_handoff().await;
+    assert_eq!(payload.first_page.as_deref(), Some(&[][..]));
+    let wire = serde_json::to_value(&payload).unwrap();
+    assert_eq!(wire["first_page"], serde_json::json!([]));
 }
 
 #[tokio::test]

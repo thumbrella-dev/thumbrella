@@ -64,6 +64,7 @@ pub async fn connect<S: HttpStream>(cook: &mut ThumbCook<S>) {
         return;
     }
 
+    let t_open = web_time::Instant::now();
     let buf = match HttpBuffer::<S>::open(cook.input.url.clone(), options).await {
         Ok(buf) => buf,
         Err(e) => {
@@ -71,6 +72,7 @@ pub async fn connect<S: HttpStream>(cook: &mut ThumbCook<S>) {
             return;
         }
     };
+    tracing::debug!(ms = t_open.elapsed().as_secs_f64() * 1000.0, "origin open");
 
     cook.http_status = Some(buf.status);
     cook.http_headers = buf.headers.clone();

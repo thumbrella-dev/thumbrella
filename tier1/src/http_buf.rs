@@ -307,6 +307,32 @@ impl<S: HttpStream> HttpBuffer<S> {
         self.pages.remove(&0)
     }
 
+    /// Consume the remainder of the response body and discard it.
+    ///
+    /// Dropping a response mid-stream forces the HTTP client to discard the
+    /// connection, so the next request to the same origin pays a fresh
+    /// TCP/TLS handshake.  Reading to EOF instead returns the connection to
+    /// the client's keep-alive pool.  This is run from a deferred
+    /// post-response task (see `AfterResponse`) so it never delays the client
+    /// response.
+    ///
+    /// Returns the number of bytes discarded.
+    pub async fn drain(mut self) -> u64 {
+        let mut drained = 0u64;
+        loop {
+            match self.stream.next_chunk().await {
+                Ok(Some(chunk)) if !chunk.is_empty() => {
+                    let len = chunk.len() as u64;
+                    drained = drained.saturating_add(len);
+                    self.bytes_fetched_count = self.bytes_fetched_count.saturating_add(len);
+                }
+                // Empty chunk or error/EOF: stop instead of spinning.
+                Ok(Some(_)) | Ok(None) | Err(_) => break,
+            }
+        }
+        drained
+    }
+
     /// Return a clone of the first cached page (bytes 0..PAGE_SIZE) without
     /// removing it.  Returns `None` if the page was never populated.
     pub fn peek_page0(&self) -> Option<Vec<u8>> {
