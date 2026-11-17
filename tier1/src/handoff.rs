@@ -34,8 +34,11 @@
 //!
 //! A handoff target that answers `503 Service Unavailable` is retried with
 //! exponential backoff plus equal jitter until [`HANDOFF_BUDGET_SECS`] elapses.
-//! The budget covers the whole handoff - request time and every retry delay.
-//! When it expires, [`post_handoff`] returns an error for which
+//! The healthy path pays nothing for this: the first attempt runs with no timer
+//! and no deadline bookkeeping, and the budget clock starts only when a 503
+//! actually arrives - a rare case.  From then on the budget covers every retry
+//! delay plus each retried request.
+//! When the budget expires, [`post_handoff`] returns an error for which
 //! [`is_timeout_error`] is `true`; the cook pipeline turns that into a
 //! placeholder result with message [`TIMEOUT_MESSAGE`].  Custom transports
 //! signal a retryable 503 by returning [`unavailable_error`].
@@ -56,11 +59,17 @@ use serde::{Deserialize, Serialize};
 /// Shared secret header name for server-to-server requests.
 pub const HANDSHAKE_HEADER: &str = "x-tbr-handshake";
 
-/// Total wall-clock budget for one handoff, in seconds.
+/// Retry budget for an overloaded handoff target, in seconds.
 ///
-/// Covers the initial request, every 503 retry, and all backoff delays.
-/// When it elapses the handoff resolves to a placeholder result.
-pub const HANDOFF_BUDGET_SECS: u64 = 20;
+/// Measured from the moment the first `503 Service Unavailable` arrives.
+/// Healthy handoffs build no timer at all, so this cost only applies while a
+/// target is actually overloaded.  When the budget elapses the handoff
+/// resolves to a placeholder result.
+///
+/// Kept at 15s because thumbnail responses have a hard 30s platform cap and
+/// the measured worst-case tier-2 cold start (Modal) is ~8s: 8s to reach the
+/// first 503 plus the full retry budget still lands under the cap with margin.
+pub const HANDOFF_BUDGET_SECS: u64 = 15;
 
 /// Message attached to the placeholder result produced when the budget elapses.
 pub const TIMEOUT_MESSAGE: &str = "handoff timeout";
@@ -165,9 +174,11 @@ pub fn register_handoff_fn(f: Box<HandoffFn>) {
 /// 2. `native_post_handoff` - reqwest implementation for `feature = "native"`.
 /// 3. Error - non-native build with no registered implementation.
 ///
-/// The call is bounded by [`HANDOFF_BUDGET_SECS`].  A `503 Service Unavailable`
-/// from the target is retried with jittered exponential backoff inside that
-/// budget; when it expires the returned error satisfies [`is_timeout_error`].
+/// The first attempt is untimed: a target that answers normally never touches
+/// the retry machinery.  A `503 Service Unavailable` switches on a jittered
+/// exponential scaleback bounded by [`HANDOFF_BUDGET_SECS`] (started at the
+/// first 503); when it expires the returned error satisfies
+/// [`is_timeout_error`].
 pub async fn post_handoff(
     base_url: &str,
     headers: &HashMap<String, String>,
@@ -205,16 +216,39 @@ fn dispatch_handoff(
 }
 
 /// Run handoff attempts until one succeeds, a non-retryable error occurs, or
-/// the budget elapses.  A 503 (see [`unavailable_error`]) is retried after a
-/// jittered exponential delay.
+/// the retry budget elapses.
+///
+/// The healthy path is a single untimed `send().await` - no timer is created
+/// and no clock is read.  Only a 503 (see [`unavailable_error`]) switches on
+/// the scaleback: the budget clock starts at that first 503, retries sleep for
+/// a jittered exponential delay, and each retried request is raced against the
+/// remaining budget so a hung target cannot outlive it.
 async fn retry_handoff<F>(budget: Duration, mut send: F) -> Result<HandoffResponse, String>
 where
     F: FnMut() -> HandoffFut,
 {
+    match send().await {
+        Ok(response) => return Ok(response),
+        Err(error) if !is_unavailable_error(&error) => return Err(error),
+        // 503: fall through to the scaleback path below.
+        Err(_) => {}
+    }
+
     let deadline = web_time::Instant::now() + budget;
     let mut attempt: u32 = 0;
 
     loop {
+        attempt = attempt.saturating_add(1);
+        let delay = Duration::from_millis(retry_delay_ms(attempt));
+        let left = deadline.saturating_duration_since(web_time::Instant::now());
+        if delay >= left {
+            // The next delay would exhaust the budget: wait out the remainder
+            // so the caller still sees a full budget's worth of trying.
+            sleep_for(left).await;
+            return Err(timeout_error(budget));
+        }
+        sleep_for(delay).await;
+
         let remaining = deadline.saturating_duration_since(web_time::Instant::now());
         if remaining.is_zero() {
             return Err(timeout_error(budget));
@@ -225,24 +259,16 @@ where
             Err(error) if is_timeout_error(&error) || !is_unavailable_error(&error) => {
                 return Err(error);
             }
-            Err(_) => {
-                // 503: scale back before the next attempt.  When the next
-                // delay would exhaust the budget, wait out the remainder so
-                // the caller still sees a full budget's worth of trying.
-                attempt = attempt.saturating_add(1);
-                let delay = Duration::from_millis(retry_delay_ms(attempt));
-                let left = deadline.saturating_duration_since(web_time::Instant::now());
-                if delay >= left {
-                    sleep_for(left).await;
-                    return Err(timeout_error(budget));
-                }
-                sleep_for(delay).await;
-            }
+            // Still overloaded: scale back again.
+            Err(_) => {}
         }
     }
 }
 
-/// Race `request` against a timer, returning [`timeout_error`] if it wins.
+/// Race a retried `request` against the remaining budget.
+///
+/// Only used after a 503 - the healthy first attempt is never wrapped, so no
+/// timer is constructed on the common path.
 async fn with_budget(request: HandoffFut, budget: Duration) -> Result<HandoffResponse, String> {
     use std::task::Poll;
 
@@ -541,16 +567,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hung_transport_times_out_at_the_budget() {
-        let budget = Duration::from_millis(150);
+    async fn first_attempt_is_not_bounded_by_the_budget() {
+        // The healthy path runs before any timer exists, so even a zero budget
+        // must not cut off (or fail) the initial request.
+        let outcome = retry_handoff(Duration::ZERO, || {
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                Ok(ok_response())
+            })
+        })
+        .await;
+
+        assert!(outcome.is_ok());
+    }
+
+    #[tokio::test]
+    async fn hung_retry_times_out_at_the_budget() {
+        // First attempt answers 503 immediately; every retry then hangs.  The
+        // first jittered delay is at most 500ms, so an 800ms budget guarantees
+        // the hung retry is reached before the deadline.
+        let budget = Duration::from_millis(800);
         let started = web_time::Instant::now();
-        let error = retry_handoff(budget, || {
-            Box::pin(std::future::pending::<Result<HandoffResponse, String>>())
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&attempts);
+        let error = retry_handoff(budget, move || {
+            if counter.fetch_add(1, Ordering::Relaxed) == 0 {
+                retryable("handoff target returned HTTP 503")
+            } else {
+                Box::pin(std::future::pending::<Result<HandoffResponse, String>>())
+            }
         })
         .await
         .unwrap_err();
 
         assert!(is_timeout_error(&error), "expected timeout, got: {error}");
+        assert!(attempts.load(Ordering::Relaxed) >= 2);
         assert!(started.elapsed() >= budget);
         assert!(started.elapsed() < budget + Duration::from_secs(1));
     }

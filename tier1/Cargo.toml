@@ -81,8 +81,11 @@ parking_lot = "0.12"
 sha2 = "0.11"
 httpdate = "1"
 # Runtime-agnostic timer for the handoff 503 scaleback on non-tokio builds
-# (wasm32).  Native builds use tokio::time instead.
-futures-timer = "3"
+# (wasm32).  Native builds use tokio::time instead.  The `wasm-bindgen` feature
+# is mandatory on wasm32: without it futures-timer compiles its native
+# std::time-based implementation, which panics with "time not implemented on
+# this platform" inside a Worker.
+futures-timer = { version = "3", features = ["wasm-bindgen"] }
 
 #  Native-only
 rusqlite        = { version = "0.40", features = ["bundled"],                optional = true }
