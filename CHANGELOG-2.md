@@ -2,6 +2,11 @@
 
 ## Development
 
+
+## 2.4.5 - 2026/11/18
+
+Tier2 gets more image formats
+
 - Proper avif, av1, and jpeg2000 support in tier2
 
 ## 2.4.4 - 2026/11/17
