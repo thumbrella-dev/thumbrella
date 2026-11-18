@@ -35,8 +35,12 @@
 //!
 //! # 503 scaleback
 //!
-//! A handoff target that answers `503 Service Unavailable` is retried with
-//! exponential backoff plus equal jitter until [`HANDOFF_BUDGET_SECS`] elapses.
+//! A handoff target that answers `503 Service Unavailable` is retried on a
+//! jittered Fibonacci ladder ([`RETRY_STEPS_MS`]) until
+//! [`HANDOFF_BUDGET_SECS`] elapses.  The ladder grows linearly rather than
+//! doubling, so an overloaded target is probed often enough early on to catch
+//! it the moment it comes back, and the long 4s+ tail of an exponential ramp
+//! never delays that detection.
 //! The healthy path pays nothing for this: the first attempt runs with no timer
 //! and no deadline bookkeeping, and the budget clock starts only when a 503
 //! actually arrives - a rare case.  From then on the budget covers every retry
@@ -83,11 +87,24 @@ const UNAVAILABLE_MARKER: &str = "handoff unavailable: ";
 /// Prefix marking an elapsed handoff budget.
 const TIMEOUT_MARKER: &str = "handoff timeout: ";
 
-/// First retry delay in milliseconds.  Doubles per attempt up to [`RETRY_CAP_MS`].
-const RETRY_BASE_MS: u64 = 250;
-
-/// Upper bound for a single retry delay, before jitter is applied.
-const RETRY_CAP_MS: u64 = 4_000;
+/// Per-attempt retry ceilings in milliseconds, applied before jitter.
+///
+/// A single 503 usually means one instance is shedding load while another is
+/// ready (or the container is seconds away from being ready), so the first
+/// probe is a fast one - 250ms - and retries a transient rejection instead of
+/// sitting on it.
+///
+/// After that the ladder is Fibonacci rather than exponential: 1s, 1s, 2s, 3s,
+/// 5s, 8s.  A doubling ramp spends most of the budget in 2-4s sleeps, so a
+/// target that recovers during one of those sleeps waits up to 4s longer than
+/// necessary.  This ladder keeps the early probes close together and caps the
+/// longest single sleep at 5s.
+///
+/// The trailing 8s step is deliberately unreachable in practice: the first six
+/// sleeps (0.25+1+1+2+3+5 = 12.25s) plus the retried requests leave too little
+/// of the 15s budget for it, so [`retry_handoff`] waits out the remainder and
+/// gives up at the budget instead of sleeping through it.
+const RETRY_STEPS_MS: [u64; 7] = [250, 1_000, 1_000, 2_000, 3_000, 5_000, 8_000];
 
 /// Build the canonical retryable-503 error string.
 ///
@@ -227,8 +244,8 @@ fn dispatch_handoff(
 /// The healthy path is a single untimed `send().await` - no timer is created
 /// and no clock is read.  Only a 503 (see [`unavailable_error`]) switches on
 /// the scaleback: the budget clock starts at that first 503, retries sleep for
-/// a jittered exponential delay, and each retried request is raced against the
-/// remaining budget so a hung target cannot outlive it.
+/// the next jittered Fibonacci delay, and each retried request is raced against
+/// the remaining budget so a hung target cannot outlive it.
 async fn retry_handoff<F>(budget: Duration, mut send: F) -> Result<HandoffResponse, String>
 where
     F: FnMut() -> HandoffFut,
@@ -250,9 +267,22 @@ where
         if delay >= left {
             // The next delay would exhaust the budget: wait out the remainder
             // so the caller still sees a full budget's worth of trying.
+            tracing::debug!(
+                target: "tier1::handoff",
+                attempt,
+                delay_ms = delay.as_millis() as u64,
+                left_ms = left.as_millis() as u64,
+                "503 scaleback: next delay exceeds the budget, giving up"
+            );
             sleep_for(left).await;
             return Err(timeout_error(budget));
         }
+        tracing::debug!(
+            target: "tier1::handoff",
+            attempt,
+            delay_ms = delay.as_millis() as u64,
+            "503 scaleback: sleeping before the next handoff attempt"
+        );
         sleep_for(delay).await;
 
         let remaining = deadline.saturating_duration_since(web_time::Instant::now());
@@ -260,13 +290,36 @@ where
             return Err(timeout_error(budget));
         }
 
+        let started = web_time::Instant::now();
         match with_budget(send(), remaining).await {
-            Ok(response) => return Ok(response),
+            Ok(response) => {
+                tracing::debug!(
+                    target: "tier1::handoff",
+                    attempt,
+                    request_ms = started.elapsed().as_millis() as u64,
+                    "503 scaleback: retry succeeded"
+                );
+                return Ok(response);
+            }
             Err(error) if is_timeout_error(&error) || !is_unavailable_error(&error) => {
+                tracing::debug!(
+                    target: "tier1::handoff",
+                    attempt,
+                    request_ms = started.elapsed().as_millis() as u64,
+                    %error,
+                    "503 scaleback: retry failed"
+                );
                 return Err(error);
             }
             // Still overloaded: scale back again.
-            Err(_) => {}
+            Err(_) => {
+                tracing::debug!(
+                    target: "tier1::handoff",
+                    attempt,
+                    request_ms = started.elapsed().as_millis() as u64,
+                    "503 scaleback: still unavailable"
+                );
+            }
         }
     }
 }
@@ -292,15 +345,16 @@ async fn with_budget(request: HandoffFut, budget: Duration) -> Result<HandoffRes
     .await
 }
 
-/// Jittered exponential backoff for attempt `attempt` (1-based).
+/// Jittered Fibonacci backoff for attempt `attempt` (1-based).
 ///
 /// Equal jitter: half the ceiling is fixed, the other half is uniform in
-/// `0..=half`, so the result lands in `ceiling/2..=ceiling`.  The ceiling
-/// doubles per attempt from [`RETRY_BASE_MS`] up to [`RETRY_CAP_MS`].  The
-/// floor keeps a flapping target from being hammered with near-zero delays.
+/// `0..=half`, so the result lands in `ceiling/2..=ceiling`.  The ceiling walks
+/// [`RETRY_STEPS_MS`] and then stays on the last entry.  The floor keeps a
+/// flapping target from being hammered with near-zero delays, and the jitter
+/// stops concurrent cooks from retrying in lockstep.
 fn retry_delay_ms(attempt: u32) -> u64 {
-    let exponent = attempt.min(6);
-    let ceiling = RETRY_BASE_MS.saturating_mul(1u64 << exponent).min(RETRY_CAP_MS);
+    let index = (attempt.max(1) as usize - 1).min(RETRY_STEPS_MS.len() - 1);
+    let ceiling = RETRY_STEPS_MS[index];
     let half = ceiling / 2;
     let spread = ceiling - half;
     half + jitter(spread + 1)
@@ -492,10 +546,9 @@ mod tests {
 
     #[test]
     fn retry_delays_stay_within_the_jittered_ceiling() {
-        for attempt in 1..=20 {
-            let ceiling = RETRY_BASE_MS
-                .saturating_mul(1u64 << attempt.min(6))
-                .min(RETRY_CAP_MS);
+        for attempt in 1..=20u32 {
+            let index = (attempt as usize - 1).min(RETRY_STEPS_MS.len() - 1);
+            let ceiling = RETRY_STEPS_MS[index];
             for _ in 0..50 {
                 let delay = retry_delay_ms(attempt);
                 assert!(delay >= ceiling / 2, "delay {delay} below floor {ceiling}");
@@ -503,6 +556,21 @@ mod tests {
             }
         }
         assert_eq!(jitter(0), 0);
+    }
+
+    #[test]
+    fn retry_ladder_grows_like_fibonacci() {
+        // Fast probe first, then 1s, 1s, 2s, 3s, 5s, 8s - linear growth, no doubling.
+        assert_eq!(RETRY_STEPS_MS, [250, 1_000, 1_000, 2_000, 3_000, 5_000, 8_000]);
+        for pair in RETRY_STEPS_MS[1..].windows(3) {
+            assert_eq!(pair[2], pair[0] + pair[1], "not a Fibonacci step: {pair:?}");
+        }
+
+        // Only the first six steps can fit the budget (12.25s of 15s), so the
+        // run gives up at the deadline rather than sleeping the 8s step.
+        let waits: u64 = RETRY_STEPS_MS.iter().take(6).sum();
+        assert!(waits <= HANDOFF_BUDGET_SECS * 1_000);
+        assert!(waits + RETRY_STEPS_MS[6] > HANDOFF_BUDGET_SECS * 1_000);
     }
 
     #[tokio::test]
@@ -553,9 +621,9 @@ mod tests {
 
     #[tokio::test]
     async fn persistent_503_times_out_at_the_budget() {
-        // The first backoff ceiling is 500ms, so an 800ms budget guarantees
+        // The first jittered delay is at most 1s, so a 2.5s budget guarantees
         // at least one retry before the scaleback exhausts the deadline.
-        let budget = Duration::from_millis(800);
+        let budget = Duration::from_millis(2_500);
         let started = web_time::Instant::now();
         let attempts = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&attempts);
@@ -590,9 +658,9 @@ mod tests {
     #[tokio::test]
     async fn hung_retry_times_out_at_the_budget() {
         // First attempt answers 503 immediately; every retry then hangs.  The
-        // first jittered delay is at most 500ms, so an 800ms budget guarantees
-        // the hung retry is reached before the deadline.
-        let budget = Duration::from_millis(800);
+        // first jittered delay is at most 1s, so a 2.5s budget guarantees the
+        // hung retry is reached before the deadline.
+        let budget = Duration::from_millis(2_500);
         let started = web_time::Instant::now();
         let attempts = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&attempts);
