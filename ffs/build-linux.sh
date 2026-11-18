@@ -7,9 +7,8 @@
 #  - No network protocols (we handle HTTP via reqwest)
 #  - No encoders, muxers, filters, or device APIs
 #  - libdav1d (BSD-2-Clause) is built statically for software AV1/AVIF decode.
-#    FFmpeg detects it via pkg-config, then the dav1d objects are folded into
-#    libavcodec.a; tier2 links only against libav and has no dav1d code or FFI
-#    of its own.
+#    FFmpeg detects it via pkg-config and links it as a separate archive;
+#    the extra link args go into the generated .cargo/ffs.toml.
 #
 # Usage:
 #   ./ffs/build-linux.sh                       # -> ffs/build
@@ -67,9 +66,9 @@ tar -xf "${FFMPEG_BUILD_DIR}/${FFMPEG_TARBALL}" -C "${FFMPEG_BUILD_DIR}" --strip
 #  dav1d download/build
 #
 # Built and installed into the same prefix as FFmpeg so configure's pkg-config
-# probe finds it.  The merge step after `make install` then folds the objects
-# into libavcodec.a.  dav1d is a decoder only; tools, tests, examples and docs
-# are disabled.
+# probe finds it, and so libdav1d.a sits next to the libav archives for the
+# link step.  dav1d is a decoder only; tools, tests, examples and docs are
+# disabled.
 if [[ ! -f "${DAV1D_BUILD_DIR}/build/src/libdav1d.a" || ! -f "${PREFIX}/lib/libdav1d.a" ]]; then
     echo "[ffmpeg-static] Downloading dav1d ${DAV1D_VERSION}..."
     rm -rf "${DAV1D_BUILD_DIR}"
@@ -169,37 +168,20 @@ make -j"${JOBS}" 2>&1
 echo "[ffmpeg-static] Installing to ${PREFIX}..."
 make install 2>&1
 
-#  Encapsulate dav1d
-#
-# ffmpeg-sys-next links against FFMPEG_DIR directly (not pkg-config) and
-# emits only the seven libav archives, so fold the dav1d objects into
-# libavcodec.a.  tier2 then links libav exactly as before and has no dav1d
-# link flag, header, or FFI reference.
-echo "[ffmpeg-static] Merging libdav1d into libavcodec..."
-MERGE_DIR="$(mktemp -d)"
-(
-    cd "${MERGE_DIR}"
-    ar -M <<EOF
-create libavcodec.a
-addlib ${PREFIX}/lib/libavcodec.a
-addlib ${PREFIX}/lib/libdav1d.a
-save
-end
-EOF
-)
-ranlib "${MERGE_DIR}/libavcodec.a"
-mv "${MERGE_DIR}/libavcodec.a" "${PREFIX}/lib/libavcodec.a"
-rm -rf "${MERGE_DIR}"
-
-# The decoder now lives inside libavcodec; drop the redundant link flag
-# from the generated pkg-config metadata.
-sed -i 's/ -ldav1d//g' "${PREFIX}/lib/pkgconfig/libavcodec.pc"
-
 #  Verify 
 echo "[ffmpeg-static] Installed files:"
 ls -lh "${PREFIX}/lib/"*.a
 
-# Write .cargo/ffs.toml with absolute paths so cargo finds this install.
+#  Write .cargo/ffs.toml
+#
+# Absolute paths so cargo finds this install, plus the extra link args the
+# configure options require.  ffmpeg-sys-next links the seven libav archives
+# by name when FFMPEG_DIR is set and never reads the pkg-config files, so
+# nothing else pulls in libdav1d.a even though libavcodec.a references
+# dav1d_* symbols.  .cargo/config.toml includes this file and cargo merges
+# rustflags from an included config file, so these are added to the existing
+# target rustflags rather than replacing them.
+HOST_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
 CARGO_DIR="${PROJECT_ROOT}/.cargo"
 mkdir -p "${CARGO_DIR}"
 cat > "${CARGO_DIR}/ffs.toml" << FFSTOML
@@ -207,6 +189,12 @@ cat > "${CARGO_DIR}/ffs.toml" << FFSTOML
 [env]
 PKG_CONFIG_PATH = { value = "${PREFIX}/lib/pkgconfig", force = true }
 FFMPEG_DIR = { value = "${PREFIX}", force = true }
+
+[target.${HOST_TRIPLE}]
+rustflags = [
+    "-C", "link-arg=-L${PREFIX}/lib",
+    "-C", "link-arg=-ldav1d",
+]
 FFSTOML
-echo "[ffmpeg-static] Wrote .cargo/ffs.toml"
+echo "[ffmpeg-static] Wrote .cargo/ffs.toml (link args: -L${PREFIX}/lib -ldav1d)"
 echo "[ffmpeg-static] Done.  Run: cargo build -p tier2"
