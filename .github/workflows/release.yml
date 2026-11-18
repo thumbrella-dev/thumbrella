@@ -85,9 +85,10 @@ jobs:
 
       - name: Build thumbrella (release)
         id: build
-        env:
-          RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=lld -C link-arg=-Wl,-u,ff_image_psd_pipe_demuxer"
         run: |
+          # Link flags come from .cargo/config.toml and the generated
+          # .cargo/ffs.toml. Do not set RUSTFLAGS here: it overrides target
+          # rustflags and drops the -ldav1d flag from ffs.toml.
           cargo build --release -p tier3
           BINARY="target/release/thumbrella"
           echo "binary-path=${BINARY}" >> "$GITHUB_OUTPUT"
@@ -100,9 +101,8 @@ jobs:
       # download it (thumbrella-tier2-linux-x86_64).  Uses a subset of the
       # tier3 deps already built above, so this adds little build time.
       - name: Build tier2 (specialized, not shipped)
-        env:
-          RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=lld -C link-arg=-Wl,-u,ff_image_psd_pipe_demuxer"
         run: |
+          # The link flags are in .cargo/config.toml + .cargo/ffs.toml.
           cargo build --release -p tier2
           mkdir -p tier2-assets
           cp target/release/tier2 tier2-assets/thumbrella-tier2

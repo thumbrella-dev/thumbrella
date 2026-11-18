@@ -23,10 +23,6 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 # only available libraries are registered in the dispatch table.
 libloading = "0.9"
 
-# which: locate external command-line tools on $PATH (e.g. ffmpeg, inkscape,
-# blender).  Used for subprocess-based renderers.
-which = "8"
-
 # tempfile: scratch arena for subprocess renderers.  Creates temporary
 # directories that are cleaned up on drop.
 tempfile = "3"

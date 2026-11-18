@@ -8,14 +8,14 @@ include = [
 rustflags = ["-C", "target-feature=+crt-static"]
 
 [target.x86_64-unknown-linux-gnu]
-linker = "gcc"
-# Use LLD (via the Rust toolchain's gcc-ld wrapper) instead of GNU ld.
-# GNU ld's single-pass archive scanning fails to pull in img2dec.o from
-# libavformat.a (which registers the webp_pipe demuxer) because allformats.o
-# is included first and then references ff_image_webp_pipe_demuxer, GNU ld
-# won't re-scan the same archive. LLD handles circular archive deps correctly.
+linker = "clang"
+# Use LLD instead of GNU ld. GNU ld's single-pass archive scanning fails to
+# pull in img2dec.o from libavformat.a (which registers the webp_pipe demuxer)
+# because allformats.o is included first and then references
+# ff_image_webp_pipe_demuxer; GNU ld won't re-scan the same archive. LLD
+# handles circular archive deps correctly. Both clang and lld are installed in
+# the dev container and the Rocky 8 CI image.
 rustflags = [
-    "-C", "link-arg=-B/usr/local/rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/bin/gcc-ld",
     "-C", "link-arg=-fuse-ld=lld",
     "-C", "link-arg=-Wl,-u,ff_image_psd_pipe_demuxer",
     "-C", "link-arg=-Wl,--gc-sections",
