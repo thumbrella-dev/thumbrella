@@ -6,7 +6,10 @@
 #  - Static archives (.a) installed to ffs/build (or --prefix DIR)
 #  - No network protocols (we handle HTTP via reqwest)
 #  - No encoders, muxers, filters, or device APIs
-#  - No external library dependencies (LGPL clean, no dav1d)
+#  - libdav1d (BSD-2-Clause) is built statically for software AV1/AVIF decode.
+#    FFmpeg detects it via pkg-config, then the dav1d objects are folded into
+#    libavcodec.a; tier2 links only against libav and has no dav1d code or FFI
+#    of its own.
 #
 # Usage:
 #   ./ffs/build-linux.sh                       # -> ffs/build
@@ -24,11 +27,32 @@ if [[ "${1:-}" == "--prefix" ]]; then
     PREFIX="${2:?missing --prefix argument}"
 fi
 
+#  Required tools
+#
+# meson/ninja build dav1d; nasm assembles its SIMD paths (mandatory for
+# usable AV1 decode speed).
+for tool in meson ninja nasm; do
+    if ! command -v "${tool}" >/dev/null 2>&1; then
+        echo "[ffmpeg-static] missing required tool: ${tool}" >&2
+        exit 1
+    fi
+done
+
 #  FFmpeg 
 FFMPEG_VERSION=9.0.2
 FFMPEG_TARBALL=ffmpeg-${FFMPEG_VERSION}.tar.gz
 FFMPEG_SRC_URL="https://ffmpeg.org/releases/${FFMPEG_TARBALL}"
 FFMPEG_BUILD_DIR="${PROJECT_ROOT}/target/ffmpeg-build/${FFMPEG_VERSION}"
+
+#  dav1d 
+#
+# Software AV1 decoder used by FFmpeg for AVIF and AV1 video.  FFmpeg's own
+# "av1" decoder is a hardware-acceleration front-end only, so the software
+# path must come from libdav1d.
+DAV1D_VERSION=1.5.5
+DAV1D_TARBALL=dav1d-${DAV1D_VERSION}.tar.gz
+DAV1D_SRC_URL="https://code.videolan.org/videolan/dav1d/-/archive/${DAV1D_VERSION}/${DAV1D_TARBALL}"
+DAV1D_BUILD_DIR="${PROJECT_ROOT}/target/dav1d-build/${DAV1D_VERSION}"
 
 #  Download 
 echo "[ffmpeg-static] Downloading FFmpeg ${FFMPEG_VERSION}..."
@@ -40,9 +64,50 @@ fi
 echo "[ffmpeg-static] Extracting..."
 tar -xf "${FFMPEG_BUILD_DIR}/${FFMPEG_TARBALL}" -C "${FFMPEG_BUILD_DIR}" --strip-components=1 --overwrite
 
+#  dav1d download/build
+#
+# Built and installed into the same prefix as FFmpeg so configure's pkg-config
+# probe finds it.  The merge step after `make install` then folds the objects
+# into libavcodec.a.  dav1d is a decoder only; tools, tests, examples and docs
+# are disabled.
+if [[ ! -f "${DAV1D_BUILD_DIR}/build/src/libdav1d.a" || ! -f "${PREFIX}/lib/libdav1d.a" ]]; then
+    echo "[ffmpeg-static] Downloading dav1d ${DAV1D_VERSION}..."
+    rm -rf "${DAV1D_BUILD_DIR}"
+    mkdir -p "${DAV1D_BUILD_DIR}"
+    curl --fail -L --retry 3 -o "${DAV1D_BUILD_DIR}/${DAV1D_TARBALL}" "${DAV1D_SRC_URL}"
+
+    echo "[ffmpeg-static] Extracting dav1d..."
+    tar -xzf "${DAV1D_BUILD_DIR}/${DAV1D_TARBALL}" -C "${DAV1D_BUILD_DIR}" --strip-components=1
+
+    echo "[ffmpeg-static] Building dav1d (static, decoder only)..."
+    (
+        cd "${DAV1D_BUILD_DIR}"
+        meson setup build \
+            --prefix="${PREFIX}" \
+            --libdir=lib \
+            --default-library=static \
+            --buildtype=release \
+            -Denable_tools=false \
+            -Denable_tests=false \
+            -Denable_examples=false \
+            2>&1
+        ninja -C build 2>&1
+        ninja -C build install 2>&1
+    )
+else
+    echo "[ffmpeg-static] dav1d already built - reinstalling."
+    ninja -C "${DAV1D_BUILD_DIR}/build" install 2>&1
+fi
+
 cd "${FFMPEG_BUILD_DIR}"
 
 #  Configure
+#
+# dav1d lives in the same prefix as FFmpeg, so point pkg-config there for
+# --enable-libdav1d.  The native "av1" decoder is deliberately not enabled:
+# it only drives hardware acceleration and cannot decode in software.
+export PKG_CONFIG_PATH="${PREFIX}/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+
 echo "[ffmpeg-static] Configuring..."
 ./configure \
     --prefix="${PREFIX}" \
@@ -62,7 +127,8 @@ echo "[ffmpeg-static] Configuring..."
     --disable-autodetect \
     \
     --enable-zlib \
-    --enable-decoder=h264,hevc,vp8,vp9,av1,mpeg1video,mpeg2video,mpeg4,\
+    --enable-libdav1d \
+    --enable-decoder=h264,hevc,vp8,vp9,libdav1d,mpeg1video,mpeg2video,mpeg4,\
 msmpeg4v1,msmpeg4v2,msmpeg4v3,h263,h263p,flv1,wmv1,wmv2,wmv3,vc1,\
 mjpeg,jpeg2000,png,gif,bmp,tiff,webp,theora,dirac,dnxhd,dnxhr,prores,\
 hap,svq1,svq3,rv10,rv20,rv30,rv40,indeo2,indeo3,indeo4,indeo5,\
@@ -71,6 +137,8 @@ dds,psd,\
 rawvideo,pam,pbm,pgm,pgmyuv,ppm,sunrast,targa,xbm,\
 aac,ac3,eac3,mp2,mp3,opus,vorbis,flac,pcm_s16le,pcm_s16be,pcm_s24le,\
 pcm_s32le,pcm_u8,pcm_alaw,pcm_mulaw,pcm_f32le \
+    \
+    --disable-decoder=av1 \
     \
     --enable-demuxer=mov,mp4,m4v,matroska,webm,avi,mpegts,mpegps,mpegvideo,\
 flv,asf,rm,rmvb,ogg,mxf,gxf,lxf,yuv4mpegpipe,rawvideo,\
@@ -100,6 +168,32 @@ make -j"${JOBS}" 2>&1
 
 echo "[ffmpeg-static] Installing to ${PREFIX}..."
 make install 2>&1
+
+#  Encapsulate dav1d
+#
+# ffmpeg-sys-next links against FFMPEG_DIR directly (not pkg-config) and
+# emits only the seven libav archives, so fold the dav1d objects into
+# libavcodec.a.  tier2 then links libav exactly as before and has no dav1d
+# link flag, header, or FFI reference.
+echo "[ffmpeg-static] Merging libdav1d into libavcodec..."
+MERGE_DIR="$(mktemp -d)"
+(
+    cd "${MERGE_DIR}"
+    ar -M <<EOF
+create libavcodec.a
+addlib ${PREFIX}/lib/libavcodec.a
+addlib ${PREFIX}/lib/libdav1d.a
+save
+end
+EOF
+)
+ranlib "${MERGE_DIR}/libavcodec.a"
+mv "${MERGE_DIR}/libavcodec.a" "${PREFIX}/lib/libavcodec.a"
+rm -rf "${MERGE_DIR}"
+
+# The decoder now lives inside libavcodec; drop the redundant link flag
+# from the generated pkg-config metadata.
+sed -i 's/ -ldav1d//g' "${PREFIX}/lib/pkgconfig/libavcodec.pc"
 
 #  Verify 
 echo "[ffmpeg-static] Installed files:"

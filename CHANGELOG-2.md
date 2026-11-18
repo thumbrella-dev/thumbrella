@@ -2,6 +2,7 @@
 
 ## Development
 
+- Proper avif, av1, and jpeg2000 support in tier2
 
 ## 2.4.4 - 2026/11/17
 

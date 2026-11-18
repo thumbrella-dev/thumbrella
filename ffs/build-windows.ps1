@@ -3,6 +3,7 @@
 #
 # This clones vcpkg into ffs/vcpkg/, bootstraps it, and installs a minimal
 # static FFmpeg with only the decoders/demuxers/parsers thumbrella needs.
+# Software AV1/AVIF decode comes from the dav1d vcpkg port.
 # On success, writes VCPKG_ROOT to .cargo/ffs.toml so cargo picks it up.
 
 $ErrorActionPreference = "Stop"
@@ -66,7 +67,7 @@ try {
 # ---- Install ffmpeg (static, overlay port: selective build, no hw accel) ----
 Write-Host "==> Installing ffmpeg via vcpkg (~10-15 min, builds from source) ..."
 $vcpkgExe = Join-Path $vcpkgDir "vcpkg.exe"
-& $vcpkgExe install ffmpeg[avcodec,avdevice,avfilter,avformat,swresample,swscale,zlib,bzip2,lzma] `
+& $vcpkgExe install ffmpeg[avcodec,avdevice,avfilter,avformat,swresample,swscale,zlib,bzip2,lzma,dav1d] `
     --overlay-triplets="$ScriptDir/triplets" `
     --triplet=x64-windows-static
 if ($LASTEXITCODE -ne 0) { throw "vcpkg FFmpeg install failed" }

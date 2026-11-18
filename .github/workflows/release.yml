@@ -63,7 +63,9 @@ jobs:
           dnf install -y epel-release
           dnf config-manager --set-enabled powertools
           dnf groupinstall -y 'Development Tools'
-          dnf install -y nasm pkgconfig clang lld zlib-devel zlib-static
+          dnf install -y nasm pkgconfig clang lld zlib-devel zlib-static python3-pip
+          # Rocky 8 has no meson package; install meson and a recent ninja via pip.
+          python3 -m pip install --upgrade "meson<1.0" ninja
           # Install Rust via rustup (no pre-installed toolchain in Rocky 8)
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"

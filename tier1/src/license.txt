@@ -169,3 +169,13 @@ Parts of Thumbrella statically link to various ffmpeg libraries. These
 dependencies use LGPL-2.1-or-later. LGPL requires that those portions of
 the executable must be replacable with alternative implementations. This 
 is achieved by setting the `FFMPEG_LIB_DIR` at build time.
+
+
+dav1d Notice
+============
+Thumbrella statically links dav1d through FFmpeg's libdav1d decoder for
+AV1 image and video decoding. dav1d is copyright (c) 2018-2025, VideoLAN
+and dav1d authors, and is distributed under the BSD-2-Clause license
+(reproduced above). Portions of dav1d are also made available under the
+ISC license (reproduced above).
+

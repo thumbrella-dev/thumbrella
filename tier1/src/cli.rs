@@ -608,6 +608,22 @@ fn normalize_cli_key(key: Option<String>) -> Option<String> {
     key.map(|k| k.trim().to_owned()).filter(|k| !k.is_empty())
 }
 
+/// Log the cook's per-phase timing breakdown under `TBR_LOG=full`.
+fn log_cook_timing(result: &crate::ThumbResult, trace: &crate::ThumbTrace) {
+    if !crate::ux::show_raw_logs() {
+        return;
+    }
+    eprintln!(
+        "[cook] total={:.1}ms io={:.1}ms inspect={:.1}ms render={:.1}ms deliver={:.1}ms download={}B",
+        result.duration * 1000.0,
+        trace.io_secs * 1000.0,
+        trace.inspect_secs * 1000.0,
+        trace.render_secs * 1000.0,
+        trace.deliver_secs * 1000.0,
+        trace.download_bytes
+    );
+}
+
 async fn run_result(
     urls: Vec<String>,
     cache_str: Option<String>,
@@ -636,8 +652,9 @@ async fn run_result(
     }
 
     let mut results: Vec<crate::ThumbResult> = Vec::with_capacity(pool.len());
-    while let Some((result, _trace, mut after)) = pool.next().await {
+    while let Some((result, trace, mut after)) = pool.next().await {
         after.drain_spawn();
+        log_cook_timing(&result, &trace);
         results.push(result);
     }
 
@@ -690,8 +707,9 @@ async fn run_thumb(
     };
 
     let cook = ThumbCook::from_input(input_spec, Arc::clone(&runtime));
-    let (result, _trace, mut after) = cook.run().await;
+    let (result, trace, mut after) = cook.run().await;
     after.drain_spawn();
+    log_cook_timing(&result, &trace);
 
     let ux = crate::ux::get();
 

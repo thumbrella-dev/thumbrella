@@ -17,7 +17,7 @@
 +string(APPEND OPTIONS " --disable-everything --disable-network")
 +
 +# Decoders
-+string(APPEND OPTIONS " --enable-decoder=h264,hevc,vp8,vp9,av1,mpeg1video,mpeg2video,mpeg4")
++string(APPEND OPTIONS " --disable-decoder=av1 --enable-decoder=h264,hevc,vp8,vp9,libdav1d,mpeg1video,mpeg2video,mpeg4")
 +string(APPEND OPTIONS " --enable-decoder=msmpeg4v1,msmpeg4v2,msmpeg4v3,h263,h263p,flv1,wmv1,wmv2,wmv3,vc1")
 +string(APPEND OPTIONS " --enable-decoder=mjpeg,jpeg2000,png,gif,bmp,tiff,webp,theora,dirac,dnxhd,dnxhr,prores")
 +string(APPEND OPTIONS " --enable-decoder=hap,svq1,svq3,rv10,rv20,rv30,rv40,indeo2,indeo3,indeo4,indeo5")

@@ -224,6 +224,8 @@ fn tier2_handles_image(ext: &str) -> bool {
             | "gif"
             | "ico"
             | "jxl"
+            | "jp2"
+            | "j2k"
             | "tga"
             | "psd"
             | "avif"
@@ -365,19 +367,27 @@ fn detect_arithmetic_jpeg(reader: &mut dyn ReadSeek) -> bool {
 
 /// Decode a JPEG XL image via the `jxl-oxide` crate.
 ///
-/// Expects `reader` to have all bytes available (reads via `read_to_end`).
+/// Streams the source directly into `jxl-oxide`: it parses and decodes frames
+/// as bytes arrive, overlapping network reads with decode work.
 /// Returns `Some(RenderOutput)` on success, `None` on decode error.
 fn decode_jxl(reader: &mut dyn ReadSeek) -> Option<RenderOutput> {
     use jxl_oxide::JxlImage;
 
-    let mut bytes = Vec::new();
-    reader.read_to_end(&mut bytes).ok()?;
-    let image = JxlImage::builder().read(std::io::Cursor::new(&bytes)).ok()?;
+    let t_total = std::time::Instant::now();
+    let t_read = std::time::Instant::now();
+    let image = JxlImage::builder().read(reader).ok()?;
     let (width, height) = (image.width(), image.height());
+    tbr_debug!("[jxl] read+parse {width}x{height} in {:?}", t_read.elapsed());
 
+    let t_render = std::time::Instant::now();
     let render = image.render_frame(0).ok()?;
+    tbr_debug!("[jxl] render_frame in {:?}", t_render.elapsed());
 
+    let t_convert = std::time::Instant::now();
+    let t_fb = std::time::Instant::now();
     let fb = render.image_all_channels();
+    tbr_debug!("[jxl] framebuffer in {:?}", t_fb.elapsed());
+    let t_u8 = std::time::Instant::now();
     let channels = fb.channels();
     let buf = fb.buf();
 
@@ -401,8 +411,13 @@ fn decode_jxl(reader: &mut dyn ReadSeek) -> Option<RenderOutput> {
     };
 
     let depth = channels as u32 * 8;
+    tbr_debug!("[jxl] f32->u8 in {:?}", t_u8.elapsed());
     let cfg = ThumbnailConfig::CANONICAL;
+    let t_pre = std::time::Instant::now();
     let img = pre_scale(img, cfg.exact_width, cfg.exact_height);
+    tbr_debug!("[jxl] pre_scale in {:?}", t_pre.elapsed());
+    tbr_debug!("[jxl] convert+prescale in {:?}", t_convert.elapsed());
+    tbr_debug!("[jxl] total in {:?}", t_total.elapsed());
 
     Some(RenderOutput {
         image: img,

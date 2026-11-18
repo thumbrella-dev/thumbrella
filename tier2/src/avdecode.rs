@@ -262,6 +262,7 @@ fn ext_to_libav_format(ext: &str) -> Option<&'static str> {
         "tiff" | "tif" => Some("tiff_pipe"),
         "ico" => Some("ico"),
         "webp" => Some("webp_pipe"),
+        "jp2" | "j2k" => Some("j2k_pipe"),
         _ => None,
     }
 }
@@ -376,8 +377,18 @@ pub fn decode_with_libav(
 
     let result = unsafe {
         decode_inner(
-            opaque, fmt_hint_ptr, rotation_hint, seek_secs, probe_limit, &mut avio_ctx, &mut fmt_ctx,
-            &mut codec_ctx, &mut packet, &mut frame, &mut sws_ctx,
+            opaque,
+            fmt_hint_ptr,
+            rotation_hint,
+            seek_secs,
+            probe_limit,
+            ext_hint.as_deref(),
+            &mut avio_ctx,
+            &mut fmt_ctx,
+            &mut codec_ctx,
+            &mut packet,
+            &mut frame,
+            &mut sws_ctx,
         )
     };
 
@@ -436,6 +447,7 @@ unsafe fn decode_inner(
     // store all codec parameters in the meta box at the file start (<5 KB),
     // so a 128 KB ceiling avoids streaming the full multi-MB mdat block.
     probe_limit: Option<i64>,
+    ext_hint: Option<&str>,
     avio_ctx: &mut *mut AVIOContext,
     fmt_ctx: &mut *mut AVFormatContext,
     codec_ctx: &mut *mut AVCodecContext,
@@ -619,6 +631,25 @@ unsafe fn decode_inner(
     if avcodec_parameters_to_context(*codec_ctx, codecpar) < 0 {
         tbr_debug!("[avdecode] FAIL: avcodec_parameters_to_context failed");
         return None;
+    }
+
+    // JPEG 2000: decode at a reduced wavelet level when the source is much
+    // larger than the thumbnail.  This mirrors tier3's `ffmpeg -lowres` path
+    // and avoids decoding the full raster just to downscale it.
+    if matches!(ext_hint, Some("jp2" | "j2k")) {
+        // Choose the reduction from the short side: a panorama reduced by its
+        // long side would end up only a few pixels tall.
+        let min_dim = (*codecpar).width.min((*codecpar).height);
+        const MIN_DECODED_SIDE: i32 = 256;
+        const MAX_LOWRES: i32 = 5;
+        let mut lowres = 0;
+        while lowres < MAX_LOWRES && (min_dim >> (lowres + 1)) >= MIN_DECODED_SIDE {
+            lowres += 1;
+        }
+        if lowres > 0 {
+            (*(*codec_ctx)).lowres = lowres;
+            tbr_debug!("[avdecode] jp2 lowres={lowres} (short side {min_dim}px)");
+        }
     }
     // Auto-detect thread count (libdav1d etc. respect this).
     // 0 = auto; decoder chooses based on available cores.
