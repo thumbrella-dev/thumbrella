@@ -3,6 +3,11 @@
 ## Development
 
 
+
+## 2.4.6 - 2026/11/18
+
+[summary: describe the key changes in this release]
+
 ## 2.4.5 - 2026/11/18
 
 Tier2 gets more image formats
