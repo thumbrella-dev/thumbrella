@@ -52,6 +52,12 @@ futures = "0.3"
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
 
+[dev-dependencies]
+# which: PATH lookup for tools the end-to-end tests need.  Only tests/office.rs
+# uses it (to skip when soffice is not installed), so it belongs here and not in
+# [dependencies] - the library and binary never reference it.
+which = "8"
+
 # winres embeds the icon, VERSIONINFO resource, and application manifest (see build.rs)
 # into thumbrella.exe on Windows. Not compiled for other targets.
 [target.'cfg(windows)'.build-dependencies]
