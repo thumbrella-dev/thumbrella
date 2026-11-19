@@ -2,6 +2,11 @@
 
 ## Development
 
+
+## 2.4.7 - 2026/11/19
+
+Ongoing performance tuning
+
 - Handoff servers get optimistic warmup call
 - Fix local MHTML thumbnails stalling until the browser deadline
 
