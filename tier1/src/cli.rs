@@ -294,6 +294,11 @@ async fn run_server(runtime: Arc<Runtime>) {
         .merge(
             Router::new()
                 .route("/health", get(routes::health))
+                // Aliases for the speculative handoff wakeup ping.  Same
+                // handler and middleware as /health; a separate path keeps the
+                // purpose visible in logs.  See tier1::prewarm.
+                .route("/wake", get(routes::health))
+                .route("/check", get(routes::health))
                 .route("/thumb.jpeg", get(routes::thumb))
                 .route("/thumb", get(routes::thumb))
                 .route("/handoff", post(routes::handoff))

@@ -34,6 +34,7 @@ pub mod http_cache;
 pub mod local_path;
 pub mod media;
 pub mod pipeline;
+pub mod prewarm;
 pub mod request;
 pub mod result;
 pub mod source;

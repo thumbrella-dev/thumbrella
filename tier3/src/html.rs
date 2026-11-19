@@ -181,7 +181,8 @@ pub async fn render(cook: &mut dyn RenderCook, ext: &str) -> bool {
 ///
 /// A unique browser session is created per call and closed on the way out,
 /// including on the error paths. Download bytes include response bodies for
-/// browser requests completed by the accounting read after the screenshot.
+/// browser requests completed by the accounting read after the screenshot;
+/// local pages report zero (see the accounting comment in the body).
 fn snapshot(url: &str) -> Result<(DynamicImage, Result<u64, String>), String> {
     let arena = ScratchArena::new(MAX_SNAPSHOT_BYTES).map_err(|e| format!("scratch arena: {e}"))?;
     let work_dir = arena.root();
@@ -224,19 +225,28 @@ fn snapshot(url: &str) -> Result<(DynamicImage, Result<u64, String>), String> {
 
     let args = open_args("about:blank", &idle, Some(config));
     run_cli(work_dir, &session, "open", &args)?;
-    let accounting_started = run_cli(work_dir, &session, "run-code", &[START_NETWORK_ACCOUNTING]);
+
+    // Network accounting starts before the navigation so every request is
+    // observed.  It is skipped for local URLs: Chromium's MHTML loader never
+    // answers `page.evaluate` for an archive opened from `file:`, so a read
+    // afterwards blocks until the session deadline expires and a five second
+    // render turns into a thirty-five second one.  A local page is also served
+    // from a file whose bytes tier 1 measures directly, so the browser rarely
+    // has network bytes worth reporting - skipping the read there trades that
+    // number for a predictable render time.
+    let accounting_started = if local {
+        None
+    } else {
+        Some(run_cli(work_dir, &session, "run-code", &[START_NETWORK_ACCOUNTING]))
+    };
+
     run_cli(work_dir, &session, "goto", &[url])?;
     run_cli(work_dir, &session, "screenshot", &["--filename", out_str, "--type", "png"])?;
-    let browser_bytes = accounting_started.and_then(|_| {
-        run_cli(work_dir, &session, "run-code", &[READ_NETWORK_ACCOUNTING]).and_then(|accounting| {
-            accounting
-                .get("result")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "browser download size missing from Playwright response".to_string())?
-                .parse::<u64>()
-                .map_err(|e| format!("invalid browser download size: {e}"))
-        })
-    });
+    let browser_bytes = match accounting_started {
+        None => Ok(0),
+        Some(Err(error)) => Err(error),
+        Some(Ok(_)) => read_network_accounting(work_dir, &session),
+    };
 
     let bytes = arena.read_output(&out_path).map_err(|e| format!("read screenshot: {e}"))?;
     let image = image::load_from_memory(&bytes).map_err(|e| format!("decode screenshot: {e}"))?;
@@ -270,6 +280,20 @@ fn run_cli(
     command: &str,
     args: &[&str],
 ) -> Result<serde_json::Value, String> {
+    run_cli_with_deadline(dir, session, command, args, &crate::sandbox::browser())
+}
+
+/// [`run_cli`] with an explicit subprocess deadline.
+///
+/// Only the accounting read passes its own config; every command that is part
+/// of producing the screenshot uses the full browser deadline.
+fn run_cli_with_deadline(
+    dir: &Path,
+    session: &str,
+    command: &str,
+    args: &[&str],
+    sandbox: &crate::sandbox::SandboxConfig,
+) -> Result<serde_json::Value, String> {
     let mut cmd = cli_command();
     cmd.arg(format!("-s={session}"))
         .arg("--json")
@@ -280,7 +304,7 @@ fn run_cli(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let output = crate::sandbox::output(&mut cmd, &crate::sandbox::browser())
+    let output = crate::sandbox::output(&mut cmd, sandbox)
         .map_err(|e| format!("{command}: {e}"))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -297,6 +321,26 @@ fn run_cli(
         return Err(format!("{command}: {message}"));
     }
     Err(format!("{command}: {}", describe_failure(&output.stderr, output.status.code())))
+}
+
+/// Read and total the sizes recorded by [`START_NETWORK_ACCOUNTING`].
+///
+/// Bounded by [`crate::sandbox::browser_accounting`]: the screenshot is already
+/// in hand, so this step is reporting only and gets a short deadline.
+fn read_network_accounting(dir: &Path, session: &str) -> Result<u64, String> {
+    let accounting = run_cli_with_deadline(
+        dir,
+        session,
+        "run-code",
+        &[READ_NETWORK_ACCOUNTING],
+        &crate::sandbox::browser_accounting(),
+    )?;
+    accounting
+        .get("result")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "browser download size missing from Playwright response".to_string())?
+        .parse::<u64>()
+        .map_err(|e| format!("invalid browser download size: {e}"))
 }
 
 fn describe_failure(stderr: &[u8], code: Option<i32>) -> String {

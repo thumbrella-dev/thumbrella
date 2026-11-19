@@ -186,6 +186,12 @@ pub struct Runtime {
     pub pin_ttl_secs: u64,
     /// Single-flight deduplication for concurrent handoffs to the same cache key.
     pub handoff_inflight: HandoffInflight,
+    /// Process-local record of when each handoff server was last contacted.
+    ///
+    /// Consulted and updated by [`crate::prewarm`]: a server that answered
+    /// anything within [`crate::prewarm::WAKE_MIN_INTERVAL_SECS`] is warm and
+    /// is not woken speculatively.
+    pub handoff_wake: crate::prewarm::HandoffWake,
 }
 
 impl Runtime {
@@ -230,6 +236,7 @@ impl Runtime {
             cache_default_ttl_secs,
             pin_ttl_secs: 0,
             handoff_inflight: HandoffInflight::new(),
+            handoff_wake: crate::prewarm::HandoffWake::new(),
         })
     }
 }
@@ -939,6 +946,34 @@ impl<S: HttpStream> ThumbCook<S> {
         (payload, drain)
     }
 
+    //  Speculative handoff wakeup
+
+    /// Plan the fire-and-forget `/health` wakeups this cook wants sent.
+    ///
+    /// Safe to call once the cache phase has resolved to a miss and before
+    /// `connect`/`inspect`: by then a fresh cache or debounce hit has already
+    /// returned, so nothing is woken for a request that needs no work, and a
+    /// blocked cook (`render_disabled`) can never hand off.
+    ///
+    /// The extension-only preview may over-predict - the file may turn out to
+    /// be a different format, may 404, or may be finished by the shortcut.
+    /// That is fine: the wakeup is cheap, ignored, and rate limited.
+    ///
+    /// Each call claims the tier's slot in [`Runtime::handoff_wake`], so only
+    /// the first cook in a window gets a plan.  Native callers should hand each
+    /// plan to [`crate::prewarm::spawn`]; wasm embedders should schedule their
+    /// own transport and keep a durable contact record (the Cloudflare worker
+    /// uses the Workers cache API).
+    pub fn plan_handoff_wakes(&self) -> Vec<crate::prewarm::WakePlan> {
+        if self.ctx_handoff || self.render_disabled {
+            return Vec::new();
+        }
+        crate::prewarm::plans_for(&self.input.url, &self.runtime)
+            .into_iter()
+            .filter(|plan| self.runtime.handoff_wake.claim(plan.tier))
+            .collect()
+    }
+
     //  Handoff application
 
     /// Apply the result of a tier handoff to this cook.
@@ -1094,6 +1129,18 @@ impl<S: HttpStream> ThumbCook<S> {
                     validates_stored = true;
                 }
             }
+        }
+
+        //  Speculative handoff wakeup
+        //
+        // The cache did not resolve and the cook is not blocked, so a handoff
+        // may still be coming.  Ping the relevant handoff server(s) now: the
+        // connect + inspect + shortcut work below is the head start that lets a
+        // cold container boot before the real `/handoff` arrives.  Nothing
+        // waits on these and the responses are discarded.
+        #[cfg(feature = "native")]
+        for wake in self.plan_handoff_wakes() {
+            crate::prewarm::spawn(wake);
         }
 
         let t_step = web_time::Instant::now();
@@ -1372,6 +1419,11 @@ impl<S: HttpStream> ThumbCook<S> {
                     continue;
                 };
                 tried_any = true;
+
+                // A real handoff keeps the target warm for the speculative
+                // wakeup window: no `/health` ping is needed for a server that
+                // is answering handoffs right now.
+                self.runtime.handoff_wake.record_contact(attempt_tier);
 
                 // Emit intermediate progress before the async handoff gap.
                 if !self.ctx_handoff

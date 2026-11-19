@@ -3,6 +3,7 @@
 //! Routes:
 //! - `GET  /favicon.ico`                  - public browser icon (PNG)
 //! - `GET  /health`                       - liveness probe
+//! - `GET  /wake`, `GET /check`           - aliases for `/health` (handoff warmup pings)
 //! - `GET  /placeholder/:kind.jpeg`       - static placeholder thumbnail for a file kind
 //! - `GET  /thumb.jpeg?url=<url>`         - single thumbnail; returns raw JPEG bytes (canonical)
 //! - `GET  /thumb?url=<url>`              - same handler; alias without extension
@@ -22,7 +23,7 @@ use axum::{
     Json,
     body::Body,
     extract::{ConnectInfo, Query, Request, State},
-    http::{HeaderMap, Method, StatusCode, header},
+    http::{HeaderMap, Method, StatusCode, Uri, header},
     middleware::Next,
     response::{IntoResponse, Redirect, Response},
 };
@@ -131,6 +132,17 @@ fn log_result(result: &crate::ThumbResult, duration_ms: u64) {
 
 //  GET /health
 
+/// Paths served by [`health`].  They share one log-silence counter.
+const HEALTH_PATHS: [&str; 3] = ["/health", "/wake", "/check"];
+
+/// Health-style requests reported before logging goes quiet.
+const HEALTH_LOG_LIMIT: u32 = 20;
+
+/// Index of `path` in [`HEALTH_PATHS`]; unknown paths share `/health`'s slot.
+fn health_slot(path: &str) -> usize {
+    HEALTH_PATHS.iter().position(|candidate| *candidate == path).unwrap_or(0)
+}
+
 /// Liveness probe.  Returns server metadata:
 ///
 /// ```json
@@ -140,21 +152,38 @@ fn log_result(result: &crate::ThumbResult, duration_ms: u64) {
 /// The `thumbrella` field is the major version only - no minor or patch,
 /// for safety against version-based targeting.
 ///
-/// Logging is rate-limited: after 20 health checks, further requests are
-/// suppressed and a one-time hint is printed.
-pub async fn health(headers: HeaderMap, connect_info: ConnectInfo<SocketAddr>) -> Json<Value> {
+/// The same handler answers `GET /wake` and `GET /check`.  A tier that is about
+/// to hand work off pings one of those paths as a speculative wakeup
+/// (see [`crate::prewarm`]); keeping them separate from the liveness
+/// `/health` makes the purpose obvious in server and platform logs.  Older
+/// servers answer 404 there, which the sender does not care about.
+///
+/// Logging is rate-limited: after [`HEALTH_LOG_LIMIT`] health-style requests -
+/// counted across all three paths, because they are the same request shape and
+/// the noise is about volume - further requests are suppressed and each path
+/// prints one hint the first time it is suppressed.
+pub async fn health(
+    uri: Uri,
+    headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
+) -> Json<Value> {
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     static HEALTH_COUNT: AtomicU32 = AtomicU32::new(0);
-    static HINT_SHOWN: AtomicBool = AtomicBool::new(false);
+    static HINT_SHOWN: [AtomicBool; HEALTH_PATHS.len()] =
+        [const { AtomicBool::new(false) }; HEALTH_PATHS.len()];
 
+    let path = uri.path();
+    let slot = health_slot(path);
     let full_log = matches!(std::env::var("TBR_LOG").as_deref(), Ok("full"));
     let n = HEALTH_COUNT.fetch_add(1, Ordering::Relaxed);
     let ip = client_ip(&headers, Some(&connect_info.0)).unwrap_or_else(|| "?".to_string());
 
-    if full_log || n < 20 {
-        ux::get().log_request("GET", "/health", 200, Some(&ip), None);
-    } else if !HINT_SHOWN.swap(true, Ordering::Relaxed) {
-        let line = "  # hint: no longer showing /health requests, use TBR_LOG=full to see them\n";
+    if full_log || n < HEALTH_LOG_LIMIT {
+        ux::get().log_request("GET", path, 200, Some(&ip), None);
+    } else if !HINT_SHOWN[slot].swap(true, Ordering::Relaxed) {
+        let line = format!(
+            "  # hint: no longer showing {path} requests, use TBR_LOG=full to see them\n"
+        );
         let _ = std::io::Write::write_all(&mut std::io::stdout(), line.as_bytes());
     }
 

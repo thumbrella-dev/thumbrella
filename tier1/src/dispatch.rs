@@ -155,6 +155,33 @@ pub fn route(kind: FileKind, extension: Option<&str>) -> ThumbRoute {
 
 //  Format manifest
 
+/// Extension-only routing preview, before the file is sniffed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreviewRoute {
+    /// Lowest tier the extension is registered for.
+    pub tier: u8,
+    /// Kind recorded for that manifest entry.
+    pub kind: FileKind,
+}
+
+/// Preview the tier a URL extension is routed to, before the file is sniffed.
+///
+/// This is the preview used to decide whether a speculative handoff wakeup is
+/// worth sending (see [`crate::prewarm`]).  It reads only [`format_manifest`] -
+/// no `infer` sniffing, no HTTP - because it runs before `connect`/`inspect`.
+///
+/// Returns `None` when the extension is not in the manifest.  An unknown
+/// extension is no evidence that any tier will be needed, so callers should not
+/// start speculative work for it; formats reachable only by magic bytes (no
+/// extension, or a generic one) simply miss out on the wakeup.
+pub fn preview_route(extension: &str) -> Option<PreviewRoute> {
+    format_manifest()
+        .iter()
+        .filter(|entry| entry.extension == extension)
+        .min_by_key(|entry| entry.tier)
+        .map(|entry| PreviewRoute { tier: entry.tier, kind: entry.kind })
+}
+
 /// A single format entry in the static dispatch manifest.
 ///
 /// This is the authoritative list of every format Thumbrella can process

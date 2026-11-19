@@ -315,6 +315,131 @@ async fn pin_and_placeholder_requests_are_logged_with_best_effort_redirect_dedup
     assert!(line("GET /placeholder/no-suffix ").contains("  404"));
 }
 
+#[tokio::test]
+async fn health_aliases_return_the_same_payload_and_share_the_handshake_gate() {
+    let directory = TestDirectory::new();
+    let listener = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let error_path = directory.0.join("server.err");
+    let mut server = TestServer(
+        directory
+            .command()
+            .env("TBR_CACHE", "none")
+            .env("TBR_PORT", port.to_string())
+            .env("TBR_HANDSHAKE", "alias-test-secret")
+            .stderr(Stdio::from(std::fs::File::create(&error_path).unwrap()))
+            .arg("serve")
+            .spawn()
+            .unwrap(),
+    );
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+    let mut health = None;
+    for _ in 0..100 {
+        if let Some(status) = server.0.try_wait().unwrap() {
+            panic!("server exited {status}: {}", std::fs::read_to_string(&error_path).unwrap());
+        }
+        if let Ok(response) = client
+            .get(format!("{base}/health"))
+            .header("x-tbr-handshake", "alias-test-secret")
+            .send()
+            .await
+        {
+            health = Some(response.text().await.unwrap());
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let health = health.expect("server did not respond");
+
+    for alias in ["/wake", "/check"] {
+        let allowed = client
+            .get(format!("{base}{alias}"))
+            .header("x-tbr-handshake", "alias-test-secret")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(allowed.status(), reqwest::StatusCode::OK, "{alias}");
+        assert_eq!(allowed.text().await.unwrap(), health, "{alias} body differs from /health");
+
+        let denied = client.get(format!("{base}{alias}")).send().await.unwrap();
+        assert_eq!(denied.status(), reqwest::StatusCode::UNAUTHORIZED, "{alias}");
+    }
+    drop(server);
+}
+
+#[tokio::test]
+async fn health_wake_and_check_share_one_log_suppression_counter() {
+    const LIMIT: usize = 20;
+
+    let directory = TestDirectory::new();
+    let listener = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let log_path = directory.0.join("server.log");
+    let error_path = directory.0.join("server.err");
+    let mut server = TestServer(
+        directory
+            .command()
+            .env("TBR_CACHE", "none")
+            .env("TBR_PORT", port.to_string())
+            .env("TBR_HANDSHAKE", "quiet-test-secret")
+            .env("TBR_LOG", "minimal")
+            .stdout(Stdio::from(std::fs::File::create(&log_path).unwrap()))
+            .stderr(Stdio::from(std::fs::File::create(&error_path).unwrap()))
+            .arg("serve")
+            .spawn()
+            .unwrap(),
+    );
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let get = |path: &'static str| {
+        let request =
+            client.get(format!("{base}{path}")).header("x-tbr-handshake", "quiet-test-secret");
+        async move { request.send().await.unwrap() }
+    };
+
+    // The successful readiness probe is the process's first logged request.
+    let mut ready = false;
+    for _ in 0..100 {
+        if let Some(status) = server.0.try_wait().unwrap() {
+            panic!("server exited {status}: {}", std::fs::read_to_string(&error_path).unwrap());
+        }
+        if let Ok(response) = client
+            .get(format!("{base}/health"))
+            .header("x-tbr-handshake", "quiet-test-secret")
+            .send()
+            .await
+        {
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(ready, "server did not respond: {}", std::fs::read_to_string(&error_path).unwrap());
+
+    // Fill the shared budget, then cross it once on every path.
+    for _ in 1..LIMIT {
+        assert_eq!(get("/health").await.status(), reqwest::StatusCode::OK);
+    }
+    for path in ["/health", "/wake", "/check"] {
+        assert_eq!(get(path).await.status(), reqwest::StatusCode::OK, "{path}");
+    }
+    drop(server);
+
+    let logs = std::fs::read_to_string(&log_path).unwrap();
+    assert_eq!(logs.matches("GET /health ").count(), LIMIT, "{logs}");
+    assert!(!logs.contains("GET /wake "), "{logs}");
+    assert!(!logs.contains("GET /check "), "{logs}");
+    for path in ["/health", "/wake", "/check"] {
+        let hint = format!("no longer showing {path} requests");
+        assert_eq!(logs.matches(&hint).count(), 1, "{path} hint in: {logs}");
+    }
+}
+
 #[test]
 fn expanded_cache_and_trace_paths_are_opened_and_reported_consistently() {
     let directory = TestDirectory::new();

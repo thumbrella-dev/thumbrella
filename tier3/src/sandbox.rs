@@ -138,6 +138,23 @@ pub fn browser_close() -> SandboxConfig {
     }
 }
 
+/// Deadline for the post-render network-accounting read.
+///
+/// The read executes page JavaScript *after* the screenshot has been captured,
+/// purely to report how many bytes the browser downloaded.  It must never hold
+/// a finished render open, so it gets a couple of seconds rather than the full
+/// browser budget: a page whose main thread is wedged (or a session that
+/// stopped answering) otherwise burns the whole deadline for a reporting
+/// number.  A healthy read settles in well under a millisecond of page time
+/// because every request has already finished.
+pub fn browser_accounting() -> SandboxConfig {
+    SandboxConfig {
+        timeout: Duration::from_secs(2),
+        max_fds: 1024,
+        ..SandboxConfig::default()
+    }
+}
+
 /// Run a configured command and enforce its wall-clock deadline.
 ///
 /// Captured stdout and stderr are drained concurrently so a noisy renderer

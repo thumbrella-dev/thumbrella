@@ -2,11 +2,12 @@
 
 ## Development
 
-
+- Handoff servers get optimistic warmup call
+- Fix local MHTML thumbnails stalling until the browser deadline
 
 ## 2.4.6 - 2026/11/18
 
-[summary: describe the key changes in this release]
+Build flags and action fixes
 
 ## 2.4.5 - 2026/11/18
 

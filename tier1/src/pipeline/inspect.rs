@@ -83,7 +83,7 @@ pub async fn inspect<S: HttpStream>(cook: &mut ThumbCook<S>) {
 /// 2. Known URL path extension - also refines generic containers.
 /// 3. HTTP `Content-Type` header - used when neither magic nor extension helped.
 fn sniff(bytes: &[u8], url: &str, content_type: Option<&str>) -> (FileKind, String, String) {
-    let url_ext = url_extension(url);
+    let url_ext = extension_from_url(url);
 
     // MHTML web archives have no binary magic: they are RFC 2557 MIME
     // containers, so the header block is the signature.
@@ -904,7 +904,7 @@ pub fn canonical_extension(raw: &str) -> String {
 
 /// Extract and normalise the file extension from a URL path.
 /// Returns `None` only when there is no dot-separated segment at all.
-fn url_extension(url: &str) -> Option<String> {
+pub fn extension_from_url(url: &str) -> Option<String> {
     let path = url.split('?').next().unwrap_or(url);
     let path = path.split('#').next().unwrap_or(path);
     let last = path.rsplit('/').next().unwrap_or("");
