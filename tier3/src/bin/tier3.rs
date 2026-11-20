@@ -31,6 +31,12 @@ async fn main() {
     //  Register subprocess handlers
     // These are probed at startup.  Only handlers whose command exists and is
     // executable are marked available in the env report.
+    //
+    // Extension lists come from tier 1's dispatch manifest, which decides a
+    // format's tier and renderer.  A list here would be a second opinion that
+    // can drift, so only the probe metadata is local.
+    use tier1::dispatch::Handler;
+    use tier1::dispatch::extensions_for;
 
     // Blender is preferred for self-contained scenes (blend, abc), USD,
     // glTF/GLB (best material fidelity), and the remaining interchange formats
@@ -41,36 +47,35 @@ async fn main() {
         name: "blender",
         category: "geometry",
         command: "blender",
-        extensions: &[
-            "abc", "blend", "dae", "glb", "gltf", "ply", "usd", "usda", "usdc", "usdz",
-        ],
+        extensions: extensions_for(Handler::Blender, 3),
         description: "Blender Workbench software renderer",
     });
 
+    // F3D readers available in this runtime (mesh/CAD/simulation formats).
+    // Also the fallback for any Blender-handled format when Blender is
+    // unavailable or cannot render it.
+    //
+    // USD is excluded: F3D has no USD reader, it renders the OBJ that the
+    // `usdz` handler extracts first, so USD availability must stay gated on
+    // usd-core rather than on F3D.
+    let mut f3d_extensions = extensions_for(Handler::F3d, 3);
+    f3d_extensions.retain(|ext| !matches!(*ext, "usd" | "usda" | "usdc" | "usdz"));
     tier3::env_check::register_handler(tier3::env_check::HandlerDecl {
         name: "f3d",
         category: "geometry",
         command: "f3d",
-        // F3D readers available in this runtime (mesh/CAD/simulation formats).
-        // Also the fallback for any Blender-handled format when Blender is
-        // unavailable or cannot render it.  USDZ is NOT in this list - it is
-        // handled separately via ZIP extraction.
-        extensions: &[
-            "3ds", "brep", "dae", "dxf", "e", "exo", "ex2", "fbx", "glb", "gltf", "gml", "iges", "igs",
-            "obj", "off", "p21", "ply", "pts", "step", "stl", "stp", "stpnc", "vtk", "vtm", "vti",
-            "vtp", "vtr", "vts", "vtu", "vrml", "wrl", "210",
-        ],
+        extensions: f3d_extensions,
         description: "3D geometry renderer (F3D)",
     });
 
+    // USDZ/USDC/USDA are extracted to OBJ via Python usd-core, then rendered
+    // through the F3D handler.  Availability depends on both python3+usd-core
+    // and f3d being present at runtime.
     tier3::env_check::register_handler(tier3::env_check::HandlerDecl {
         name: "usdz",
         category: "geometry",
         command: "(builtin)",
-        // USDZ/USDC/USDA are extracted to OBJ via Python usd-core, then
-        // rendered through the F3D handler.  Availability depends on both
-        // python3+usd-core and f3d being present at runtime.
-        extensions: &["usd", "usdz", "usdc", "usda"],
+        extensions: extensions_for(Handler::UsdCore, 3),
         description: "USDZ/USD geometry (usd-core extract → F3D render)",
     });
 
@@ -78,7 +83,7 @@ async fn main() {
         name: "pdftoppm",
         category: "document",
         command: "pdftoppm",
-        extensions: &["pdf"],
+        extensions: extensions_for(Handler::Pdftoppm, 3),
         description: "PDF renderer (poppler pdftoppm)",
     });
 
@@ -86,7 +91,7 @@ async fn main() {
         name: tier3::office::HANDLER_NAME,
         category: "document",
         command: "soffice",
-        extensions: tier3::office::OFFICE_EXTENSIONS,
+        extensions: extensions_for(Handler::Soffice, 3),
         description: "Office document renderer (LibreOffice headless)",
     });
 
@@ -98,18 +103,16 @@ async fn main() {
         name: "ffmpeg_cli",
         category: "video",
         command: "ffmpeg",
-        extensions: &["flv", "avif", "dcm", "jp2", "pam", "qoi", "xwd"],
+        extensions: extensions_for(Handler::FfmpegCli, 3),
         description: "FLV video and image-only formats (FFmpeg CLI)",
     });
 
-    // Frame/plate image formats oiiotool reads better than FFmpeg.  The
-    // extension list is shared with `renderer::is_oiio_format`, which is what
-    // actually picks the tool at render time, so the two cannot drift apart.
+    // Frame/plate image formats oiiotool reads better than FFmpeg.
     tier3::env_check::register_handler(tier3::env_check::HandlerDecl {
         name: "oiiotool",
         category: "image",
         command: "oiiotool",
-        extensions: tier3::renderer::OIIO_IMAGE_EXTENSIONS,
+        extensions: extensions_for(Handler::Oiio, 3),
         description: "Frame and plate image formats (OpenImageIO)",
     });
 
@@ -119,7 +122,7 @@ async fn main() {
         name: tier3::html::HANDLER_NAME,
         category: "document",
         command: "playwright-cli",
-        extensions: tier3::html::HTML_EXTENSIONS,
+        extensions: extensions_for(Handler::Playwright, 3),
         description: "HTML web page snapshot (playwright-cli)",
     });
 
@@ -251,7 +254,7 @@ fn register_tier3_check(env: &tier3::env_check::EnvReport) {
             .map(|f| tier1::check::CheckEntry {
                 label: format!("{:<6} {}", f.extension, f.label),
                 status: "builtin".into(),
-                detail: Some(f.renderer.into()),
+                detail: Some(f.handlers_label()),
             })
             .collect();
         tier1::check::register_section(tier1::check::CheckSection {

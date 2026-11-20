@@ -362,18 +362,12 @@ fn run_magick_image_decode(bytes: &[u8], ext: &str) -> Result<RenderOutput, Stri
     })
 }
 
-/// Image extensions that oiiotool reads better than FFmpeg.
-///
-/// Single source of truth for the FFmpeg-vs-oiiotool split.  It is also what
-/// the `oiiotool` handler declares as its extensions, so `formats` and `check`
-/// report availability from the same list the render path uses.  `hdr` and
-/// `rgbe` normally render in tier 2; oiiotool only serves them as a fallback.
-pub const OIIO_IMAGE_EXTENSIONS: &[&str] =
-    &["hdr", "rgbe", "dpx", "cin", "fits", "iff", "pic", "rla", "zfile"];
-
 /// Check if an extension is best handled by oiiotool (skip tier2).
+///
+/// The manifest owns the list, so the tool choice and the tier-3 handler
+/// registry cannot disagree about which formats oiiotool claims.
 fn is_oiio_format(ext: &str) -> bool {
-    OIIO_IMAGE_EXTENSIONS.contains(&ext)
+    tier1::dispatch::handles(ext, 3, tier1::dispatch::Handler::Oiio)
 }
 
 /// Header information parsed directly from a JPEG 2000 codestream.
@@ -658,7 +652,7 @@ fn run_ffmpeg_decode(bytes: &[u8], ext: &str, is_video: bool) -> Result<RenderOu
     // Apply a gamma-1.8 curve to approximate an sRGB display transform.
     // (1.8 is used instead of 2.2 because 8-bit truncation loses
     // highlight detail - a gentler curve compensates visually.)
-    if is_linear_format(ext) {
+    if tier1::dispatch::is_linear(ext) {
         img = linear_to_srgb_fast(img);
     }
 
@@ -848,10 +842,11 @@ async fn render_image_ffmpeg_fallback(cook: &mut dyn RenderCook, ext: &str) -> b
                 return true;
             }
         };
-        if matches!(
-            ext,
-            "dds" | "icns" | "ora" | "otb" | "pcx" | "sgi" | "wbmp" | "xbm" | "xpm"
-        ) {
+        // Formats tier 2 decodes in-process from a small byte range: the
+        // re-fetch here replaces bytes that were never accounted for.
+        if tier1::dispatch::handles(ext, 2, tier1::dispatch::Handler::ImageExtras)
+            || tier1::dispatch::handles(ext, 2, tier1::dispatch::Handler::Dds)
+        {
             cook.add_bytes_consumed(bytes.len() as u64);
         }
         let result = tokio::task::spawn_blocking(move || {
@@ -1683,10 +1678,8 @@ fn should_apply_geometry_tonemap(ext: &str) -> bool {
 
 //  Linear → sRGB helpers (shared by ffmpeg_cli and oiiotool paths)
 
-/// Returns `true` for extensions that are scene-linear (needs gamma correction).
-fn is_linear_format(ext: &str) -> bool {
-    matches!(ext, "exr" | "hdr" | "rgbe" | "sxr" | "mxr")
-}
+/// Scene-linear formats are identified by [`tier1::dispatch::is_linear`], which
+/// owns the list for every tier.
 
 /// Fast gamma-2.2 correction for scene-linear pixel data.
 ///
@@ -1806,7 +1799,7 @@ mod tests {
                 name,
                 category: "geometry",
                 command: name,
-                extensions: &["stl"],
+                extensions: vec!["stl"],
                 description: "",
             })
             .collect();

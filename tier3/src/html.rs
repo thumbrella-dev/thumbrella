@@ -44,12 +44,9 @@ use crate::scratch::ScratchArena;
 /// Name under which the handler is registered in the environment check.
 pub const HANDLER_NAME: &str = "playwright_cli";
 
-/// Canonical extensions routed to this module.
-///
 /// `mhtml` is a self-contained web archive: the browser loads it through the
 /// same `file://` or `http(s)://` URL path as a live page, so it needs no
 /// special handling beyond being recognised as a document.
-pub const HTML_EXTENSIONS: &[&str] = &["html", "xhtml", "mhtml"];
 
 /// Command invoked for a snapshot.
 const CLI_BINARY: &str = "playwright-cli";
@@ -110,7 +107,7 @@ static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// True when `ext` is rendered by this module.
 pub fn is_html_extension(ext: &str) -> bool {
-    HTML_EXTENSIONS.contains(&ext)
+    tier1::dispatch::handles(ext, 3, tier1::dispatch::Handler::Playwright)
 }
 
 /// True when the backend passed the startup probe.

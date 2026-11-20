@@ -70,14 +70,14 @@ ruzstd = { version = "0.9.1", default-features = false, features = ["std"] }
 # thumbnails and page count).  WASM-compatible; default features pull in
 # chrono/rayon/time which tier1 does not need and which do not build on wasm.
 # `wasm_js` provides getrandom's wasm32 backend (required on wasm32-unknown-unknown).
-lopdf = { version = "0.45", default-features = false, features = ["wasm_js"] }
+lopdf = { version = "0.47", default-features = false, features = ["wasm_js"] }
 
 # Bytes - zero-copy buffer primitive.  WASM-compatible; used by the native
 # streaming handler and transitively by tokio/axum/reqwest.
 bytes = "1"
 url = "2"
 web-time = "1"
-parking_lot = "0.12"
+parking_lot = "0.13"
 sha2 = "0.11"
 httpdate = "1"
 # Runtime-agnostic timer for the handoff 503 scaleback on non-tokio builds
@@ -88,7 +88,7 @@ httpdate = "1"
 futures-timer = { version = "3", features = ["wasm-bindgen"] }
 
 #  Native-only
-rusqlite        = { version = "0.40", features = ["bundled"],                optional = true }
+rusqlite        = { version = "0.43", features = ["bundled"],                optional = true }
 tokio           = { version = "1", features = ["full"],                      optional = true }
 axum            = { version = "0.8",                                         optional = true }
 tower-http      = { version = "0.7", features = ["trace", "cors"],           optional = true }

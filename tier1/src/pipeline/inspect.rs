@@ -507,7 +507,7 @@ mod tests {
             dispatch::format_manifest().iter().filter(|entry| entry.extension == "flv").collect();
         assert_eq!(entries.len(), 1);
         assert_eq!(
-            (entries[0].tier, entries[0].renderer, entries[0].shortcut),
+            (entries[0].tier, entries[0].handlers_label().as_str(), entries[0].shortcut),
             (3, "ffmpeg_cli", false)
         );
     }
@@ -526,9 +526,7 @@ mod tests {
             assert_eq!(dispatch::route(kind, Some(&extension)).tier, 2);
         }
         for extension in ["dds", "sgi"] {
-            assert!(!dispatch::format_manifest().iter().any(|entry| {
-                entry.extension == extension && entry.renderer == "oiiotool"
-            }));
+            assert!(!dispatch::handles(extension, 3, dispatch::Handler::Oiio));
         }
     }
 
@@ -863,43 +861,11 @@ fn raw_without_alpha(ext: &str) -> bool {
 /// Normalise common extension aliases to their canonical form.
 /// Unknown extensions are returned as-is.
 pub fn canonical_extension(raw: &str) -> String {
-    match raw {
-        // image formats
-        "jpg" | "jpe" => "jpeg",
-        "tif" => "tiff",
-        "j2k" => "jp2",
-        "sxr" | "mxr" => "exr",
-        "rgbe" => "hdr",
-        "rgb" | "rgba" | "int" | "inta" | "bw" | "iris" => "sgi",
-        "bm" => "xbm",
-        "pgm" | "ppm" | "pfm" => "pbm",
-        "heics" => "heic",
-        "heif" => "heic",
-        // video / audio
-        "mpg" | "mpe" => "mpeg",
-        "m4v" => "mp4",
-        "m4b" => "m4a",
-        "mid" => "midi",
-        "aifc" => "aiff",
-        // documents
-        "doc" => "docx",
-        "xls" => "xlsx",
-        "ppt" => "pptx",
-        // vector
-        "svg" | "svgz" => "svg",
-        // 3D geometry
-        "wrl" => "vrml",
-        "stp" | "stpnc" | "p21" | "210" => "step",
-        "igs" => "iges",
-        "ex2" | "e" => "exo",
-        // camera raw - uncommon aliases
-        "crw" => "cr2",
-        // web
-        "htm" => "html",
-        "mht" => "mhtml",
-        other => other,
-    }
-    .to_string()
+    crate::dispatch::EXTENSION_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == raw)
+        .map(|(_, canonical)| (*canonical).to_string())
+        .unwrap_or_else(|| raw.to_string())
 }
 
 /// Extract and normalise the file extension from a URL path.

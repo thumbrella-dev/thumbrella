@@ -2,9 +2,9 @@
 
 <img src="thumbrella.png" alt="Thumbrella Logo" width="224" height="224" align="right" />
 
-[Thumbrella](https://thumbrella.dev) brings fast, beautiful thumbnails to 
-online galleries. Supporting 100+ formats: photos, video, documents, 3D
-models, and other media.
+[Thumbrella](https://thumbrella.dev) generates fast, beautiful thumbnails for
+online galleries. Supporting 100+ formats: photos, video, documents, websites,
+3D, and other media.
 
 Run the server for yourself with one command. The open-source, zero-config 
 server comes with all the features and functionality. Then connect with 
@@ -23,10 +23,10 @@ Docker image from Docker Hub is ready to run out of the box.
 
 ```bash
 npx @thumbrella/server serve
-docker run --rm -it --name tbr --publish 3114:3114 thumbrella/server
+docker run --rm --name tbr --publish 3114:3114 thumbrella/server
 ```
 
-The server is configured through environment variables, like `TBR_PORT=3114`
+The server can be configured through environment variables, like `TBR_PORT=3114`
 and `TBR_LOG=full`. Explore the [server documentation](/docs/server/) 
 for details on all the features, configurations, and troubleshooting.
 
@@ -74,13 +74,12 @@ The server is organized into three tiers of increasing capability:
 - `tier1/` — Core data structures and basic format handling. Compiles to WASM
   for Cloudflare Workers deployment. Handles cache, routing, and light decode
   work.
-- `tier2/` — Adds formats with native dependencies: video keyframes, audio
-  waveforms, HDR images, SVG rendering, and camera raw formats. Links a minimal
+- `tier2/` — Adds formats with native dependencies: video, audio
+  HDR images, SVG rendering, and camera raw formats. Links a minimal
   static FFmpeg with no external dependencies.
 - `tier3/` — The fully functional server. Adds subprocess-based renderers for 3D
-  geometry (F3D), USDZ, advanced document formats (libreoffice, pdfium), and
-  others. Backends are discovered at startup and compiled-in Python scripts
-  handle data sanitization.
+  geometry (F3D), USDZ (Blender), office document formats (libreoffice, poppler), 
+  and others. Available processes are probed at startup and used as found.
 
 The [developer documentation](https://thumbrella.dev/docs/development/)
 has more details on the architecture, contribution guidelines, and more.

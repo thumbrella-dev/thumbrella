@@ -168,7 +168,7 @@ fn odg_preview_and_render_are_vectors_without_pages_or_page_edges() {
         let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
         for index in 0..archive.len() {
             let mut entry = archive.by_index(index).unwrap();
-            let entry_name = entry.name().to_owned();
+            let entry_name = entry.name().unwrap().into_owned();
             if !preview && entry_name == "Thumbnails/thumbnail.png" {
                 continue;
             }

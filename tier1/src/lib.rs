@@ -91,6 +91,28 @@ pub use source::{CacheHints, SourceRef, canonical_url};
 pub use spec::ShortcutLimits;
 pub use url_safety::{is_safe_url, url_host_allowed};
 
+/// Third-party crates that tier 1 also depends on, re-exported for hosts that
+/// share its dependency set.
+///
+/// Two reasons a host would otherwise declare its own copy:
+///
+/// - the crate appears in tier 1's public API (`Runtime::background_image` is
+///   an `Option<image::RgbImage>`, `resolve_cache` takes a `web_time::Instant`),
+///   so the caller cannot name the type any other way;
+/// - the caller hashes or encodes bytes that tier 1 also handles, and a
+///   version skew would be a silent behavioural difference rather than a
+///   compile error.
+///
+/// Re-exporting makes the host link exactly what tier 1 was built against.
+/// `hmac` is deliberately absent: tier 1 only uses it under the `native`
+/// feature, so a wasm host must declare it itself.
+pub mod deps {
+    pub use base64;
+    pub use image;
+    pub use sha2;
+    pub use web_time;
+}
+
 /// Concrete `ThumbCook` type for native server builds.
 #[cfg(feature = "native")]
 pub type ThumbCook = cook::ThumbCook<http_buf::PlatformStream>;

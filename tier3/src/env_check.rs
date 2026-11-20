@@ -46,8 +46,12 @@ pub struct HandlerDecl {
     pub category: &'static str,
     /// Executable name or absolute path to the command.
     pub command: &'static str,
-    /// File extensions this handler claims (e.g. `&["glb", "gltf"]`).
-    pub extensions: &'static [&'static str],
+    /// Canonical file extensions this handler claims at this tier.
+    ///
+    /// Sourced from the tier-1 dispatch manifest, never hand-written: the
+    /// manifest is where a format's tier and renderer are decided, so a list
+    /// here would be a second opinion that can drift.
+    pub extensions: Vec<&'static str>,
     /// Human-readable description.
     pub description: &'static str,
 }
@@ -477,7 +481,7 @@ mod blender_tests {
             name,
             category: "geometry",
             command: name,
-            extensions,
+            extensions: extensions.to_vec(),
             description: "",
         }
     }

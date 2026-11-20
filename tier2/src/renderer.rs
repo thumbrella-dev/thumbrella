@@ -25,6 +25,7 @@ use image::{DynamicImage, imageops};
 use tier1::InProcessRenderer;
 use tier1::ReadSeek;
 use tier1::RenderCook;
+use tier1::dispatch::Handler;
 use tier1::media::FileKind;
 use tier1::renderer::{RenderOutput, apply_render_output};
 use tier1::spec::ThumbnailConfig;
@@ -70,7 +71,9 @@ impl InProcessRenderer for Tier2Renderer {
 
             match kind {
                 Some(FileKind::Image) => {
-                    if matches!(ext.as_str(), "exr" | "dds") {
+                    if tier1::dispatch::handles(&ext, 2, Handler::Exr)
+                        || tier1::dispatch::handles(&ext, 2, Handler::Dds)
+                    {
                         return render_sparse_image(cook, &ext).await;
                     }
                     if is_extra_image(&ext) {
@@ -103,7 +106,7 @@ impl InProcessRenderer for Tier2Renderer {
 //  Image decode
 
 fn is_extra_image(ext: &str) -> bool {
-    matches!(ext, "icns" | "ora" | "otb" | "pcx" | "sgi" | "wbmp" | "xbm" | "xpm")
+    tier1::dispatch::handles(ext, 2, Handler::ImageExtras)
 }
 
 async fn render_extra_image(cook: &mut dyn RenderCook, ext: &str) -> bool {
@@ -196,83 +199,38 @@ async fn render_sparse_image(cook: &mut dyn RenderCook, ext: &str) -> bool {
 
 /// Returns `true` for formats decoded by the `image` crate rather than libav.
 ///
-/// PNG: the image crate handles interlaced PNG more efficiently than libav
-/// (otherwise their performance is within 10%).
-///
-/// TGA: libav cannot open a TGA from a pipe - the static build has the
-/// `targa` decoder but no TGA demuxer, and TGA has no magic bytes to
-/// auto-probe.  The image crate decodes it directly.
+/// This is a tier-2 *preference*, not a capability, so it stays an explicit
+/// list: PNG because the image crate handles interlacing better than libav
+/// (otherwise within 10%), TGA because libav cannot open it from a pipe -
+/// the static build has the decoder but no demuxer and TGA has no magic
+/// bytes to probe.  Other `image_crate` rows in the manifest are tier-1
+/// routes and say nothing about how tier 2 should decode.
 fn is_image_crate_format(ext: &str) -> bool {
     matches!(ext, "png" | "tga")
 }
 
 /// Returns `true` for image formats tier2 can render in-process.
 ///
-/// Covers what libav decodes plus the formats with a dedicated decoder
-/// (JPEG XL via `jxl-oxide`).  Other studio formats (HDR, DPX, …) and esoteric
-/// formats are handled by tier3's oiiotool / ffmpeg CLI.
+/// Asks the dispatch manifest: every format registered as an image at tier 1
+/// or 2 has a decoder here.  Formats handled earlier in `render` (EXR, DDS,
+/// the image-extras set) also answer `true`, which is accurate - tier 2 does
+/// handle them, just not through this path.
 fn tier2_handles_image(ext: &str) -> bool {
-    matches!(
-        ext,
-        "jpeg"
-            | "jpg"
-            | "png"
-            | "webp"
-            | "bmp"
-            | "tiff"
-            | "tif"
-            | "gif"
-            | "ico"
-            | "jxl"
-            | "jp2"
-            | "j2k"
-            | "tga"
-            | "psd"
-            | "avif"
-            | "heic"
-            | "heif"
-            | "dng"
-            | "cr2"
-            | "nef"
-            | "arw"
-            | "orf"
-            | "rw2"
-            | "pef"
-            | "srw"
-            | "raf"
-            | "3fr"
-            | "fff"
-            | "iiq"
-            | "raw"
-    )
+    tier1::dispatch::handles_image(ext, 2)
 }
 
 /// Returns `true` for TIFF-based camera raw formats.
 ///
 /// These formats embed a JPEG preview inside a SubIFD that can be extracted
 /// with a few small range requests, avoiding a full raw-sensor download.
+/// The manifest owns the list, so a raw format added there is extractable here.
 fn is_raw_format(ext: &str) -> bool {
-    matches!(
-        ext,
-        "dng"
-            | "cr2"
-            | "nef"
-            | "arw"
-            | "orf"
-            | "rw2"
-            | "pef"
-            | "srw"
-            | "raf"
-            | "3fr"
-            | "fff"
-            | "iiq"
-            | "raw"
-    )
+    tier1::dispatch::handles(ext, 2, Handler::RawPreview)
 }
 
 /// Returns `true` for JPEG XL - decoded by the pure-Rust `jxl-oxide` crate.
 fn is_jxl_format(ext: &str) -> bool {
-    ext == "jxl"
+    tier1::dispatch::handles(ext, 2, Handler::JxlOxide)
 }
 
 /// Returns `true` for JPEG - decoded by libav, with arithmetic-coding
@@ -283,7 +241,7 @@ fn is_jpeg_format(ext: &str) -> bool {
 
 /// Returns `true` for SVG - rendered by the pure-Rust `resvg` crate.
 fn is_svg_format(ext: &str) -> bool {
-    ext == "svg"
+    tier1::dispatch::handles(ext, 2, Handler::Resvg)
 }
 
 /// Peek at the already-cached first page of a JPEG to detect arithmetic
@@ -830,7 +788,7 @@ async fn render_image(cook: &mut dyn RenderCook, ext: &str, content_length: Opti
     // Scene-linear formats (EXR, HDR) need a gamma curve applied before
     // they hit the deliver step, otherwise they look dark and crushed.
     let result = result.map(|mut out| {
-        if is_linear_format(ext) {
+        if tier1::dispatch::is_linear(ext) {
             out.image = linear_to_srgb(out.image);
         }
         out
@@ -1324,11 +1282,6 @@ fn linear_to_srgb(img: image::DynamicImage) -> image::DynamicImage {
         }
         other => other,
     }
-}
-
-/// Returns `true` for extensions that are scene-linear (needs gamma correction).
-fn is_linear_format(ext: &str) -> bool {
-    matches!(ext, "exr" | "hdr" | "rgbe" | "sxr" | "mxr")
 }
 
 fn read_u32_le_be(data: &[u8], off: usize, little: bool) -> Option<u32> {

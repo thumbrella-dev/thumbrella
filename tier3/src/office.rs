@@ -27,12 +27,6 @@ use tier1::renderer::RenderOutput;
 
 use crate::scratch::ScratchArena;
 
-/// Canonical extensions routed to the soffice handler.  The pipeline aliases
-/// doc/xls/ppt to docx/xlsx/pptx before dispatch, so those are listed here.
-pub const OFFICE_EXTENSIONS: &[&str] =
-    &["odt", "ods", "odp", "odg", "docx", "xlsx", "pptx", "rtf", "pages", "numbers", "key",
-      "xlsm", "xlsb", "xltx", "xltm", "xlt", "xlm", "xlw", "emf", "wmf"];
-
 /// Name under which the handler is registered in the environment check.
 pub const HANDLER_NAME: &str = "soffice";
 
@@ -64,7 +58,7 @@ const OLE_MAGIC: &[u8] = &[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 
 /// True when `ext` is rendered by this module.
 pub fn is_office_extension(ext: &str) -> bool {
-    OFFICE_EXTENSIONS.contains(&ext)
+    tier1::dispatch::handles(ext, 3, tier1::dispatch::Handler::Soffice)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -945,7 +945,7 @@ fn run_formats(json: bool) {
                             extension: e.extension.to_string(),
                             label: e.label.to_string(),
                             tier: e.tier,
-                            renderer: e.renderer.to_string(),
+                            renderer: e.handlers_label(),
                             shortcut: e.shortcut,
                             available,
                         }

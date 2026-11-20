@@ -2,6 +2,7 @@
 
 ## Development
 
+- Cleanup and simplify internal format and extension definitions
 
 ## 2.4.7 - 2026/11/19
 

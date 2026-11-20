@@ -17,15 +17,15 @@ serde_json   = "1"
 # tga: libav's static build enables the `targa` decoder but no TGA demuxer,
 # and TGA has no magic bytes to auto-probe, so the image crate decodes it.
 image        = { version = "0.25", default-features = false, features = ["webp", "tga"] }
-exr          = { version = "1.74.2", default-features = false }
-dds          = { version = "0.2.0", default-features = false }
-image-extras = { version = "0.1.1", default-features = false, features = ["icns", "ora", "otb", "pcx", "sgi", "wbmp", "xbm", "xpm"] }
+exr          = { version = "1.74", default-features = false }
+dds          = { version = "0.2", default-features = false }
+image-extras = { version = "0.1", default-features = false, features = ["icns", "ora", "otb", "pcx", "sgi", "wbmp", "xbm", "xpm"] }
 jxl-oxide    = "0.12"
-resvg        = "0.48"
+resvg        = "0.50"
 # jpeg-decoder: has specialized dct power-of-2 scaler
 jpeg-decoder = { version = "0.3", default-features = false }
 tokio   = { version = "1", features = ["full"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
 
 [dev-dependencies]
-zip = { version = "5.1.1", default-features = false }
+zip = { version = "9", default-features = false, features = ["deflate"] }
