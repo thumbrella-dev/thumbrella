@@ -3,6 +3,7 @@
 ## Development
 
 - Cleanup and simplify internal format and extension definitions
+- Increase 3d render resolution
 
 ## 2.4.7 - 2026/11/19
 

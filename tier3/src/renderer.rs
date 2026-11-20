@@ -1465,7 +1465,7 @@ fn run_f3d_geometry_handler(
     const AZIMUTH: &str = "+20";
     const ELEVATION: &str = "20";
     const VIEW_ANGLE: &str = "45";
-    const RESOLUTION: &str = "512,512";
+    const RESOLUTION: &str = "768,768";
     const BASE_COLOR: &str = "1,.9,.5";
 
     let arena = ScratchArena::new(100 * 1024 * 1024).map_err(|e| format!("scratch arena: {e}"))?;
@@ -1523,8 +1523,8 @@ fn run_f3d_geometry_handler(
         #[allow(clippy::suspicious_command_arg_space)]
         c.arg("-a")
             .arg("-s")
-            // 512x512 render; keep the shadow framebuffer small.
-            .arg("-screen 0 800x600x24")
+            // 768x768 renders; the shadow framebuffer must be at least that big.
+            .arg("-screen 0 1024x1024x24")
             .arg("f3d")
             .arg(&input_path)
             .arg(format!("--output={}", output_path.display()))

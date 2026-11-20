@@ -51,9 +51,9 @@ const COMMON_ARGS: &[&str] = &[
 
 /// Xvfb screen geometry used when no external display is present.
 ///
-/// Blender renders at 384x384, so 800x600 leaves enough slack for driver and
-/// window overhead while keeping the Xvfb shadow framebuffer small.
-const XVFB_SCREEN: &str = "-screen 0 800x600x24";
+/// Blender renders at 768x768, so the screen must be at least that big;
+/// 1024x1024 adds slack for driver and window overhead.
+const XVFB_SCREEN: &str = "-screen 0 1024x1024x24";
 
 /// Build a Blender command that runs `script` inside `arena`.
 ///

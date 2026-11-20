@@ -96,10 +96,15 @@ def render(source, output, extension):
         raise RuntimeError(f"Import failed: {result}")
     scene = bpy.context.scene
     # Set the output size before framing: the camera frustum aspect depends on
-    # it.  Thumbnails deliver on a 250x200 canvas, so 384 still supersamples
-    # ~1.9x after the deliver downscale.
-    scene.render.resolution_x = 384
-    scene.render.resolution_y = 384
+    # it.  The conservative bounding-sphere fit below leaves the model filling
+    # only ~40% of the frame, so a 384px render delivered a ~150px silhouette
+    # that the 250x200 deliver canvas had to upscale - which magnifies the
+    # stair-stepping from `render_aa = OFF` instead of averaging it away.  768
+    # puts the silhouette at or above the canvas size, so deliver downscales.
+    # Raster cost is irrelevant here: Blender startup and the import dominate
+    # (measured 384 -> 768 at ~0.08s on a ~3.4s render).
+    scene.render.resolution_x = 768
+    scene.render.resolution_y = 768
     scene.render.resolution_percentage = 100
     if extension == "abc":
         prepare_alembic_scene(scene)
