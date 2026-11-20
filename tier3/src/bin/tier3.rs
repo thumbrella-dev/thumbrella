@@ -95,8 +95,8 @@ async fn main() {
         description: "Office document renderer (LibreOffice headless)",
     });
 
-    // FFmpeg CLI handles FLV video plus every image format that tiers 1/2
-    // cannot decode at all.  Image decodes go through
+    // Last-resort renderer: the external FFmpeg reads a source the builtin
+    // libav (and the image crate) could not decode.  Image decodes go through
     // `renderer::render_image_ffmpeg_fallback`, which needs both `ffmpeg` and
     // `ffprobe`, so one declaration covers both roles.
     tier3::env_check::register_handler(tier3::env_check::HandlerDecl {
@@ -104,7 +104,7 @@ async fn main() {
         category: "video",
         command: "ffmpeg",
         extensions: extensions_for(Handler::FfmpegCli, 3),
-        description: "FLV video and image-only formats (FFmpeg CLI)",
+        description: "Fallback decode for formats the builtin libav lacks (FFmpeg CLI)",
     });
 
     // Frame/plate image formats oiiotool reads better than FFmpeg.

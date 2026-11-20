@@ -9,7 +9,7 @@
  elseif(VCPKG_TARGET_IS_OSX)
      string(APPEND OPTIONS " --target-os=darwin --enable-appkit --enable-avfoundation --enable-coreimage --enable-audiotoolbox --enable-videotoolbox")
  elseif(VCPKG_TARGET_IS_IOS)
-@@ -638,6 +638,37 @@ else()
+@@ -638,6 +638,39 @@ else()
      set(WITH_RUBBERBAND OFF)
  endif()
  
@@ -18,20 +18,22 @@
 +
 +# Decoders
 +string(APPEND OPTIONS " --disable-decoder=av1 --enable-decoder=h264,hevc,vp8,vp9,libdav1d,mpeg1video,mpeg2video,mpeg4")
-+string(APPEND OPTIONS " --enable-decoder=msmpeg4v1,msmpeg4v2,msmpeg4v3,h263,h263p,flv1,wmv1,wmv2,wmv3,vc1")
-+string(APPEND OPTIONS " --enable-decoder=mjpeg,jpeg2000,png,gif,bmp,tiff,webp,theora,dirac,dnxhd,dnxhr,prores")
++string(APPEND OPTIONS " --enable-decoder=msmpeg4v1,msmpeg4v2,msmpeg4v3,h263,h263p,flv,vp6,cinepak,wmv1,wmv2,wmv3,vc1")
++string(APPEND OPTIONS " --enable-decoder=mjpeg,jpeg2000,png,gif,bmp,tiff,webp,theora,dirac,dnxhd,prores,dvvideo")
 +string(APPEND OPTIONS " --enable-decoder=hap,svq1,svq3,rv10,rv20,rv30,rv40,indeo2,indeo3,indeo4,indeo5")
-+string(APPEND OPTIONS " --enable-decoder=huffyuv,ffv1,utvideo,zlib,qtrle,rpza,smc,8bps,aura,aura2")
-+string(APPEND OPTIONS " --enable-decoder=dds,psd")
++string(APPEND OPTIONS " --enable-decoder=huffyuv,ffv1,utvideo,zlib,qtrle,rpza,smc,eightbps,aura,aura2")
++string(APPEND OPTIONS " --enable-decoder=dds,psd,qoi,xwd,hdr")
 +string(APPEND OPTIONS " --enable-decoder=rawvideo,pam,pbm,pgm,pgmyuv,ppm,sunrast,targa,xbm")
 +string(APPEND OPTIONS " --enable-decoder=aac,ac3,eac3,mp2,mp3,opus,vorbis,flac")
 +string(APPEND OPTIONS " --enable-decoder=pcm_s16le,pcm_s16be,pcm_s24le,pcm_s32le,pcm_u8,pcm_alaw,pcm_mulaw,pcm_f32le")
 +
 +# Demuxers
-+string(APPEND OPTIONS " --enable-demuxer=mov,mp4,m4v,matroska,webm,avi,mpegts,mpegps,mpegvideo")
-+string(APPEND OPTIONS " --enable-demuxer=flv,asf,rm,rmvb,ogg,mxf,gxf,lxf,yuv4mpegpipe,rawvideo")
-+string(APPEND OPTIONS " --enable-demuxer=image2,gif,image_jpeg_pipe,image_png_pipe,image_bmp_pipe,image_tiff_pipe,ico")
-+string(APPEND OPTIONS " --enable-demuxer=image_webp_pipe,image_psd_pipe,dds,image_j2k_pipe")
++string(APPEND OPTIONS " --enable-demuxer=mov,m4v,matroska,avi,mpegts,mpegps,mpegvideo")
++string(APPEND OPTIONS " --enable-demuxer=flv,asf,rm,ogg,mxf,gxf,lxf,yuv4mpegpipe,rawvideo")
++string(APPEND OPTIONS " --enable-demuxer=image2,image2pipe,gif,image_jpeg_pipe,image_png_pipe")
++string(APPEND OPTIONS " --enable-demuxer=image_bmp_pipe,image_tiff_pipe,ico,image_webp_pipe")
++string(APPEND OPTIONS " --enable-demuxer=image_psd_pipe,image_qoi_pipe,image_xwd_pipe,image_hdr_pipe")
++string(APPEND OPTIONS " --enable-demuxer=image_pam_pipe,image_j2k_pipe")
 +string(APPEND OPTIONS " --enable-demuxer=ape,aiff,au,wav,mp3,aac,flac,ogg")
 +
 +# Parsers

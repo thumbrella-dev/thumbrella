@@ -128,21 +128,22 @@ echo "[ffmpeg-static] Configuring..."
     --enable-zlib \
     --enable-libdav1d \
     --enable-decoder=h264,hevc,vp8,vp9,libdav1d,mpeg1video,mpeg2video,mpeg4,\
-msmpeg4v1,msmpeg4v2,msmpeg4v3,h263,h263p,flv1,wmv1,wmv2,wmv3,vc1,\
-mjpeg,jpeg2000,png,gif,bmp,tiff,webp,theora,dirac,dnxhd,dnxhr,prores,\
+msmpeg4v1,msmpeg4v2,msmpeg4v3,h263,h263p,flv,vp6,cinepak,wmv1,wmv2,wmv3,vc1,\
+mjpeg,jpeg2000,png,gif,bmp,tiff,webp,theora,dirac,dnxhd,prores,dvvideo,\
 hap,svq1,svq3,rv10,rv20,rv30,rv40,indeo2,indeo3,indeo4,indeo5,\
-huffyuv,ffv1,utvideo,zlib,qtrle,rpza,smc,8bps,aura,aura2,\
-dds,psd,\
+huffyuv,ffv1,utvideo,zlib,qtrle,rpza,smc,eightbps,aura,aura2,\
+dds,psd,qoi,xwd,hdr,\
 rawvideo,pam,pbm,pgm,pgmyuv,ppm,sunrast,targa,xbm,\
 aac,ac3,eac3,mp2,mp3,opus,vorbis,flac,pcm_s16le,pcm_s16be,pcm_s24le,\
 pcm_s32le,pcm_u8,pcm_alaw,pcm_mulaw,pcm_f32le \
     \
     --disable-decoder=av1 \
     \
-    --enable-demuxer=mov,mp4,m4v,matroska,webm,avi,mpegts,mpegps,mpegvideo,\
-flv,asf,rm,rmvb,ogg,mxf,gxf,lxf,yuv4mpegpipe,rawvideo,\
-image2,gif,image_jpeg_pipe,image_png_pipe,image_bmp_pipe,image_tiff_pipe,ico,\
-image_webp_pipe,image_psd_pipe,dds,image_j2k_pipe,\
+    --enable-demuxer=mov,m4v,matroska,avi,mpegts,mpegps,mpegvideo,\
+flv,asf,rm,ogg,mxf,gxf,lxf,yuv4mpegpipe,rawvideo,\
+image2,image2pipe,gif,image_jpeg_pipe,image_png_pipe,image_bmp_pipe,\
+image_tiff_pipe,ico,image_webp_pipe,image_psd_pipe,image_qoi_pipe,\
+image_xwd_pipe,image_hdr_pipe,image_pam_pipe,image_j2k_pipe,\
 ape,aiff,au,wav,mp3,aac,flac,ogg \
     \
     --enable-parser=h264,hevc,vp8,vp9,av1,mpeg4video,mpeg4,mpegaudio,\

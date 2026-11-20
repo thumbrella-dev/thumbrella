@@ -27,10 +27,17 @@
 //!
 //! # Subprocess rendering
 //!
-//! When a subprocess backend is used, the source media is staged to a
-//! [`ScratchArena`] as a temp file, the
-//! CLI tool is invoked with that path, and the output image is read back
-//! from the arena.  All temp files are cleaned up when the arena is dropped.
+//! A subprocess backend always writes its output into a [`ScratchArena`]: the
+//! arena allocates an output path, the CLI tool writes there, the image is read
+//! back, and the directory is removed on drop.
+//!
+//! Inputs are handled per backend.  The ffmpeg CLI streams the source from its
+//! URL, except when the cook still holds a live connection and the body is
+//! small (at most [`FFMPEG_STAGE_MAX_BYTES`]): then the bytes are copied into
+//! the arena and ffmpeg is given a path, so the origin is not asked twice.
+//! playwright-cli always loads the URL exactly as a browser would.  A tool that
+//! only takes a filesystem path - pdftoppm, soffice, oiiotool, Blender, F3D -
+//! gets the source staged into the arena first.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -154,10 +161,6 @@ impl InProcessRenderer for Tier3Renderer {
                     if tier2_ok { true } else { render_image_ffmpeg_fallback(cook, &ext).await }
                 }
                 Some(FileKind::Video) => {
-                    // The linked libav may lack the FLV1 decoder.
-                    if ext == "flv" && render_video_ffmpeg_fallback(cook, &ext).await {
-                        return true;
-                    }
                     // Tier 3 is a superset of tier 2.  Always try the builtin
                     // libav path first - even on a handoff, since the lower
                     // tier may not have had libav (e.g. tier 1 routing
@@ -496,45 +499,186 @@ fn jp2_lowres(max_dim: u32, resolutions: u32) -> u32 {
     n.min(resolutions.saturating_sub(1)).min(5)
 }
 
+/// True for the JPEG 2000 extensions whose codestream header this module
+/// parses itself.
+fn is_jp2_extension(ext: &str) -> bool {
+    matches!(ext, "jp2" | "j2k" | "j2c" | "jpc" | "jpx")
+}
+
+/// The input handed to ffmpeg and ffprobe.
+///
+/// Remote sources stay URLs: the tool's http protocol fetches and seeks them,
+/// so no copy of the body is made here.  A local `file://` source becomes a
+/// native path, because ffmpeg's file protocol does not read the URL form the
+/// same way on every platform (Windows keeps the extra `/`).
+fn ffmpeg_input(url: &str) -> &str {
+    tier1::local_path::path_from_file_url(url).unwrap_or(url)
+}
+
+/// `User-Agent` used for ffmpeg/ffprobe source fetches.
+///
+/// The process-wide client identity with the tool name appended, so an origin
+/// sees the same client as the pipeline that inspected the source and can
+/// still tell which backend asked for the bytes.
+fn ffmpeg_user_agent(cook: &dyn RenderCook) -> String {
+    format!("{} (ffmpeg)", cook.user_agent())
+}
+
+/// True for sources ffmpeg must fetch over http(s) itself.
+fn is_remote_input(input: &str) -> bool {
+    input.starts_with("http://") || input.starts_with("https://")
+}
+
+/// Apply the options used on every source fetch by ffmpeg and ffprobe.
+///
+/// Only the user agent is overridden - the remaining http defaults (redirect
+/// following, keep-alive, range requests, retries) are the ones we want.
+/// `user_agent` is an http-protocol option, so it is passed only for http(s)
+/// inputs: ffmpeg rejects an option the input protocol does not declare, which
+/// would otherwise break local files.
+fn add_input_options(cmd: &mut std::process::Command, input: &str, user_agent: &str) {
+    if is_remote_input(input) {
+        cmd.arg("-user_agent").arg(user_agent);
+    }
+}
+
+/// Bytes read from the source to parse a JPEG 2000 codestream header.
+const JP2_HEADER_PROBE_BYTES: u64 = 64 * 1024;
+
+/// Largest remote body copied off the cook's live connection for ffmpeg.
+///
+/// Using the connection the cook already holds saves ffmpeg a second DNS/TLS
+/// handshake and keeps it off the network, but it only pays off while the body
+/// is small enough to copy.  Above this the URL goes through instead, so the
+/// tool transfers just the bytes the decode needs.
+const FFMPEG_STAGE_MAX_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Whether a source should be read here and staged, rather than fetched by the
+/// tool itself.
+///
+/// Only a remote source with a known, small `Content-Length` on a live
+/// connection is worth staging.  A handoff cook has no connection of ours to
+/// reuse, and an unknown size cannot be bounded.
+fn should_stage(is_handoff: bool, url: &str, content_length: Option<u64>) -> bool {
+    !is_handoff
+        && is_remote_input(url)
+        && content_length.is_some_and(|len| len > 0 && len <= FFMPEG_STAGE_MAX_BYTES)
+}
+
+/// Where the ffmpeg backend gets its input.
+enum FfmpegSource {
+    /// Body read through the cook's live connection and written into the
+    /// scratch arena.  The arena has to outlive the decode.
+    Staged { arena: ScratchArena, path: std::path::PathBuf, jp2: Option<Jp2Header> },
+    /// The tool opens the source itself.  `jp2` is set only when the header was
+    /// probed from the connection before it was released.
+    Url { input: String, jp2: Option<Jp2Header> },
+}
+
+/// Choose how ffmpeg should read the source, and prepare it.
+///
+/// * Live connection, known small size: read the body here and stage it as a
+///   file.  The cook has just fetched those bytes, so copying them to disk is
+///   cheaper than a second origin request.
+/// * Live connection, unknown or large size: close it and hand the URL over -
+///   one reader at a time, and ffmpeg only transfers what the decode needs.
+/// * No connection (handoff cook, or the reader was consumed): hand the URL
+///   over.
+///
+/// The JPEG 2000 header is parsed here in every case: `-lowres` must not exceed
+/// the codestream's decomposition levels, and ffprobe cannot report them.
+async fn prepare_ffmpeg_source(cook: &mut dyn RenderCook, ext: &str) -> FfmpegSource {
+    let jp2_ext = is_jp2_extension(ext);
+    let url = cook.input_url().to_string();
+    let content_length = cook.content_length();
+    let stage = should_stage(cook.is_handoff(), &url, content_length);
+
+    if stage && let Some(mut reader) = cook.take_reader() {
+        let expected = content_length.unwrap_or(0) as usize;
+        let read = tokio::task::spawn_blocking(move || {
+            use std::io::Read;
+            let mut bytes = Vec::with_capacity(expected);
+            reader.read_to_end(&mut bytes).map(|_| bytes)
+        })
+        .await;
+        if let Ok(Ok(bytes)) = read {
+            cook.set_bytes_consumed(bytes.len() as u64);
+            let jp2 = if jp2_ext { parse_jp2_header(&bytes) } else { None };
+            if let Ok(arena) = ScratchArena::new(FFMPEG_STAGE_MAX_BYTES * 10)
+                && let Ok(path) = arena.stage_bytes(&bytes, &format!("input.{ext}"))
+            {
+                tbr_debug!("[tier3] ffmpeg: staged {} bytes from the live connection", bytes.len());
+                return FfmpegSource::Staged { arena, path, jp2 };
+            }
+            // No scratch space: fall back to the URL rather than failing.
+            tbr_debug!("[tier3] ffmpeg: staging failed, streaming the url");
+        }
+    }
+
+    // Not staging: release our connection before the tool opens its own.
+    let mut jp2 = None;
+    if let Some(mut reader) = cook.take_reader() {
+        if jp2_ext {
+            jp2 = tokio::task::spawn_blocking(move || {
+                use std::io::Read;
+                reader.seek(std::io::SeekFrom::Start(0)).ok()?;
+                let mut prefix = Vec::new();
+                reader.take(JP2_HEADER_PROBE_BYTES).read_to_end(&mut prefix).ok()?;
+                parse_jp2_header(&prefix)
+            })
+            .await
+            .ok()
+            .flatten();
+        }
+        tbr_debug!("[tier3] ffmpeg: closed the live connection, streaming the url");
+    } else {
+        tbr_debug!("[tier3] ffmpeg: no live connection, streaming the url");
+    }
+    FfmpegSource::Url { input: ffmpeg_input(&url).to_string(), jp2 }
+}
+
+/// Split a prepared source into the `(input, jp2)` pair the decode takes, while
+/// keeping a staged arena alive alongside it.
+fn decode_args(source: FfmpegSource) -> (String, Option<Jp2Header>, Option<ScratchArena>) {
+    match source {
+        FfmpegSource::Staged { arena, path, jp2 } => {
+            (path.to_string_lossy().into_owned(), jp2, Some(arena))
+        }
+        FfmpegSource::Url { input, jp2 } => (input, jp2, None),
+    }
+}
+
 /// Run ffmpeg CLI to decode an image or video frame to PNG, with properties
 /// via ffprobe and power-of-2 downscaling.
 ///
-/// For video: seeks to 1 second, extracts one frame.  Only the first 10 MiB
-/// of the source are passed - ffmpeg can often extract frames from truncated
-/// files.
-fn run_ffmpeg_decode(bytes: &[u8], ext: &str, is_video: bool) -> Result<RenderOutput, String> {
+/// `input` is either a path to a staged copy of the source or the source URL
+/// for the tool to fetch (see [`prepare_ffmpeg_source`]).  For video: seeks to
+/// 1 second and extracts one frame.  A JPEG 2000 header parsed by the caller
+/// (`jp2`) replaces the ffprobe fetch and tells the decoder how far it can run
+/// at reduced resolution.
+fn run_ffmpeg_decode(
+    input: &str,
+    user_agent: &str,
+    jp2: Option<Jp2Header>,
+    ext: &str,
+    is_video: bool,
+) -> Result<RenderOutput, String> {
     use std::process::Command;
 
     let arena = ScratchArena::new(100 * 1024 * 1024).map_err(|e| format!("scratch arena: {e}"))?;
 
-    let input_path = arena
-        .stage_bytes(bytes, &format!("input.{ext}"))
-        .map_err(|e| format!("stage input: {e}"))?;
-
-    // JPEG 2000: read the codestream header directly instead of spawning
-    // `ffprobe`.  This also exposes the wavelet level count so ffmpeg can
-    // decode at reduced resolution rather than decoding full size then scaling.
-    let jp2 = if !is_video && matches!(ext, "jp2" | "j2k" | "j2c" | "jpc" | "jpx") {
-        parse_jp2_header(bytes)
-    } else {
-        None
-    };
     let lowres = jp2.as_ref().map(|h| jp2_lowres(h.width.max(h.height), h.resolutions)).unwrap_or(0);
 
     //  ffprobe: get dimensions, colour depth, duration, audio channels
     let (src_w, src_h, bits_per_pixel, duration_secs, channel_count) = if let Some(h) = &jp2 {
         (h.width, h.height, 0, None, 0)
     } else {
-        let output = Command::new("ffprobe")
-            .arg("-v")
-            .arg("quiet")
-            .arg("-print_format")
-            .arg("json")
-            .arg("-show_streams")
-            .arg("-show_format")
-            .arg(&input_path)
-            .output()
-            .map_err(|e| format!("spawn ffprobe: {e}"))?;
+        let mut cmd = Command::new("ffprobe");
+        cmd.arg("-v").arg("quiet").arg("-print_format").arg("json");
+        cmd.arg("-show_streams").arg("-show_format");
+        add_input_options(&mut cmd, input, user_agent);
+        cmd.stdin(std::process::Stdio::null());
+        let output = cmd.arg(input).output().map_err(|e| format!("spawn ffprobe: {e}"))?;
 
         dump_subprocess("ffprobe", &output.status, &output.stdout, &output.stderr);
 
@@ -615,7 +759,8 @@ fn run_ffmpeg_decode(bytes: &[u8], ext: &str, is_video: bool) -> Result<RenderOu
     if is_video {
         cmd.arg("-ss").arg("1");
     }
-    cmd.arg("-i").arg(&input_path);
+    add_input_options(&mut cmd, input, user_agent);
+    cmd.arg("-i").arg(input);
 
     // Output filter: thumbnail (video) and/or scale (both).
     let needs_resize = resize_w != decoded_w || resize_h != decoded_h;
@@ -629,12 +774,10 @@ fn run_ffmpeg_decode(bytes: &[u8], ext: &str, is_video: bool) -> Result<RenderOu
         cmd.arg("-vf").arg(format!("scale={resize_w}:{resize_h}"));
     }
 
-    cmd.arg("-frames:v")
-        .arg("1")
-        .arg(&output_path)
-        .arg("-y")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped());
+    cmd.arg("-frames:v").arg("1").arg("-y").arg(&output_path);
+    // `-y` plus the sandbox's null stdin keep an "Overwrite? [y/N]" prompt from
+    // ever waiting for an answer.
+    cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
 
     let output = crate::sandbox::output(&mut cmd, &crate::sandbox::default_strict())
         .map_err(|e| format!("run ffmpeg: {e}"))?;
@@ -768,32 +911,67 @@ fn pix_fmt_bits_per_pixel(pix_fmt: &str) -> u32 {
 /// | hdr, dpx, … | oiiotool |
 /// | All others (incl. jp2/j2k) | ffmpeg CLI |
 async fn render_image_ffmpeg_fallback(cook: &mut dyn RenderCook, ext: &str) -> bool {
+    if is_oiio_format(ext) {
+        return render_image_oiiotool(cook, ext).await;
+    }
+
     let report = crate::env_check::cached_report();
+    let available = report
+        .as_ref()
+        .and_then(|r| r.backends.get("ffmpeg_cli"))
+        .map(|b| b.available)
+        .unwrap_or(false);
+    if !available {
+        cook.note("external tool unavailable (ffmpeg_cli)");
+        return false;
+    }
 
-    // Pick the tool for this extension.
-    let use_oiiotool = is_oiio_format(ext);
-    let (tool_name, tool_available): (&str, bool) = if use_oiiotool {
-        (
-            "oiiotool",
-            report
-                .as_ref()
-                .and_then(|r| r.backends.get("oiiotool"))
-                .map(|b| b.available)
-                .unwrap_or(false),
-        )
-    } else {
-        (
-            "ffmpeg_cli",
-            report
-                .as_ref()
-                .and_then(|r| r.backends.get("ffmpeg_cli"))
-                .map(|b| b.available)
-                .unwrap_or(false),
-        )
-    };
+    // A small body on a live connection is copied here; anything larger, or a
+    // handoff cook, is streamed by ffmpeg from the url.
+    let source = prepare_ffmpeg_source(cook, ext).await;
+    let user_agent = ffmpeg_user_agent(cook);
+    let ext_owned = ext.to_string();
+    let result = tokio::task::spawn_blocking(move || {
+        let (input, jp2, arena) = decode_args(source);
+        let output = run_ffmpeg_decode(&input, &user_agent, jp2, &ext_owned, false);
+        // The staged file has to outlive the decode.
+        drop(arena);
+        output
+    })
+    .await;
 
-    if !tool_available {
-        cook.note(&format!("external tool unavailable ({tool_name})"));
+    match result {
+        Ok(Ok(out)) => {
+            cook.clear_message();
+            apply_render_output(cook, out);
+            true
+        }
+        Ok(Err(msg)) => {
+            cook.fail_cook(&format!("ffmpeg_cli: {msg}"));
+            true
+        }
+        Err(_) => {
+            cook.fail_cook("ffmpeg_cli panicked");
+            true
+        }
+    }
+}
+
+/// Tier-3 `oiiotool` fallback for studio image formats.
+///
+/// oiiotool reads a filesystem path, so the source is read and staged into the
+/// scratch arena before the decode.
+async fn render_image_oiiotool(cook: &mut dyn RenderCook, ext: &str) -> bool {
+    const TOOL: &str = "oiiotool";
+
+    let report = crate::env_check::cached_report();
+    let available = report
+        .as_ref()
+        .and_then(|r| r.backends.get(TOOL))
+        .map(|b| b.available)
+        .unwrap_or(false);
+    if !available {
+        cook.note(&format!("external tool unavailable ({TOOL})"));
         return false;
     }
 
@@ -808,11 +986,7 @@ async fn render_image_ffmpeg_fallback(cook: &mut dyn RenderCook, ext: &str) -> b
             let mut buf = Vec::new();
             use std::io::Read;
             reader.read_to_end(&mut buf).map_err(|e| format!("read: {e}"))?;
-            if use_oiiotool {
-                run_oiiotool_decode(&buf, &ext_owned)
-            } else {
-                run_ffmpeg_decode(&buf, &ext_owned, false)
-            }
+            run_oiiotool_decode(&buf, &ext_owned)
         })
         .await;
 
@@ -823,11 +997,11 @@ async fn render_image_ffmpeg_fallback(cook: &mut dyn RenderCook, ext: &str) -> b
                 true
             }
             Ok(Err(msg)) => {
-                cook.fail_cook(&format!("{tool_name}: {msg}"));
+                cook.fail_cook(&format!("{TOOL}: {msg}"));
                 true
             }
             Err(_) => {
-                cook.fail_cook(&format!("{tool_name} panicked"));
+                cook.fail_cook(&format!("{TOOL} panicked"));
                 true
             }
         }
@@ -837,7 +1011,7 @@ async fn render_image_ffmpeg_fallback(cook: &mut dyn RenderCook, ext: &str) -> b
             Some(b) => b,
             None => {
                 cook.fail_cook(&format!(
-                    "{tool_name}: failed to re-fetch (reader consumed by prior tier)"
+                    "{TOOL}: failed to re-fetch (reader consumed by prior tier)"
                 ));
                 return true;
             }
@@ -849,14 +1023,8 @@ async fn render_image_ffmpeg_fallback(cook: &mut dyn RenderCook, ext: &str) -> b
         {
             cook.add_bytes_consumed(bytes.len() as u64);
         }
-        let result = tokio::task::spawn_blocking(move || {
-            if use_oiiotool {
-                run_oiiotool_decode(&bytes, &ext_owned)
-            } else {
-                run_ffmpeg_decode(&bytes, &ext_owned, false)
-            }
-        })
-        .await;
+        let result =
+            tokio::task::spawn_blocking(move || run_oiiotool_decode(&bytes, &ext_owned)).await;
 
         match result {
             Ok(Ok(out)) => {
@@ -865,19 +1033,22 @@ async fn render_image_ffmpeg_fallback(cook: &mut dyn RenderCook, ext: &str) -> b
                 true
             }
             Ok(Err(msg)) => {
-                cook.fail_cook(&format!("{tool_name}: {msg}"));
+                cook.fail_cook(&format!("{TOOL}: {msg}"));
                 true
             }
             Err(_) => {
-                cook.fail_cook(&format!("{tool_name} panicked"));
+                cook.fail_cook(&format!("{TOOL} panicked"));
                 true
             }
         }
     }
 }
 
-/// Tier-3 ffmpeg CLI fallback for video.  Reads only the first 10 MiB -
-/// ffmpeg can often extract a keyframe from a truncated file.
+/// Tier-3 ffmpeg CLI fallback for video.
+///
+/// A small body on a live connection is copied here; anything larger, or a
+/// handoff cook, is streamed by ffmpeg from the url: a long video then
+/// transfers only the bytes the keyframe search needs.
 async fn render_video_ffmpeg_fallback(cook: &mut dyn RenderCook, ext: &str) -> bool {
     let report = crate::env_check::cached_report();
     let has_ffmpeg = report
@@ -896,26 +1067,15 @@ async fn render_video_ffmpeg_fallback(cook: &mut dyn RenderCook, ext: &str) -> b
         return false;
     }
 
-    let Some(mut reader) = cook.take_reader() else {
-        return false;
-    };
+    let source = prepare_ffmpeg_source(cook, ext).await;
+    let user_agent = ffmpeg_user_agent(cook);
     let ext_owned = ext.to_string();
     let result = tokio::task::spawn_blocking(move || {
-        let mut buf = Vec::with_capacity(10 * 1024 * 1024);
-        use std::io::Read;
-        // Read at most 10 MiB - ffmpeg works with truncated files.
-        let mut chunk = [0u8; 8192];
-        loop {
-            let n = reader.read(&mut chunk).map_err(|e| format!("read: {e}"))?;
-            if n == 0 {
-                break;
-            }
-            buf.extend_from_slice(&chunk[..n]);
-            if buf.len() >= 10 * 1024 * 1024 {
-                break;
-            }
-        }
-        run_ffmpeg_decode(&buf, &ext_owned, true)
+        let (input, jp2, arena) = decode_args(source);
+        let output = run_ffmpeg_decode(&input, &user_agent, jp2, &ext_owned, true);
+        // The staged file has to outlive the decode.
+        drop(arena);
+        output
     })
     .await;
 
@@ -1759,8 +1919,26 @@ fn autocrop_transparent(img: image::DynamicImage) -> image::DynamicImage {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_video_properties, is_oiio_format, jp2_lowres, parse_jp2_header};
+    use super::{
+        FFMPEG_STAGE_MAX_BYTES, build_video_properties, is_oiio_format, jp2_lowres, parse_jp2_header,
+        should_stage,
+    };
 
+    /// Only a measured, small, remote body on a live connection is worth
+    /// copying; everything else lets the tool fetch it.
+    #[test]
+    fn staging_requires_a_small_measured_remote_source() {
+        let url = "https://example.com/media.png";
+        assert!(should_stage(false, url, Some(1)));
+        assert!(should_stage(false, url, Some(FFMPEG_STAGE_MAX_BYTES)));
+        assert!(!should_stage(false, url, Some(FFMPEG_STAGE_MAX_BYTES + 1)));
+        assert!(!should_stage(false, url, Some(0)));
+        assert!(!should_stage(false, url, None));
+        // A handoff cook has no connection of ours to reuse.
+        assert!(!should_stage(true, url, Some(1024)));
+        // A local source is already a path - copying it would only add work.
+        assert!(!should_stage(false, "file:///tmp/media.png", Some(1024)));
+    }
     #[test]
     fn blender_appearance_report_is_strict() {
         assert!(super::parse_blender_appearance(b"Blender\nTHUMBRELLA_HAS_APPEARANCE=true\n").unwrap());
@@ -1904,5 +2082,129 @@ mod tests {
         assert_eq!(jp2_lowres(8000, 7), 3); // 8000 >> 3 = 1000, >> 4 = 500
         assert_eq!(jp2_lowres(300, 7), 0); // already tiny
         assert_eq!(jp2_lowres(8688, 1), 0); // only one resolution level
+    }
+}
+
+/// The stage-vs-stream decision, exercised against the real
+/// [`prepare_ffmpeg_source`] with a stand-in cook.
+#[cfg(test)]
+mod ffmpeg_source_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    struct MockCook {
+        url: String,
+        len: Option<u64>,
+        handoff: bool,
+        body: Option<Vec<u8>>,
+        reader_taken: bool,
+        consumed: Option<u64>,
+    }
+
+    impl MockCook {
+        fn new(url: &str, len: Option<u64>, handoff: bool, body: Option<Vec<u8>>) -> Self {
+            Self {
+                url: url.to_string(),
+                len,
+                handoff,
+                body,
+                reader_taken: false,
+                consumed: None,
+            }
+        }
+    }
+
+    impl RenderCook for MockCook {
+        fn media_kind(&self) -> Option<FileKind> {
+            Some(FileKind::Image)
+        }
+        fn media_extension(&self) -> Option<&str> {
+            None
+        }
+        fn input_url(&self) -> &str {
+            &self.url
+        }
+        fn content_length(&self) -> Option<u64> {
+            self.len
+        }
+        fn take_reader(&mut self) -> Option<Box<dyn tier1::http_buf::ReadSeek + Send>> {
+            self.reader_taken = true;
+            self.body.take().map(|bytes| Box::new(Cursor::new(bytes)) as Box<_>)
+        }
+        fn peek_bytes(&self, _len: usize) -> Option<Vec<u8>> {
+            None
+        }
+        fn is_handoff(&self) -> bool {
+            self.handoff
+        }
+        fn set_render_image(&mut self, _img: image::DynamicImage) {}
+        fn set_render_renderer(&mut self, _label: String) {}
+        fn set_render_codec(&mut self, _codec: String) {}
+        fn set_render_video_seek_secs(&mut self, _secs: f64) {}
+        fn set_media_properties(&mut self, _props: serde_json::Value) {}
+        fn fail_cook(&mut self, _msg: &str) {}
+        fn clear_message(&mut self) {}
+        fn note(&mut self, _msg: &str) {}
+        fn set_bytes_consumed(&mut self, n: u64) {
+            self.consumed = Some(n);
+        }
+        fn add_external_download_bytes(&mut self, _n: u64) {}
+    }
+
+    #[tokio::test]
+    async fn small_live_source_is_staged_on_disk() {
+        let _ = tier1::ux::init();
+        let body = vec![0x5a; 4096];
+        let mut cook = MockCook::new("https://example.com/a.png", Some(4096), false, Some(body.clone()));
+
+        match prepare_ffmpeg_source(&mut cook, "png").await {
+            FfmpegSource::Staged { path, jp2, .. } => {
+                assert!(path.to_string_lossy().ends_with(".png"), "extension kept: {path:?}");
+                assert_eq!(std::fs::read(&path).unwrap(), body);
+                assert!(jp2.is_none());
+            }
+            FfmpegSource::Url { .. } => panic!("a measured small body should be staged"),
+        }
+        assert_eq!(cook.consumed, Some(4096), "the read bytes are accounted for");
+    }
+
+    #[tokio::test]
+    async fn large_source_is_streamed_and_the_connection_released() {
+        let _ = tier1::ux::init();
+        let mut cook = MockCook::new(
+            "https://example.com/a.png",
+            Some(FFMPEG_STAGE_MAX_BYTES + 1),
+            false,
+            Some(vec![0u8; 64]),
+        );
+
+        match prepare_ffmpeg_source(&mut cook, "png").await {
+            FfmpegSource::Url { input, jp2 } => {
+                assert_eq!(input, "https://example.com/a.png");
+                assert!(jp2.is_none());
+            }
+            FfmpegSource::Staged { .. } => panic!("a large body must not be copied"),
+        }
+        assert!(cook.reader_taken, "the live connection is closed for the tool");
+    }
+
+    #[tokio::test]
+    async fn unmeasured_source_is_streamed() {
+        let _ = tier1::ux::init();
+        let mut cook = MockCook::new("https://example.com/a.png", None, false, Some(vec![0u8; 64]));
+        assert!(matches!(
+            prepare_ffmpeg_source(&mut cook, "png").await,
+            FfmpegSource::Url { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn handoff_source_is_streamed_even_when_small() {
+        let _ = tier1::ux::init();
+        let mut cook = MockCook::new("https://example.com/a.png", Some(1024), true, Some(vec![0u8; 64]));
+        assert!(matches!(
+            prepare_ffmpeg_source(&mut cook, "png").await,
+            FfmpegSource::Url { .. }
+        ));
     }
 }

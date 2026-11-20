@@ -16,7 +16,8 @@
 //!
 //! ```text
 //! Arena::new(max_bytes)
-//!   ├─ stage_url(url, client)  → PathBuf  (download source → temp file)
+//!   ├─ stage_bytes(bytes, …)   → PathBuf  (write tool input to disk)
+//!   ├─ stage_reader(reader, …) → PathBuf  (drain a source reader to disk)
 //!   ├─ output_path(suffix)     → PathBuf  (allocate output path)
 //!   ├─ read_output(path)       → Vec<u8>  (read back rendered image)
 //!   └─ Drop                     → cleanup
@@ -117,72 +118,6 @@ impl ScratchArena {
 
     //  Staging
 
-    /// Download `url` into a file in the arena and return its path.
-    ///
-    /// The download is streamed directly to disk.  The file name is derived
-    /// from the URL's final path segment, with a random suffix to avoid
-    /// collisions.
-    ///
-    /// Returns an error if the download would exceed `max_bytes`.
-    pub async fn stage_url(&self, url: &str, client: &reqwest::Client) -> Result<PathBuf, ArenaError> {
-        let response = client.get(url).send().await.map_err(ArenaError::Fetch)?;
-
-        let content_length = response.content_length();
-
-        // Check limit before downloading.
-        if self.max_bytes > 0
-            && let Some(cl) = content_length
-        {
-            let current = self.current_bytes.load(Ordering::Relaxed);
-            if current + cl > self.max_bytes {
-                return Err(ArenaError::LimitExceeded {
-                    current,
-                    needed: cl,
-                    max: self.max_bytes,
-                });
-            }
-        }
-
-        // Build a collision-free file name.
-        let stem = url.rsplit('/').next().unwrap_or("download").split('?').next().unwrap_or("download");
-        let suffix: String = std::iter::repeat_with(fast_random_char).take(8).collect();
-        let file_name = if stem.is_empty() {
-            format!("dl_{suffix}")
-        } else {
-            format!("{stem}_{suffix}")
-        };
-        let dest = self.dir.path().join(&file_name);
-
-        // Stream to disk.
-        let mut file = tokio::fs::File::create(&dest).await.map_err(ArenaError::Io)?;
-        let mut stream = response.bytes_stream();
-        let mut written: u64 = 0;
-        use futures::StreamExt;
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(ArenaError::Fetch)?;
-            tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await.map_err(ArenaError::Io)?;
-            written += chunk.len() as u64;
-
-            // Check limit during streaming.
-            if self.max_bytes > 0 {
-                let current = self.current_bytes.load(Ordering::Relaxed);
-                if current + written > self.max_bytes {
-                    // Clean up partial file.
-                    drop(file);
-                    let _ = tokio::fs::remove_file(&dest).await;
-                    return Err(ArenaError::LimitExceeded {
-                        current,
-                        needed: written,
-                        max: self.max_bytes,
-                    });
-                }
-            }
-        }
-
-        self.current_bytes.fetch_add(written, Ordering::Relaxed);
-        Ok(dest)
-    }
-
     /// Write `bytes` to a new file in the arena and return its path.
     ///
     /// Useful for draining an [`HttpBuffer`](tier1::http_buf::HttpBuffer)
@@ -221,8 +156,6 @@ impl ScratchArena {
     /// Drain a reader to a file in the arena and return its path.
     ///
     /// Buffers at most the remaining limit plus one byte, then writes to disk.
-    /// For large files, prefer
-    /// [`ScratchArena::stage_url`].
     pub fn stage_reader(
         &self,
         reader: &mut dyn std::io::Read,
@@ -293,8 +226,6 @@ fn raw_logs_enabled() -> bool {
 pub enum ArenaError {
     /// I/O error (file creation, read, write).
     Io(io::Error),
-    /// HTTP fetch error.
-    Fetch(reqwest::Error),
     /// Disk usage limit would be exceeded.
     LimitExceeded { current: u64, needed: u64, max: u64 },
 }
@@ -303,7 +234,6 @@ impl std::fmt::Display for ArenaError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Io(e) => write!(f, "scratch I/O error: {e}"),
-            Self::Fetch(e) => write!(f, "scratch fetch error: {e}"),
             Self::LimitExceeded { current, needed, max } => {
                 write!(f, "scratch arena limit exceeded: {current} + {needed} > {max} bytes")
             }
@@ -315,7 +245,6 @@ impl std::error::Error for ArenaError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(e) => Some(e),
-            Self::Fetch(e) => Some(e),
             Self::LimitExceeded { .. } => None,
         }
     }

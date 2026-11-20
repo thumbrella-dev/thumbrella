@@ -62,6 +62,15 @@ pub trait RenderCook: Send {
     /// `Content-Length` reported by the server, if available.
     fn content_length(&self) -> Option<u64>;
 
+    /// `User-Agent` used for outbound source fetches.
+    ///
+    /// Renderers that fetch the source themselves (instead of reading it
+    /// through [`Self::take_reader`]) should send this same value, so a source
+    /// sees one client identity no matter which backend asked for the bytes.
+    fn user_agent(&self) -> &str {
+        crate::cook::DEFAULT_USER_AGENT
+    }
+
     /// Move the buffer out as a synchronous paged reader.
     ///
     /// The returned reader drives HTTP I/O on-demand: each `read` call blocks

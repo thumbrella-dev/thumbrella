@@ -258,12 +258,14 @@ pub const EXTENSION_ALIASES: &[(&str, &str)] = &[
     ("bm", "xbm"),
     ("pgm", "pbm"),
     ("ppm", "pbm"),
+    ("pnm", "pbm"),
     ("pfm", "pbm"),
     ("heics", "heic"),
     ("heif", "heic"),
     // video / audio
     ("mpg", "mpeg"),
     ("mpe", "mpeg"),
+    ("mts", "m2ts"),
     ("m4v", "mp4"),
     ("m4b", "m4a"),
     ("mid", "midi"),
@@ -492,6 +494,12 @@ pub fn format_manifest() -> &'static [FormatEntry] {&[
                 kind: FileKind::Image,  tier: 2, handlers: &[Libav], shortcut: false},
     FormatEntry {extension: "pbm", label: "NetPBM",
                 kind: FileKind::Image,  tier: 2, handlers: &[Libav], shortcut: false},
+    FormatEntry {extension: "pam", label: "Portable Arbitrary Map",
+                kind: FileKind::Image,  tier: 2, handlers: &[Libav], shortcut: false},
+    FormatEntry {extension: "qoi", label: "Quite OK Image",
+                kind: FileKind::Image,  tier: 2, handlers: &[Libav], shortcut: false},
+    FormatEntry {extension: "xwd", label: "X Window Dump",
+                kind: FileKind::Image,  tier: 2, handlers: &[Libav], shortcut: false},
     FormatEntry {extension: "tga", label: "Targa",
                 kind: FileKind::Image,  tier: 2, handlers: &[ImageCrate], shortcut: false},
     //  Tier 2 - video (libav / ffmpeg)
@@ -520,6 +528,8 @@ pub fn format_manifest() -> &'static [FormatEntry] {&[
     FormatEntry {extension: "mxf", label: "Material Exchange Format",
                 kind: FileKind::Video,  tier: 2, handlers: &[Libav], shortcut: false},
     FormatEntry {extension: "av1", label: "AV1 bitstream",
+                kind: FileKind::Video,  tier: 2, handlers: &[Libav], shortcut: false},
+    FormatEntry {extension: "flv", label: "Flash Video",
                 kind: FileKind::Video,  tier: 2, handlers: &[Libav], shortcut: false},
     //  Tier 2 - audio (libav / ffmpeg)
     FormatEntry {extension: "mp3", label: "MPEG",
@@ -593,10 +603,14 @@ pub fn format_manifest() -> &'static [FormatEntry] {&[
                 kind: FileKind::Document,   tier: 3, handlers: &[Playwright], shortcut: false },
     FormatEntry {extension: "mhtml", label: "MHTML Web Archive",
                 kind: FileKind::Document,   tier: 3, handlers: &[Playwright], shortcut: false },
-    //  Tier 3 - video via ffmpeg CLI
+    //  Tier 3 - ffmpeg CLI as a last resort.  Every format below is decoded by
+    //  the builtin libav or image crates at tier 2; these rows only matter when
+    //  a deployment runs the external tool instead (or a variant the builtin
+    //  build cannot handle turns up).
     FormatEntry {extension: "flv", label: "Flash Video",
                 kind: FileKind::Video,  tier: 3, handlers: &[FfmpegCli], shortcut: false},
-    //  Tier 3 - ffmpeg CLI: arithmetic JPEG + all image formats
+    //  Arithmetic-coded JPEG has no decoder in tier 2 - libav's mjpeg decoder
+    //  and the Rust jpeg decoders both reject SOF9/SOF10.
     FormatEntry {extension: "jpeg", label: "JPEG (arithmetic)",
                 kind: FileKind::Image,  tier: 3, handlers: &[FfmpegCli], shortcut: false},
     FormatEntry {extension: "psd", label: "PSD (via ffmpeg)",

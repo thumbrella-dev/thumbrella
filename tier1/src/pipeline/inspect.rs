@@ -499,16 +499,17 @@ mod tests {
     }
 
     #[test]
-    fn flv_is_routed_to_tier3_ffmpeg() {
+    fn flv_is_routed_to_tier2_libav() {
         let (kind, _, extension) = sniff(b"", "https://example.com/video.flv", None);
         assert_eq!((kind, extension.as_str()), (FileKind::Video, "flv"));
-        assert_eq!(dispatch::route(kind, Some(&extension)).tier, 3);
+        assert_eq!(dispatch::route(kind, Some(&extension)).tier, 2);
         let entries: Vec<_> =
             dispatch::format_manifest().iter().filter(|entry| entry.extension == "flv").collect();
-        assert_eq!(entries.len(), 1);
+        // The builtin libav decodes flv1 (and vp6); the external ffmpeg row
+        // stays as the last-resort path for codecs that build lacks.
         assert_eq!(
-            (entries[0].tier, entries[0].handlers_label().as_str(), entries[0].shortcut),
-            (3, "ffmpeg_cli", false)
+            entries.iter().map(|e| (e.tier, e.handlers_label())).collect::<Vec<_>>(),
+            [(2, "libav".to_string()), (3, "ffmpeg_cli".to_string())]
         );
     }
 
@@ -978,7 +979,12 @@ fn ext_to_kind(ext: &str) -> FileKind {
         | "vti" | "vtr" | "vts" | "vtm" | "step" | "iges" | "brep" | "exo" => FileKind::Geometry,
         "zip" | "tar" | "gz" | "bz2" | "xz" | "rar" | "7z" => FileKind::Archive,
         "xml" | "json" | "txt" | "csv" | "md" => FileKind::Text,
-        _ => FileKind::Unknown,
+        // Anything this table does not list but the format manifest knows
+        // about takes the manifest's kind, so adding a manifest row is enough
+        // to make the extension routable (`qoi`, `xwd`, `pam` arrived that
+        // way).  The table above stays for extensions the manifest does not
+        // model (aliases already folded, plus a few legacy labels).
+        _ => crate::dispatch::entries_for(ext).next().map_or(FileKind::Unknown, |entry| entry.kind),
     }
 }
 

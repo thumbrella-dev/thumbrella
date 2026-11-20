@@ -253,6 +253,11 @@ unsafe fn free_avio_ctx(ctx: &mut *mut AVIOContext) {
 /// probe hint when `avformat_open_input` cannot identify the format from the
 /// byte stream alone (e.g. raw JPEG/PNG piped through a custom AVIOContext
 /// without a filename).
+///
+/// The PNM family is here for a different reason: its pipe demuxer has no
+/// content probe, so `pam_pipe` is the only way a filename-less stream can be
+/// opened at all.  The same is true of any format whose only identifier is the
+/// extension, so this map is part of the format support, not just a speed-up.
 fn ext_to_libav_format(ext: &str) -> Option<&'static str> {
     match ext {
         "jpeg" | "jpg" => Some("jpeg_pipe"),
@@ -263,6 +268,11 @@ fn ext_to_libav_format(ext: &str) -> Option<&'static str> {
         "ico" => Some("ico"),
         "webp" => Some("webp_pipe"),
         "jp2" | "j2k" => Some("j2k_pipe"),
+        "psd" => Some("psd_pipe"),
+        "qoi" => Some("qoi_pipe"),
+        "xwd" => Some("xwd_pipe"),
+        "hdr" => Some("hdr_pipe"),
+        "pbm" | "pgm" | "ppm" | "pnm" | "pam" => Some("pam_pipe"),
         _ => None,
     }
 }
@@ -279,8 +289,10 @@ fn ext_to_libav_format(ext: &str) -> Option<&'static str> {
 /// * `content_length` - total byte size of the stream, if known.  Used to
 ///   answer libav's `AVSEEK_SIZE` probe; pass `None` if unknown.
 /// * `ext_hint` - canonical file extension (e.g. `"heic"`, `"avif"`), used
-///   to hint the demuxer when probing an untitled stream.  Pass `None` to
-///   rely entirely on byte-stream detection.
+///   twice: as the stream's synthetic filename (so extension-based probes see
+///   it) and, where a format has no reliable probe, to select the demuxer
+///   outright via [`ext_to_libav_format`].  Pass `None` to rely entirely on
+///   byte-stream detection.
 ///
 /// Returns `(result, avio_bytes)` where `avio_bytes` is the total number of
 /// bytes requested from the reader by libav's AVIO callbacks.  This value is
@@ -490,9 +502,24 @@ unsafe fn decode_inner(
     // We only need the first keyframe near the seek point.
     (**fmt_ctx).flags |= AVFMT_FLAG_NOFILLIN;
 
+    // Name the stream after the inspected extension.
+    //
+    // A custom AVIOContext has no identity of its own, and `avformat_open_input`
+    // hands its `filename` argument to every demuxer probe as
+    // `AVProbeData::filename`.  Passing `input.<ext>` therefore makes the
+    // stream look like a file libav had opened itself: `image2` returns
+    // AVPROBE_SCORE_EXTENSION and demuxers that key off the extension (TGA,
+    // XBM, XPM, the PNM family, ...) can claim it.  The name is used for
+    // probing only - `AVFMT_FLAG_CUSTOM_IO` is set, so libav never opens it -
+    // and libav copies the string into the format context.
+    let hint_name = ext_hint
+        .filter(|ext| !ext.is_empty() && ext.chars().all(|c| c.is_ascii_alphanumeric()))
+        .and_then(|ext| CString::new(format!("input.{ext}")).ok());
+    let hint_name_ptr = hint_name.as_ref().map_or(ptr::null(), |name| name.as_ptr());
+
     // avformat_open_input frees *fmt_ctx on failure; null it to avoid
     // a double-free in the caller's cleanup.
-    let open_ret = avformat_open_input(fmt_ctx, ptr::null(), fmt_hint, ptr::null_mut());
+    let open_ret = avformat_open_input(fmt_ctx, hint_name_ptr, fmt_hint, ptr::null_mut());
     if open_ret < 0 {
         tbr_debug!("[avdecode] FAIL: avformat_open_input returned {open_ret}");
         *fmt_ctx = ptr::null_mut();
@@ -677,7 +704,17 @@ unsafe fn decode_inner(
                 applied_seek_secs = Some(secs);
                 tbr_debug!("[avdecode] seek applied: {secs:.3}s (ts={target_ts})");
             } else {
-                tbr_debug!("[avdecode] seek skipped: av_seek_frame returned {seek_ret}");
+                // A failed seek leaves the demuxer wherever probing walked off
+                // to, so a stream that cannot seek (raw MPEG-2/H.264 elementary
+                // streams have no index) then decodes nothing at all.  Rewind
+                // the byte stream and flush the demuxer instead; the frame
+                // simply comes from the start of the file.
+                // 0 = SEEK_SET.
+                let rewind = avio_seek((*(*fmt_ctx)).pb, 0, 0);
+                avformat_flush(*fmt_ctx);
+                tbr_debug!(
+                    "[avdecode] seek skipped ({seek_ret}); rewound to 0 (avio_seek={rewind})"
+                );
             }
         }
     }
@@ -864,5 +901,45 @@ mod property_tests {
         assert_eq!(color_bits_per_pixel(AVPixelFormat::AV_PIX_FMT_RGBA), Some(24));
         assert_eq!(color_bits_per_pixel(AVPixelFormat::AV_PIX_FMT_YUV420P), Some(12));
         assert_eq!(color_bits_per_pixel(AVPixelFormat::AV_PIX_FMT_NONE), None);
+    }
+}
+
+/// The inspected extension reaches libav as the stream's synthetic filename.
+///
+/// Formats with no magic bytes can only be identified that way, so this pins
+/// the behaviour for the case where nothing else can: a TGA of a solid colour.
+#[cfg(test)]
+mod extension_hint_tests {
+    use super::*;
+
+    /// Minimal uncompressed 2x2 24-bit TGA (image type 2, bottom-up).
+    fn tiny_tga() -> Vec<u8> {
+        let mut header = vec![0u8; 18];
+        header[2] = 2; // uncompressed true-colour
+        header[12..14].copy_from_slice(&2u16.to_le_bytes());
+        header[14..16].copy_from_slice(&2u16.to_le_bytes());
+        header[16] = 24;
+        for _ in 0..4 {
+            header.extend_from_slice(&[0x33, 0x66, 0x99]); // BGR
+        }
+        header
+    }
+
+    fn decode(bytes: Vec<u8>, ext: Option<&str>) -> Option<RenderOutput> {
+        let len = bytes.len() as u64;
+        let (output, _) = decode_with_libav(
+            Box::new(std::io::Cursor::new(bytes)),
+            Some(len),
+            ext.map(str::to_string),
+            0,
+            None,
+        );
+        output
+    }
+
+    #[test]
+    fn extension_identifies_a_format_with_no_magic_bytes() {
+        assert!(decode(tiny_tga(), Some("tga")).is_some(), "tga should decode by extension");
+        assert!(decode(tiny_tga(), None).is_none(), "tga has no magic to probe");
     }
 }

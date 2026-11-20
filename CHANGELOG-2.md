@@ -2,7 +2,10 @@
 
 ## Development
 
-- Cleanup and simplify internal format and extension definitions
+- Promote more formats to native tier2; flv, vp6, hdr, and others
+- Fix streaming with internal HttpBuffer
+- External Ffmpeg streams larger media directly over http
+- Drop stdin on subprocesses
 - Increase 3d render resolution
 
 ## 2.4.7 - 2026/11/19

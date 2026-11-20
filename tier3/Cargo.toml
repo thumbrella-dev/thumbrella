@@ -31,9 +31,6 @@ tempfile = "3"
 # apply resource limits and drop capabilities on subprocess renderers.
 libc = "0.2"
 
-# wait-timeout: enforce wall-clock deadlines for external renderer processes.
-wait-timeout = "0.2"
-
 # zip / cfb / roxmltree: office document container inspection.  OOXML and ODF
 # files are ZIPs, legacy .doc/.xls/.ppt are OLE compound files.  Used to find
 # embedded thumbnails (including EMF/WMF previews) and scrape page counts.
@@ -45,18 +42,17 @@ roxmltree = "0.21"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# futures: stream processing for scratch arena downloads (already a transitive
-# dep via tier1; listed explicitly for StreamExt import).
-futures = "0.3"
-
+# tokio: async runtime for the renderer entry points (spawn_blocking).
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
 
 [dev-dependencies]
 # which: PATH lookup for tools the end-to-end tests need.  Only tests/office.rs
 # uses it (to skip when soffice is not installed), so it belongs here and not in
 # [dependencies] - the library and binary never reference it.
 which = "8"
+
+# reqwest: HTTP client used by the test harness to talk to the spawned servers.
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 
 # winres embeds the icon, VERSIONINFO resource, and application manifest (see build.rs)
 # into thumbrella.exe on Windows. Not compiled for other targets.

@@ -10,9 +10,7 @@
 
 use std::io::Read;
 use std::process::{Command, Output};
-use std::time::Duration;
-
-use wait_timeout::ChildExt;
+use std::time::{Duration, Instant};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::unix::process::CommandExt;
@@ -155,11 +153,34 @@ pub fn browser_accounting() -> SandboxConfig {
     }
 }
 
+/// How often [`output`] re-checks a running child before its deadline.
+///
+/// `wait_timeout` blocks until SIGCHLD arrives, which relies on a notification
+/// this process does not fully control: the crate registers the waiter after a
+/// `try_wait`, so a child that exits in that window is never woken, and any
+/// other SIGCHLD user in the process (an embedder's handler, tokio's signal
+/// driver) can consume the signal too.  When that happens a subprocess that
+/// finished in milliseconds is reported as "timed out after 20 seconds" - the
+/// same message a genuine hang produces.  Polling `try_wait` cannot miss an
+/// exit; the cost is a few hundred wake-ups per render.
+const POLL_INTERVAL: Duration = Duration::from_millis(5);
+
 /// Run a configured command and enforce its wall-clock deadline.
 ///
 /// Captured stdout and stderr are drained concurrently so a noisy renderer
 /// cannot block on a full pipe before its deadline is reached.
 pub fn output(cmd: &mut Command, config: &SandboxConfig) -> std::io::Result<Output> {
+    // Sandboxed tools are batch tools, never interactive ones: they must not
+    // see the caller's stdin.  Two reasons.  They run in their own process
+    // group (below) so the deadline can kill the whole tree, which means they
+    // are not the terminal's foreground group - and a tool that changes
+    // terminal attributes from there is stopped by SIGTTOU.  ffmpeg does
+    // exactly that: it switches stdin to raw mode for its "press q to stop"
+    // handler, so running it with a terminal on stdin hangs until the deadline
+    // (verified: the child sits in state T with stdin on the pty).  /dev/null
+    // also turns any prompt ("Overwrite? [y/N]") into an immediate EOF instead
+    // of a wait.
+    cmd.stdin(std::process::Stdio::null());
     #[cfg(unix)]
     cmd.process_group(0);
     apply(cmd, config);
@@ -170,7 +191,7 @@ pub fn output(cmd: &mut Command, config: &SandboxConfig) -> std::io::Result<Outp
     let status = if config.timeout.is_zero() {
         child.wait()?
     } else {
-        match child.wait_timeout(config.timeout)? {
+        match wait_with_deadline(&mut child, config.timeout)? {
             Some(status) => status,
             None => {
                 #[cfg(unix)]
@@ -194,6 +215,24 @@ pub fn output(cmd: &mut Command, config: &SandboxConfig) -> std::io::Result<Outp
         stdout: join_pipe(stdout)?,
         stderr: join_pipe(stderr)?,
     })
+}
+
+/// Wait for `child` to exit, returning `None` when `limit` elapses first.
+fn wait_with_deadline(
+    child: &mut std::process::Child,
+    limit: Duration,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    let deadline = Instant::now() + limit;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(POLL_INTERVAL.min(deadline - now));
+    }
 }
 
 fn drain_pipe<R: Read + Send + 'static>(

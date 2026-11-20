@@ -122,6 +122,14 @@ impl CookStatus {
 /// expose a knob only if operators need to trade egress for handshake cost.
 pub const HANDOFF_DRAIN_MAX_BYTES: u64 = 3 * 1024 * 1024;
 
+/// `User-Agent` sent when the embedder does not supply one.
+///
+/// Also the default for [`crate::renderer::RenderCook::user_agent`], so a
+/// subprocess backend that fetches the source itself is recognisable as the
+/// same client as the pipeline that inspected it.
+pub const DEFAULT_USER_AGENT: &str =
+    concat!("thumbrella/", env!("CARGO_PKG_VERSION_MAJOR"), ".", env!("CARGO_PKG_VERSION_MINOR"));
+
 /// Shared server-wide configuration.  One instance per process, referenced by
 /// every concurrent cook via `Arc<Runtime>`.
 ///
@@ -224,11 +232,7 @@ impl Runtime {
             handshake,
             allow_local,
             shortcut_limits: ShortcutLimits::TIER1,
-            user_agent: format!(
-                "thumbrella/{}.{}",
-                env!("CARGO_PKG_VERSION_MAJOR"),
-                env!("CARGO_PKG_VERSION_MINOR"),
-            ),
+            user_agent: DEFAULT_USER_AGENT.to_string(),
             url_failures: UrlFailureCache::new(failure_ttl),
             origin_backoff: OriginBackoffCache::new(backoff_ceiling),
             backoff_default,
@@ -1736,6 +1740,9 @@ impl<S: HttpStream + Send + 'static> crate::renderer::RenderCook for ThumbCook<S
     }
     fn content_length(&self) -> Option<u64> {
         self.http_len()
+    }
+    fn user_agent(&self) -> &str {
+        &self.runtime.user_agent
     }
     fn take_reader(&mut self) -> Option<Box<dyn crate::http_buf::ReadSeek + Send>> {
         self.http_take_reader()
