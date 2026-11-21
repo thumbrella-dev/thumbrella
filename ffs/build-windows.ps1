@@ -7,7 +7,7 @@
 # On success, writes VCPKG_ROOT to .cargo/ffs.toml so cargo picks it up.
 #
 # Safe to re-run: the vcpkg working tree is reset to the pinned commit before
-# the port patches are applied, so editing ffs/ports/ffmpeg/*.patch does not
+# the port patches are applied, so editing a patch under ffs/ports/ does not
 # leave the tree in a state where patching fails.
 
 param(
@@ -62,9 +62,12 @@ try {
     Pop-Location
 }
 
-# ---- Apply our patches to the vcpkg port ----
+# ---- Apply our patches to the vcpkg ports ----
+# One directory per port the build has to correct (ports/ffmpeg for the
+# selective build, ports/dav1d for the MSVC preprocessor fix).  The tree was
+# reset to the pinned commit above, so re-runs are safe.
 Write-Host "==> Applying port patches ..."
-foreach ($patch in Get-ChildItem (Join-Path $ScriptDir "ports/ffmpeg/*.patch")) {
+foreach ($patch in Get-ChildItem -Path (Join-Path $ScriptDir "ports") -Filter "*.patch" -Recurse) {
     Write-Host "  Applying $($patch.Name)"
     git -C $vcpkgDir apply --check $patch.FullName
     if ($LASTEXITCODE -ne 0) {

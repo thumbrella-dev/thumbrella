@@ -166,7 +166,7 @@ jobs:
           path: |
             ffs/vcpkg/
             .cargo/ffs.toml
-          key: ffmpeg-windows-v1-${{ hashFiles('ffs/build-windows.ps1', 'ffs/ports/ffmpeg/*.patch', 'ffs/triplets/*.cmake') }}
+          key: ffmpeg-windows-v1-${{ hashFiles('ffs/build-windows.ps1', 'ffs/ports/**/*.patch', 'ffs/triplets/*.cmake') }}
 
       - name: Build static FFmpeg (vcpkg)
         if: steps.cache-ffmpeg-windows.outputs.cache-hit != 'true'
