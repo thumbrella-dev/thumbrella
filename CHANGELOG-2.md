@@ -2,6 +2,11 @@
 
 ## Development
 
+
+## 2.4.8 - 2026/11/21
+
+More tier2 image formats and direct ffmpeg http access
+
 - Promote more formats to native tier2; flv, vp6, hdr, and others
 - Fix streaming with internal HttpBuffer
 - External Ffmpeg streams larger media directly over http
