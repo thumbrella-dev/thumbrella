@@ -3,6 +3,11 @@
 ## Development
 
 
+
+## 2.4.9 - 2026/11/21
+
+Cross platform fixes for build actions
+
 ## 2.4.8 - 2026/11/21
 
 More tier2 image formats and direct ffmpeg http access
