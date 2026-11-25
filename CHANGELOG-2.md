@@ -2,6 +2,11 @@
 
 ## Development
 
+
+## 2.5.0 - 2026/11/25
+
+Support for ttf and odt fonts
+
 - Font thumbnails
 
 ## 2.4.9 - 2026/11/21
