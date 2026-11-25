@@ -63,7 +63,7 @@ pub enum FileKind {
     Video,
     /// Audio only.
     Audio,
-    /// Vector graphics (SVG, AI, EPS, …).
+    /// Vector graphics and fonts (SVG, TTF, OTF, …).
     Vector,
     /// Rich text and media document (PDF, DOCX, PPTX, ODT, …).
     Document,

@@ -74,12 +74,13 @@ The server is organized into three tiers of increasing capability:
 - `tier1/` — Core data structures and basic format handling. Compiles to WASM
   for Cloudflare Workers deployment. Handles cache, routing, and light decode
   work.
-- `tier2/` — Adds formats with native dependencies: video, audio
-  HDR images, SVG rendering, and camera raw formats. Links a minimal
-  static FFmpeg with no external dependencies.
+- `tier2/` — Adds formats with native dependencies: video, audio HDR images, SVG
+  and TTF/OTF font rendering, and camera raw formats. Links a minimal static
+  FFmpeg with no external dependencies. Font thumbnails render an artistic "Tt".
 - `tier3/` — The fully functional server. Adds subprocess-based renderers for 3D
-  geometry (F3D), USDZ (Blender), office document formats (libreoffice, poppler), 
-  and others. Available processes are probed at startup and used as found.
+  geometry (F3D), USDZ (Blender), office document formats (libreoffice,
+  poppler), and others. Available processes are probed at startup and used as
+  found.
 
 The [developer documentation](https://thumbrella.dev/docs/development/)
 has more details on the architecture, contribution guidelines, and more.

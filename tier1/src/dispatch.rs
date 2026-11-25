@@ -309,8 +309,10 @@ pub enum Handler {
     Libav,
     /// `jxl-oxide`, pure-Rust JPEG XL decoder.
     JxlOxide,
-    /// `resvg`, pure-Rust SVG rasteriser.
+    /// `resvg`, pure-Rust SVG and font rasteriser.
     Resvg,
+    /// Font specimen rendered via `resvg`.
+    Font,
     /// Embedded JPEG preview extracted from a TIFF-container camera raw.
     RawPreview,
     /// `image` crate extras (icons, PCX, QOI-era formats the main build lacks).
@@ -345,6 +347,7 @@ impl Handler {
             Handler::Libav => "libav",
             Handler::JxlOxide => "jxl_oxide",
             Handler::Resvg => "resvg",
+            Handler::Font => "resvg",
             Handler::RawPreview => "raw_preview",
             Handler::ImageExtras => "image_extras",
             Handler::Dds => "dds",
@@ -430,6 +433,18 @@ pub fn format_manifest() -> &'static [FormatEntry] {&[
                 kind: FileKind::Image,  tier: 2, handlers: &[ImageCrate], shortcut: false},    
     FormatEntry {extension: "svg", label: "Scalable Vector",
                 kind: FileKind::Vector, tier: 2, handlers: &[Resvg], shortcut: false},
+    FormatEntry {extension: "ttf", label: "TrueType font",
+                kind: FileKind::Vector, tier: 2, handlers: &[Font], shortcut: false},
+    FormatEntry {extension: "otf", label: "OpenType font",
+                kind: FileKind::Vector, tier: 2, handlers: &[Font], shortcut: false},
+    FormatEntry {extension: "ttc", label: "TrueType font collection",
+                kind: FileKind::Vector, tier: 2, handlers: &[Font], shortcut: false},
+    FormatEntry {extension: "otc", label: "OpenType font collection",
+                kind: FileKind::Vector, tier: 2, handlers: &[Font], shortcut: false},
+    //  woff/woff2 are recognised during inspect (kind = Vector) but have no
+    //  specimen renderer yet, so they are deliberately absent from this
+    //  manifest: they route by kind (tier 2) and fall through to the vector
+    //  placeholder once no tier claims them.
     FormatEntry {extension: "jxl", label: "JPEG XL",
                 kind: FileKind::Image,  tier: 2, handlers: &[JxlOxide], shortcut: false},
     FormatEntry {extension: "exr", label: "OpenEXR",

@@ -2,7 +2,7 @@
 
 ## Development
 
-
+- Font thumbnails
 
 ## 2.4.9 - 2026/11/21
 

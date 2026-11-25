@@ -139,6 +139,8 @@ impl InProcessRenderer for Tier3Renderer {
                 Some(FileKind::Document) => render_document_tier3(cook, &ext).await,
                 Some(FileKind::Vector) if matches!(ext.as_str(), "odg" | "emf" | "wmf") =>
                     render_document_tier3(cook, &ext).await,
+                Some(FileKind::Vector) if tier1::dispatch::handles(&ext, 2, tier1::dispatch::Handler::Font) =>
+                    self.tier2.render(cook).await,
                 Some(FileKind::Geometry) => render_geometry_tier3(cook, &ext).await,
                 Some(FileKind::Image) if matches!(ext.as_str(), "jpeg" | "jpg") => {
                     if is_arithmetic_jpeg_peek(cook) {

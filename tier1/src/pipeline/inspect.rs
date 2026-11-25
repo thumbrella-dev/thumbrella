@@ -99,6 +99,17 @@ fn sniff(bytes: &[u8], url: &str, content_type: Option<&str>) -> (FileKind, Stri
     if bytes.starts_with(b"DDS ") {
         return (FileKind::Image, "image/vnd-ms.dds".into(), "dds".into());
     }
+    if bytes.starts_with(b"wOFF") || bytes.starts_with(b"wOF2") {
+        let ext = if bytes.starts_with(b"wOFF") { "woff" } else { "woff2" };
+        // Web-font containers are vectors like ttf/otf.  No tier renders them
+        // yet, so the cook serves the vector placeholder rather than the
+        // generic binary one.
+        return (FileKind::Vector, format!("font/{ext}"), ext.into());
+    }
+    if bytes.starts_with(b"ttcf") {
+        let ext = if url_ext.as_deref() == Some("otc") { "otc" } else { "ttc" };
+        return (FileKind::Vector, ext_to_mime(ext).into(), ext.into());
+    }
     if bytes.starts_with(b"BLENDER")
         || ((bytes.starts_with(b"\x1f\x8b") || super::blend_preview::is_zstd(bytes))
             && content_type.is_some_and(|ct| {
@@ -151,6 +162,14 @@ fn sniff(bytes: &[u8], url: &str, content_type: Option<&str>) -> (FileKind, Stri
     if let Some(t) = infer::get(bytes) {
         let infer_ext = canonical_extension(t.extension());
         let mut infer_kind = infer_matcher_to_kind(t.matcher_type());
+        if t.matcher_type() == infer::MatcherType::Font {
+            if dispatch::handles(&infer_ext, 2, dispatch::Handler::Font) {
+                return (FileKind::Vector, ext_to_mime(&infer_ext).into(), infer_ext);
+            }
+            // Font containers with no specimen renderer (woff/woff2) are still
+            // vectors - they get the vector placeholder, not "binary".
+            return (FileKind::Vector, t.mime_type().into(), infer_ext);
+        }
         if matches!(infer_ext.as_str(), "emf" | "wmf") {
             infer_kind = FileKind::Vector;
         }
@@ -244,6 +263,43 @@ fn sniff(bytes: &[u8], url: &str, content_type: Option<&str>) -> (FileKind, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fonts_are_detected_and_routed_without_trusting_misleading_extensions() {
+        for (bytes, url, mime, ext) in [
+            (b"\0\x01\0\0\0".as_slice(), "https://example.com/font", None, "ttf"),
+            (b"OTTO\0".as_slice(), "https://example.com/font", None, "otf"),
+            (b"ttcf\0".as_slice(), "https://example.com/font", None, "ttc"),
+            (b"ttcf\0".as_slice(), "https://example.com/font.otc", None, "otc"),
+            (b"unknown".as_slice(), "https://example.com/font.ttf", None, "ttf"),
+            (b"unknown".as_slice(), "https://example.com/font", Some("font/otf"), "otf"),
+        ] {
+            let (kind, detected_mime, detected) = sniff(bytes, url, mime);
+            assert_eq!((kind, detected.as_str()), (FileKind::Vector, ext));
+            assert_eq!(detected_mime, ext_to_mime(ext));
+            assert_eq!(dispatch::route(kind, Some(&detected)).tier, 2);
+            assert!(dispatch::handles(&detected, 2, dispatch::Handler::Font));
+        }
+        // Web-font containers are vectors too, but nothing renders them yet:
+        // they route to tier 2 by kind and no handler claims them, so the cook
+        // serves the vector placeholder.
+        for (bytes, ext) in [
+            (b"wOFF\0\x01\0\0".as_slice(), "woff"),
+            (b"wOF2\0\x01\0\0".as_slice(), "woff2"),
+            (b"wOFFOTTO".as_slice(), "woff"),
+            (b"wOF2OTTO".as_slice(), "woff2"),
+        ] {
+            let (kind, mime, extension) = sniff(bytes, "https://example.com/font.ttf", None);
+            assert_eq!((kind, extension.as_str()), (FileKind::Vector, ext));
+            assert_eq!(mime, format!("font/{ext}"));
+            assert_eq!(dispatch::route(kind, Some(&extension)).tier, 2);
+            assert!(!dispatch::handles(&extension, 2, dispatch::Handler::Font));
+        }
+        assert_eq!(
+            sniff(b"\x89PNG\r\n\x1a\n", "https://example.com/font.ttf", None).0,
+            FileKind::Image
+        );
+    }
 
     #[test]
     fn odg_is_a_vector_by_signature_extension_or_mime() {
@@ -895,9 +951,10 @@ fn infer_matcher_to_kind(mt: infer::MatcherType) -> FileKind {
         infer::MatcherType::Doc => FileKind::Document,
         infer::MatcherType::Text => FileKind::Text,
         infer::MatcherType::Book => FileKind::Document,
-        infer::MatcherType::App | infer::MatcherType::Font | infer::MatcherType::Custom => {
-            FileKind::Binary
-        }
+        // Font containers are vectors; the sniff branch narrows the ones with
+        // no renderer (woff/woff2) to the same kind as ttf/otf.
+        infer::MatcherType::Font => FileKind::Vector,
+        infer::MatcherType::App | infer::MatcherType::Custom => FileKind::Binary,
     }
 }
 
@@ -966,6 +1023,8 @@ fn ext_to_kind(ext: &str) -> FileKind {
         // Camera-raw formats (TIFF-based containers).
         "dng" | "cr2" | "nef" | "arw" | "orf" | "rw2" | "pef" | "srw" | "3fr" | "mef" | "rwl"
         | "raf" | "fff" | "iiq" | "raw" => FileKind::Image,
+        // Web fonts: vector containers with no renderer yet.
+        "woff" | "woff2" => FileKind::Vector,
         "svg" | "emf" | "wmf" | "odg" => FileKind::Vector,
         "mp4" | "mov" | "mkv" | "avi" | "webm" | "mpeg" | "ogv" | "flv" | "ts" | "3gp" | "wmv"
         | "m2ts" | "mxf" | "av1" => FileKind::Video,
@@ -992,6 +1051,11 @@ fn ext_to_kind(ext: &str) -> FileKind {
 /// signal and we have no URL extension.
 fn mime_to_extension(mime: &str) -> &'static str {
     match mime {
+        "font/ttf" | "application/x-font-ttf" => "ttf",
+        "font/otf" | "application/x-font-otf" => "otf",
+        "font/collection" => "ttc",
+        "font/woff" | "application/font-woff" => "woff",
+        "font/woff2" => "woff2",
         "image/jpeg" => "jpeg",
         "image/png" => "png",
         "image/gif" => "gif",
@@ -1130,6 +1194,11 @@ fn ext_to_mime(ext: &str) -> &'static str {
         "iiq" => "image/x-phaseone-iiq",
         "raw" => "image/x-raw",
         "svg" => "image/svg+xml",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
+        "ttc" | "otc" => "font/collection",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
         "emf" => "image/emf",
         "wmf" => "image/wmf",
         "apng" => "image/apng",

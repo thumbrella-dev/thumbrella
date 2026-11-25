@@ -428,9 +428,263 @@ fn render_svg(reader: &mut dyn ReadSeek) -> Option<RenderOutput> {
     })
 }
 
+/// Render the first face's shaped "Tt" on a transparent canonical-size canvas.
+fn render_font(reader: &mut dyn ReadSeek) -> Result<RenderOutput, String> {
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).map_err(|e| format!("font read failed: {e}"))?;
+
+    let mut options = resvg::usvg::Options::default();
+    let ids = options.fontdb_mut().load_font_source(
+        resvg::usvg::fontdb::Source::Binary(Arc::new(bytes)),
+    );
+    let id = *ids.first().ok_or("font has no readable faces")?;
+    options.font_resolver.select_font = Box::new(move |_, _| Some(id));
+    options.font_resolver.select_fallback = Box::new(|_, _, _| None);
+
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="2000" height="2000"><text id="sample" x="0" y="1000" font-size="1000" fill="#201c27">Tt</text></svg>"##;
+    let tree = resvg::usvg::Tree::from_str(svg, &options)
+        .map_err(|e| format!("font specimen layout failed: {e}"))?;
+    let Some(resvg::usvg::Node::Text(text)) = tree.node_by_id("sample") else {
+        return Err("font cannot render the Tt specimen".into());
+    };
+    let mut glyphs = text.layouted().iter().flat_map(|span| &span.positioned_glyphs).peekable();
+    if glyphs.peek().is_none() || glyphs.any(|glyph| glyph.id.0 == 0) {
+        return Err("font is missing a glyph for the Tt specimen".into());
+    }
+
+    // Measure the shaped outlines before rasterizing, without letting flourishes
+    // outside the logical font box shrink the main letterforms.
+    let ink = text.flattened().bounding_box().ok_or("font specimen has no visible glyphs")?;
+    let bounds = ink.intersect(&text.abs_bounding_box())
+        .ok_or("font specimen has no glyphs within its font metrics")?;
+    let config = ThumbnailConfig::CANONICAL;
+    let width = config.exact_width;
+    let height = config.exact_height;
+    let scale = (width as f32 * 0.90 / bounds.width())
+        .min(height as f32 * 0.84 / bounds.height());
+    if !scale.is_finite() || scale <= 0.0 {
+        return Err("font has invalid specimen metrics".into());
+    }
+    let x = (width as f32 - bounds.width() * scale) / 2.0 - bounds.x() * scale;
+    let y = (height as f32 - bounds.height() * scale) / 2.0 - bounds.y() * scale;
+    let transform = resvg::tiny_skia::Transform::from_row(scale, 0.0, 0.0, scale, x, y);
+    let mut glyph_image = resvg::tiny_skia::Pixmap::new(width, height)
+        .ok_or("could not allocate font specimen")?;
+    resvg::render(&tree, transform, &mut glyph_image.as_mut());
+    let baseline = y + 1000.0 * scale;
+    let top = (0..height).find(|row| {
+        glyph_image.pixels()[(*row * width) as usize..((*row + 1) * width) as usize]
+            .iter().any(|pixel| pixel.alpha() > 0)
+    }).ok_or("font specimen has no visible glyphs on the canvas")? as f32;
+    let mut pixmap = render_font_shadow(&glyph_image, baseline, top)?;
+
+    if let Some(rect) = resvg::tiny_skia::Rect::from_xywh(0.0, baseline - 1.0, width as f32, 2.0) {
+        let mut paint = resvg::tiny_skia::Paint::default();
+        paint.set_color_rgba8(105, 70, 145, 120);
+        pixmap.fill_rect(rect, &paint, resvg::tiny_skia::Transform::identity(), None);
+    }
+    for (row, pixels) in glyph_image.pixels_mut().chunks_mut(width as usize).enumerate() {
+        let t = if baseline > top {
+            ((row as f32 - top) / (baseline - top)).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let blend = |start: f32, end: f32| (start + (end - start) * t).round() as u8;
+        for pixel in pixels {
+            *pixel = resvg::tiny_skia::ColorU8::from_rgba(
+                blend(86.0, 15.0), blend(59.0, 14.0), blend(105.0, 20.0), pixel.alpha(),
+            ).premultiply();
+        }
+    }
+    pixmap.draw_pixmap(0, 0, glyph_image.as_ref(), &Default::default(), Default::default(), None);
+
+    let mut marker_paint = resvg::tiny_skia::Paint::default();
+    marker_paint.set_color_rgba8(57, 34, 72, 245);
+    for glyph in text.layouted().iter().flat_map(|span| &span.positioned_glyphs) {
+        let origin = x + glyph.transform().tx * scale;
+        if let Some(rect) = resvg::tiny_skia::Rect::from_xywh(origin - 1.0, baseline - 6.5, 2.0, 13.0) {
+            pixmap.fill_rect(rect, &marker_paint, Default::default(), None);
+        }
+    }
+
+    // tiny-skia stores premultiplied colours; delivery composites straight RGBA.
+    let rgba = pixmap.pixels().iter().flat_map(|pixel| {
+        let c = pixel.demultiply();
+        [c.red(), c.green(), c.blue(), c.alpha()]
+    }).collect();
+    let image = image::RgbaImage::from_raw(width, height, rgba)
+        .ok_or("invalid font specimen buffer")?;
+    Ok(RenderOutput {
+        image: DynamicImage::ImageRgba8(image),
+        renderer: Some("resvg".into()),
+        codec: None,
+        video_seek_secs: None,
+        properties: None,
+    })
+}
+
+fn render_font_shadow(
+    glyphs: &resvg::tiny_skia::Pixmap,
+    baseline: f32,
+    top: f32,
+) -> Result<resvg::tiny_skia::Pixmap, String> {
+    use resvg::tiny_skia::{ColorU8, FilterQuality, Pixmap, PixmapPaint, Transform};
+
+    let (width, height) = (glyphs.width(), glyphs.height());
+    let mut projection = Pixmap::new(width, height).ok_or("could not allocate font shadow")?;
+    if baseline <= top {
+        return Ok(projection);
+    }
+    let mut source = glyphs.clone();
+    for (row, pixels) in source.pixels_mut().chunks_mut(width as usize).enumerate() {
+        if row as f32 >= baseline.round() {
+            pixels.fill(resvg::tiny_skia::PremultipliedColorU8::TRANSPARENT);
+        }
+    }
+    let shadow_height = height as f32 * 0.4;
+    let depth = shadow_height / (baseline - top);
+    let skew = 0.6;
+    let transform = Transform::from_row(1.0, 0.0, -skew, depth, skew * baseline, (1.0 - depth) * baseline);
+    let paint = PixmapPaint { quality: FilterQuality::Bicubic, ..Default::default() };
+    projection.draw_pixmap(0, 0, source.as_ref(), &paint, transform, None);
+
+    let alpha = image::GrayImage::from_fn(width, height, |x, y| {
+        image::Luma([projection.pixels()[(y * width + x) as usize].alpha()])
+    });
+    let blurred = imageops::blur(&alpha, 0.8);
+    for (row, pixels) in projection.pixels_mut().chunks_mut(width as usize).enumerate() {
+        let distance = (baseline - row as f32).max(0.0);
+        let opacity = (0.30 - 0.16 * distance / shadow_height).max(0.0);
+        for (column, pixel) in pixels.iter_mut().enumerate() {
+            let alpha = (blurred.get_pixel(column as u32, row as u32).0[0] as f32 * opacity).round() as u8;
+            *pixel = ColorU8::from_rgba(63, 42, 78, alpha).premultiply();
+        }
+    }
+    Ok(projection)
+}
+
 #[cfg(test)]
 mod property_tests {
     use super::*;
+
+    #[test]
+    fn font_specimen_uses_canonical_transparent_canvas_and_source_font() {
+        let data = include_bytes!("../test-data/Tuffy.ttf");
+        let output = render_font(&mut Cursor::new(data)).unwrap();
+        let image = output.image.to_rgba8();
+        let config = ThumbnailConfig::CANONICAL;
+        assert_eq!(image.dimensions(), (config.exact_width, config.exact_height));
+        assert_eq!(output.renderer.as_deref(), Some("resvg"));
+        assert!(output.properties.is_none());
+        assert_eq!(image.get_pixel(0, 0).0[3], 0);
+        assert!(image.pixels().filter(|pixel| pixel.0[3] > 128).count() > 1000);
+        assert!(image.pixels().any(|pixel| {
+            let [r, g, b, a] = pixel.0;
+            a > 0 && a < 255 && r > 20 && g > 15 && b > r
+        }), "antialiased pixels must use straight-alpha text colour");
+    }
+
+    #[test]
+    fn font_specimen_draws_only_the_baseline_and_vertical_markers() {
+        let output = render_font(&mut Cursor::new(include_bytes!("../test-data/Tuffy.ttf"))).unwrap();
+        let image = output.image.to_rgba8();
+        let mut runs = Vec::new();
+        let mut total = 0u32;
+        for y in 0..image.height() {
+            let alpha = image.get_pixel(0, y).0[3] as u32;
+            if alpha > 0 {
+                total += alpha;
+            } else if total > 0 {
+                runs.push(total);
+                total = 0;
+            }
+        }
+        if total > 0 {
+            runs.push(total);
+        }
+        runs.sort_unstable();
+        assert_eq!(runs.len(), 1);
+        assert!(runs[0] >= 220, "baseline should cover approximately two pixels");
+
+        let baseline = (0..image.height()).max_by_key(|&y| image.get_pixel(0, y).0[3]).unwrap();
+        let is_marker = |pixel: image::Rgba<u8>| {
+            let [r, g, b, a] = pixel.0;
+            (50..=65).contains(&r) && (30..=45).contains(&g) && (65..=85).contains(&b) && a >= 200
+        };
+        let marker_x = (0..50).find(|&x| is_marker(*image.get_pixel(x, baseline - 4)))
+            .expect("first glyph should have a vertical baseline marker");
+        assert!(is_marker(*image.get_pixel(marker_x, baseline + 4)));
+        assert!(!is_marker(*image.get_pixel(marker_x + 5, baseline)), "marker must not have a horizontal stroke");
+    }
+
+    #[test]
+    fn font_shadow_is_projected_and_fades_away_from_baseline() {
+        use resvg::tiny_skia::{Pixmap, Rect};
+
+        let mut glyphs = Pixmap::new(250, 200).unwrap();
+        let mut paint = resvg::tiny_skia::Paint::default();
+        paint.set_color_rgba8(0, 0, 0, 255);
+        glyphs.fill_rect(
+            Rect::from_xywh(20.0, 20.0, 50.0, 160.0).unwrap(),
+            &paint,
+            Default::default(), None,
+        );
+        let shadow = render_font_shadow(&glyphs, 180.0, 20.0).unwrap();
+        let alpha = |x: usize, y: usize| shadow.pixels()[y * 250 + x].alpha();
+        assert_eq!(alpha(130, 90), 0);
+        let far = alpha(130, 110);
+        let near = alpha(50, 170);
+        assert!((25..=50).contains(&far), "faint shadow near its 40% height: {far}");
+        assert!(near > far && near < 90, "shadow should be softer at its base: {near}");
+    }
+
+    #[test]
+    fn font_shadow_does_not_project_descenders() {
+        use resvg::tiny_skia::{Pixmap, Rect};
+
+        let mut glyphs = Pixmap::new(250, 200).unwrap();
+        let mut paint = resvg::tiny_skia::Paint::default();
+        paint.set_color_rgba8(0, 0, 0, 255);
+        glyphs.fill_rect(
+            Rect::from_xywh(20.0, 181.0, 50.0, 10.0).unwrap(),
+            &paint,
+            Default::default(), None,
+        );
+        let shadow = render_font_shadow(&glyphs, 180.0, 20.0).unwrap();
+        assert!(shadow.pixels().iter().all(|pixel| pixel.alpha() == 0));
+    }
+
+    #[test]
+    fn font_specimen_rejects_invalid_input() {
+        assert!(render_font(&mut Cursor::new(b"not a font")).is_err());
+    }
+
+    #[test]
+    fn font_collection_renders_its_first_face() {
+        let mut font = include_bytes!("../test-data/Tuffy.ttf").to_vec();
+        let tables = u16::from_be_bytes([font[4], font[5]]) as usize;
+        for i in 0..tables {
+            let offset = 12 + i * 16 + 8;
+            let original = u32::from_be_bytes(font[offset..offset + 4].try_into().unwrap());
+            font[offset..offset + 4].copy_from_slice(&(original + 16).to_be_bytes());
+        }
+        let mut collection = b"ttcf\0\x01\0\0\0\0\0\x01\0\0\0\x10".to_vec();
+        collection.extend_from_slice(&font);
+        let actual = render_font(&mut Cursor::new(collection)).unwrap().image.to_rgba8();
+        let expected = render_font(&mut Cursor::new(include_bytes!("../test-data/Tuffy.ttf")))
+            .unwrap().image.to_rgba8();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn font_specimen_rejects_missing_character_map() {
+        let mut font = include_bytes!("../test-data/Tuffy.ttf").to_vec();
+        let tables = u16::from_be_bytes([font[4], font[5]]) as usize;
+        let cmap = (0..tables).map(|i| 12 + i * 16)
+            .find(|&offset| &font[offset..offset + 4] == b"cmap").unwrap();
+        font[cmap..cmap + 4].copy_from_slice(b"none");
+        assert!(render_font(&mut Cursor::new(font)).is_err());
+    }
 
     #[test]
     fn svg_reports_dimensions_without_raster_depth() {
@@ -840,8 +1094,17 @@ async fn render_image_fallback(
     apply_result(cook, result)
 }
 
-/// Render a vector image (SVG) via resvg.
+/// Render a vector image (SVG) or font specimen via resvg.
 async fn render_vector(cook: &mut dyn RenderCook, ext: &str, _content_length: Option<u64>) -> bool {
+    // Vector containers this tier has no renderer for - notably woff/woff2,
+    // which are vectors but have no specimen path - are declined before the
+    // reader is consumed, so the cook serves the vector placeholder and a
+    // higher tier still sees an intact connection.
+    if !is_svg_format(ext) && !tier1::dispatch::handles(ext, 2, Handler::Font) {
+        tbr_debug!("[tier2] no vector renderer for {ext} - deferring to higher tier");
+        return false;
+    }
+
     let reader = match cook.take_reader() {
         Some(r) => r,
         None => {
@@ -852,6 +1115,19 @@ async fn render_vector(cook: &mut dyn RenderCook, ext: &str, _content_length: Op
 
     let ext_owned = ext.to_string();
     tbr_debug!("[tier2] render_vector: streaming reader  ext={ext}");
+
+    if tier1::dispatch::handles(&ext_owned, 2, Handler::Font) {
+        let result = tokio::task::spawn_blocking(move || {
+            let mut reader = reader;
+            render_font(&mut *reader)
+        }).await;
+        match result {
+            Ok(Ok(output)) => apply_render_output(cook, output),
+            Ok(Err(error)) => cook.fail_cook(&format!("font render failed: {error}")),
+            Err(error) => cook.fail_cook(&format!("font render task failed: {error}")),
+        }
+        return true;
+    }
 
     let result = if is_svg_format(&ext_owned) {
         tokio::task::spawn_blocking(move || {
