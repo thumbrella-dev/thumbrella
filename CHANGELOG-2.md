@@ -3,6 +3,10 @@
 ## Development
 
 
+## 2.5.1 - 2026/11/25
+
+Update for linux build action
+
 ## 2.5.0 - 2026/11/25
 
 Support for ttf and odt fonts
